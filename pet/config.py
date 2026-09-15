@@ -19,6 +19,7 @@ from .report_gates import (
     REPORT_GATE_DEFAULTS,
     clean_report_gates,
 )
+from .chime_clock import clean_chime_data, default_chime_data
 
 
 DEFAULT_ANIMATION_GAP_SECONDS = 0.0
@@ -687,6 +688,7 @@ class Config:
             "system_notifications_enabled": True,  # 对话完成/失败/需要授权时弹桌面系统通知
             "todo_reminder_enabled": True,   # 待办提醒总开关
             "todo_reminder_lead_minutes": 5,  # 待办提前提醒分钟数（0~60，0=不提前）
+            "chime": default_chime_data(),  # 整点报时配置
             **DEFAULT_COLLISION_SETTINGS,
             "media_prewarm": "balanced",  # full / balanced / minimal 素材首帧预热力度
             # 批10-A3：默认 32→8MB。预测式预热（批10-A1）落地后，首帧 LRU 只需
@@ -857,6 +859,7 @@ class Config:
             "chat_follow_pet",
             "system_notifications_enabled",
             "todo_reminder_enabled", "todo_reminder_lead_minutes",
+            "chime",
             "character_aliases",
             "character_profiles",
             "chat_always_on_top",
@@ -1122,6 +1125,9 @@ class Config:
         self.data["dynamic_island"] = _clean_dynamic_island_data(
             self.data.get("dynamic_island")
         )
+        self.data["chime"] = clean_chime_data(
+            self.data.get("chime")
+        )
         for prefix in ("chat_background", "modern_chat_background"):
             opacity_key = f"{prefix}_opacity"
             fill_key = f"{prefix}_fill"
@@ -1276,6 +1282,7 @@ class Config:
             "ffmpeg_recycle_minutes",
             "spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island",
             "todo_reminder_enabled", "todo_reminder_lead_minutes",
+            "chime",
             "character_profiles", "chat_always_on_top", "dynamic_island",
         }:
             self._normalize_pet_settings()

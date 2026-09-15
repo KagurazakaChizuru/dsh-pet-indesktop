@@ -13,3 +13,4 @@ tzdata>=2024.1
 # 能按 requirements 复现静态检查（FINAL_REVIEW_GPT.md 提交卫生项，批10 补）。
 pytest>=8
 ruff>=0.5
+edge-tts>=6.1.10

@@ -88,6 +88,7 @@ from .menu_layout import (
 )
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 
+from .settings_chime import apply_chime_config, build_chime_page
 from .settings_widgets import (
     _system_font_families,
     BROWSER_CONTROL_SPEC,
@@ -396,6 +397,10 @@ class ModernSettingsDialog(QDialog):
             ], general_content))
         general_layout.addStretch(1)
         self._add_page("常规", "settings", self._page_shell("常规", general_content))
+
+        # 整点报时设置页
+        chime_content = build_chime_page(self)
+        self._add_page("整点报时", "play", self._page_shell("整点报时", chime_content))
 
         island_content = QWidget()
         island_layout = QVBoxLayout(island_content)
@@ -1839,6 +1844,7 @@ class ModernSettingsDialog(QDialog):
             self.config.set("proactive_screen", pro_data)
         self.config.set("autostart_wanted", self.autostart_check.isChecked())
         self.config.set("harness_autostart", self.harness_autostart_check.isChecked())
+        apply_chime_config(self)
         # 批 C：落种占位语义——仅当用户在该子肥鱼自己的设置界面保存过才置真；
         # 位置自动保存等一切后台写盘不得置位。主配置（slot 0/主肥鱼）保存不置位。
         if self.config.instance_id:

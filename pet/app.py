@@ -54,6 +54,7 @@ from .session_watcher import install_session_watcher
 from .collision_ipc import CollisionIpcSession
 from .decode_fanout import DecodeFanoutHub
 from .todo_reminder import TodoReminderService
+from .chime_service import ChimeService
 from .dsh_state import DshStateTracker
 from .persona_phrases import PhrasePicker
 
@@ -788,6 +789,7 @@ class PetInstance:
         self.shell._apply_balance_timer()
         # Phase 1/2：设置保存后按配置同步可选服务（todo 懒启停）与动画预热
         self.shell._sync_todo_service()
+        self.shell._sync_chime_service()
         self._sync_animation_prewarm()
         self._refresh_chat_windows()
         _mac_set_dock_icon_visible(bool(self.config.get("show_dock_icon", True)))
@@ -982,6 +984,12 @@ class AppShell:
         self.todo_panel = None
         if self._todo_wanted():
             self._ensure_todo_service()
+        # 整点报时：进程级单例，配置关闭时不构造；设置保存后经 _sync_chime_service 启停。
+        self.chime_service = None
+        if self._chime_wanted():
+            # 启动即按配置启停：_sync_chime_service 内部会构造并 start（QTimer 秒级 tick），
+            # 避免只构造不启动导致重启后报时服务不运行。
+            self._sync_chime_service()
         # 批5.2 P1-2/P2-6：进程级 flag 快照——启动期从主窗 config 读一次存
         # _single_process_spawn；窗级逻辑（runtime 标记版本化、日志前缀、
         # 退出分派、spawn 分发）一律读本快照，不读每窗 config。第二窗的
@@ -1092,6 +1100,33 @@ class AppShell:
             # 面板持有 app 引用并动态读取 todo_service；面板还开着时保留对象。
             if getattr(self, "todo_panel", None) is None:
                 self.todo_service = None
+
+    # ------------------------------------------------------------ 功能门控（整点报时）
+    def _chime_wanted(self) -> bool:
+        return bool((self.config.get("chime") or {}).get("enabled", False))
+
+    def _ensure_chime_service(self):
+        """懒创建整点报时服务（仅启用时创建）。"""
+        if getattr(self, "chime_service", None) is None:
+            self.chime_service = ChimeService(self)
+        return self.chime_service
+
+    def _sync_chime_service(self) -> None:
+        """按配置启停整点报时服务；关闭时释放服务对象。"""
+        if self._chime_wanted():
+            service = self._ensure_chime_service()
+            timer = getattr(service, "_timer", None)
+            if timer is not None and callable(getattr(timer, "isActive", None)) and timer.isActive():
+                # 已在运行：设置保存只刷新偏好，不重置 1s tick。
+                service.apply_config()
+            elif callable(getattr(service, "start", None)):
+                service.start()
+        elif getattr(self, "chime_service", None) is not None:
+            try:
+                self.chime_service.stop()
+            except Exception:
+                logging.exception("停止整点报时服务失败")
+            self.chime_service = None
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
