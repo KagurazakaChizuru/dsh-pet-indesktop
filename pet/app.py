@@ -1117,11 +1117,10 @@ class AppShell:
         """按配置启停语音报时服务；关闭时释放服务对象。"""
         if self._chime_wanted():
             service = self._ensure_chime_service()
-            timer = getattr(service, "_timer", None)
-            if timer is not None and callable(getattr(timer, "isActive", None)) and timer.isActive():
+            if service.is_running():
                 # 已在运行：设置保存只刷新配置，不重置 20s tick。
                 service.apply_config()
-            elif callable(getattr(service, "start", None)):
+            else:
                 service.start()
         elif getattr(self, "voice_chime_service", None) is not None:
             try:
@@ -1379,6 +1378,12 @@ class AppShell:
         #（关掉后迟到的 queued 回调提交会被明确拒绝）。
         if self.todo_service is not None:
             self.todo_service.stop()
+        # 语音报时同为进程级懒服务，退出必须一并停：其无主 QTimer 的 timeout
+        # 连接从 Qt C++ 侧强引用住整个对象图（理由同 todo_service，见
+        # _shutdown_live_for_tests 注释）；不停则退出期仍在跑 20s tick，且
+        # 飞行中的合成线程会经信号桥回 GUI 线程回放、触碰正在析构的窗口。
+        if self.voice_chime_service is not None:
+            self.voice_chime_service.stop()
         try:
             self._dsh_state_tracker.stop()
         except Exception:

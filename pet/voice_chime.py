@@ -306,22 +306,23 @@ def chime_slot(now: datetime, cfg: dict) -> str:
     return f"{now.strftime('%Y-%m-%dT%H:%M')}#{cfg.get('schedule', 'hourly')}"
 
 
-def _period_cn(hour_12: int) -> str:
-    return "凌晨" if hour_12 < 5 else "早上" if hour_12 < 9 else "上午" if hour_12 < 12 else ("中午" if hour_12 == 12 else "下午" if hour_12 < 18 else "晚上")
+def _period_cn(hour: int) -> str:
+    """时段前缀；入参是 24 小时制的 hour（0-23），不是 12 小时制。"""
+    return "凌晨" if hour < 5 else "早上" if hour < 9 else "上午" if hour < 12 else ("中午" if hour == 12 else "下午" if hour < 18 else "晚上")
 
 
 def build_chime_text(now: datetime, cfg: dict) -> str:
-    """组装报时文本：中文口播“现在是上午九点整 / 现在九点零五分”。
+    """组装报时文本：中文口播“现在是上午九点整 / 现在上午九点05分”。
 
-    rate/pitch 为 TTS 参数不进入正文；音量同理。
+    分钟用两位数字（TTS 读作「零五分」）；小时走 12 小时制中文
+    （0 点与 12 点都是「十二点」）。rate/pitch 为 TTS 参数、音量在播放侧，
+    都不进入正文。
     """
     hour_12 = now.hour % 12 or 12
     hour_cn = _HOUR_CN[hour_12 % 12]
     period = _period_cn(now.hour)
     if now.minute == 0:
         return f"现在是{period}{hour_cn}点整"
-    if now.minute % 5 == 0:
-        return f"现在{period}{hour_cn}点{now.minute:02d}分"
     return f"现在{period}{hour_cn}点{now.minute:02d}分"
 
 

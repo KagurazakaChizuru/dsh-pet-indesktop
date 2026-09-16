@@ -31,7 +31,6 @@ from .voice_chime import (
     build_chime_sentence,
     cache_key,
     chime_slot,
-    default_chime_config,
     edge_pitch_arg,
     edge_rate_arg,
     next_chime_in_seconds,
@@ -96,6 +95,10 @@ class _AudioBridge:
 
     _Signals 实例本身即 QObject，随服务存活到进程退出；历史遗留的无主
     QObject（_obj）与其 destroy() 从未被调用，删除以免误导生命周期判断。
+
+    信号对象在 GUI 线程创建（_fire 由 GUI 线程调用），PySide6 依其线程亲和
+    把跨线程 emit 排到 GUI 线程执行——已在实机测过：后台 emit、槽在 GUI
+    线程运行（不要把这里改成普通 Python 回调绕开信号）。
     """
 
     def __init__(self) -> None:
@@ -132,11 +135,13 @@ class VoiceChimeService:
         self._app = app
         config = getattr(app, "config", None)
         self._cache_dir = Path(getattr(config, "dir", Path("."))) / "voice_chime_cache"
-        self._cfg: dict = default_chime_config()
+        # 契约形状（enabled/schedule/custom_times/voice/rate/pitch/volume）：
+        # 与 _on_tick/_fire 读取的键一致，勿用带 voice_chime_ 前缀的镜像默认值。
+        self._cfg: dict = normalize_chime_config(None)
         self._last_slot: str | None = None
         self._busy = False
         # monotonic 时间戳：_busy_since 用于合成卡死自愈，_last_prune_at 用于
-        # 缓存清理节流（两者都只做“多久没做过了”的判断，不参与业务语义）。
+        # 缓存清理节流（两者都只做"多久没做过了"的判断，不参与业务语义）。
         self._busy_since = 0.0
         self._last_prune_at = 0.0
         self._synthesis_role = "play"  # play | precache：区分合成完成回调的用途
@@ -147,6 +152,8 @@ class VoiceChimeService:
         self._precache_path: str | None = None
         # 即时合成中的气泡文本：合成完成回调里与语音文本配对展示（二者解耦）
         self._pending_bubble: str | None = None
+        # 停止作废标记：stop()（关闭开关/退出）后，飞行中的合成结果不再回放
+        self._stopped = False
         self._bridge: _AudioBridge | None = None
         self._player = None
         self._audio_out = None
@@ -161,10 +168,22 @@ class VoiceChimeService:
         self._timer.start()
 
     def stop(self) -> None:
+        """停止调度；飞行中的合成结果一并作废（见 _on_synthesized）。"""
+        self._stopped = True
         self._timer.stop()
 
+    def is_running(self) -> bool:
+        """调度 tick 是否在跑（AppShell 的懒启停门控据此决定重启还是只刷配置）。"""
+        return bool(self._timer.isActive())
+
     def apply_config(self) -> None:
-        """重读配置（设置保存、右键开关后调用）。"""
+        """重读配置（设置保存、右键开关后调用）。
+
+        统一走纯逻辑层 normalize_chime_config：清洗/钳制规则只有一处实现，
+        且 config.json 被手改成非法值时回落默认值而不是抛异常（本方法在
+        start()（开机）与「立即报时」路径上执行，抛异常等于语音报时在启动期
+        直接失败）。
+        """
         config = getattr(self._app, "config", None)
         self._cfg = normalize_chime_config(config if config is not None else {})
         # 配置变更后预合成缓存可能失效（音色/语速/台词开关/时间点变化），丢弃。
@@ -327,6 +346,9 @@ class VoiceChimeService:
         self._busy_since = time.monotonic()
         self._synthesis_role = "play"
         self._pending_bubble = bubble
+        # 本次合成有效：清掉上一次 stop() 留下的作废标记，
+        # 否则新起的合成结果会被当成"迟到结果"丢弃。
+        self._stopped = False
         if self._bridge is None:
             self._bridge = _AudioBridge()
             self._bridge.signals.synthesized.connect(self._on_synthesized)
@@ -345,6 +367,11 @@ class VoiceChimeService:
         role = self._synthesis_role
         self._synthesis_role = "play"
         self._busy = False
+        if self._stopped:
+            # stop()（关闭开关 / 应用退出）之后才回来的结果：不再回放/气泡——
+            # 否则「关掉语音报时之后又响一声」，退出路径上还可能触碰正在析构的窗口。
+            logger.info("语音报时已停止，丢弃迟到的合成结果：%s", Path(path).name)
+            return
         if error:
             if role == "precache":
                 # 预合成失败：丢弃占位，到点走即时合成回退。

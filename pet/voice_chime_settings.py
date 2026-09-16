@@ -45,8 +45,11 @@ from .voice_chime import (
     SCHEDULE_KEYS,
     SCHEDULE_LABELS,
     VOICE_OPTIONS,
+    clean_pitch,
+    clean_rate,
     clean_schedule,
     clean_voice,
+    clean_volume,
 )
 
 
@@ -90,22 +93,24 @@ class VoiceChimeSettingsPage(QWidget):
             self.voice_select.addItem(label, value)
         _sync_voice_select(self.voice_select, self.config)
 
+        # 速率/音调/音量一律走纯逻辑层清洗：config.json 被手改成非法值时
+        # 回落默认值，绝不让设置页在构造期抛异常把用户挡在设置界面之外。
         self.rate_spin = BrowserSpinBox(self)
         self.rate_spin.setRange(-100, 100)
         self.rate_spin.setSuffix(" %")
-        self.rate_spin.setValue(int(self.config.get("voice_chime_rate", DEFAULT_RATE)))
+        self.rate_spin.setValue(clean_rate(self.config.get("voice_chime_rate", DEFAULT_RATE)))
         self.rate_spin.setToolTip("语速偏移：0 为正常，正数更快，负数更慢")
 
         self.pitch_spin = BrowserSpinBox(self)
         self.pitch_spin.setRange(-50, 50)
         self.pitch_spin.setSuffix(" Hz")
-        self.pitch_spin.setValue(int(self.config.get("voice_chime_pitch", DEFAULT_PITCH)))
+        self.pitch_spin.setValue(clean_pitch(self.config.get("voice_chime_pitch", DEFAULT_PITCH)))
         self.pitch_spin.setToolTip("音调偏移：0 为正常，正数更尖锐，负数更低沉")
 
         self.volume_spin = BrowserSpinBox(self)
         self.volume_spin.setRange(0, 100)
         self.volume_spin.setSuffix(" %")
-        self.volume_spin.setValue(int(self.config.get("voice_chime_volume", DEFAULT_VOLUME)))
+        self.volume_spin.setValue(clean_volume(self.config.get("voice_chime_volume", DEFAULT_VOLUME)))
 
         self.bubble_check = ToggleSwitch(self)
         self.bubble_check.setChecked(bool(self.config.get("voice_chime_show_bubble", DEFAULT_SHOW_BUBBLE)))
@@ -235,9 +240,9 @@ class VoiceChimeSettingsPage(QWidget):
         self.schedule_select.setCurrentData(clean_schedule(self.config.get("voice_chime_schedule", "hourly")))
         self.custom_edit.setText(str(self.config.get("voice_chime_custom_times", "") or ""))
         _sync_voice_select(self.voice_select, self.config)
-        self.rate_spin.setValue(int(self.config.get("voice_chime_rate", DEFAULT_RATE)))
-        self.pitch_spin.setValue(int(self.config.get("voice_chime_pitch", DEFAULT_PITCH)))
-        self.volume_spin.setValue(int(self.config.get("voice_chime_volume", DEFAULT_VOLUME)))
+        self.rate_spin.setValue(clean_rate(self.config.get("voice_chime_rate", DEFAULT_RATE)))
+        self.pitch_spin.setValue(clean_pitch(self.config.get("voice_chime_pitch", DEFAULT_PITCH)))
+        self.volume_spin.setValue(clean_volume(self.config.get("voice_chime_volume", DEFAULT_VOLUME)))
         self.bubble_check.setChecked(bool(self.config.get("voice_chime_show_bubble", DEFAULT_SHOW_BUBBLE)))
         self.quote_check.setChecked(bool(self.config.get("voice_chime_show_quote", DEFAULT_SHOW_QUOTE)))
         self.custom_zh_edit.setPlainText(str(self.config.get("voice_chime_custom_quotes_zh", "") or ""))
