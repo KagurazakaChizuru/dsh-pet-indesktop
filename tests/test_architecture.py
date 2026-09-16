@@ -97,8 +97,11 @@ WINDOW_PY_LINE_BUDGET = 4478
 # 不为达标压缩行宽/合并语句。
 # 2026-09-08 上调到 2018：批 G——「退出子肥鱼」按钮对子肥鱼禁用（+5）+
 # _on_clear_spawned_pets 加 instance_id 双保险（+5，含注释折行），实测 2018。
+# 2026-09-15 上调到 2270：语音报时设置页接入（页面实例化/SettingRow 收集/
+# _write_config 写回/试听透传回调）与两开关、音色下拉改造，实测 2255；
+# 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
 # 本文件拆分仍是待办，拆分前预算只随实测校准。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2018
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2270
 
 
 
