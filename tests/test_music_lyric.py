@@ -891,10 +891,13 @@ class _FakeBubble:
         self._interactive_active = False
         self._visible = True
         self.moved = []
-        self._pos = type("P", (), {"x": lambda s: 0, "y": lambda s: 0})()
+        self._pos = (10, 20)
 
     def isVisible(self):
         return self._visible
+
+    def pos(self):
+        return self._pos
 
     def move(self, pos):
         self.moved.append(pos)
@@ -904,6 +907,67 @@ class _WinWithBubble(_FakeWin):
     def __init__(self):
         super().__init__()
         self._speech_bubble = _FakeBubble()
+
+    # 桌宠矩形：_pin/_remember 用它判断"桌宠有没有挪过窝"。
+    def visible_content_rect(self):
+        return self._rect
+
+
+class _MovableWin(_WinWithBubble):
+    """可移动桌宠：矩形能改，气泡会记录 move() 调用。"""
+
+    def __init__(self):
+        super().__init__()
+        self._rect = (0, 0, 100, 100)
+
+
+# ------------------------------------------- 气泡跟随桌宠（承接上游 #134）
+# 实机 bug：开着歌词拖桌宠，气泡被钉回旧坐标、停在原地不动。
+
+
+def test_bubble_pinned_when_pet_has_not_moved():
+    """桌宠没动：粘滞回位照旧（长句短句切换时不要乱跳）。"""
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _MovableWin()
+    ctrl = MusicLyricController(win)
+    ctrl._remember_bubble_position()
+    assert ctrl._bubble_pos == (10, 20)
+    assert ctrl._bubble_anchor == (0, 0, 100, 100)
+
+    win._speech_bubble.moved.clear()
+    ctrl._pin_bubble_position()
+    assert win._speech_bubble.moved == [(10, 20)], "没移动就该钉回原位置"
+
+
+def test_bubble_follows_pet_when_pet_moved():
+    """桌宠移动过：不许钉回旧坐标，交给 reposition 正常跟随。"""
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _MovableWin()
+    ctrl = MusicLyricController(win)
+    ctrl._remember_bubble_position()
+
+    win._rect = (500, 300, 100, 100)      # 用户把桌宠拖走了
+    ctrl._pin_bubble_position()
+    assert win._speech_bubble.moved == [], "桌宠移动后不能再把气泡按回旧位置"
+
+
+def test_bubble_anchor_missing_keeps_legacy_pin():
+    """没有 visible_content_rect 的宿主（老替身/其他平台）：保持原行为。"""
+    from pet.music_lyric_controller import MusicLyricController
+
+    class _NoRect(_FakeWin):
+        def __init__(self):
+            super().__init__()
+            self._speech_bubble = _FakeBubble()
+
+    win = _NoRect()
+    ctrl = MusicLyricController(win)
+    ctrl._remember_bubble_position()
+    ctrl._bubble_pos = (10, 20)
+    ctrl._pin_bubble_position()
+    assert win._speech_bubble.moved == [(10, 20)]
 
 
 def test_yields_when_other_bubble_takes_over():

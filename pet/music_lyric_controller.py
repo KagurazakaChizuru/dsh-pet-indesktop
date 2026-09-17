@@ -288,6 +288,10 @@ class MusicLyricController(QObject):
         self._last_lyric: str = ""
         # 气泡上一次的落点，用于抵消"尺寸变化导致的位置漂移"。
         self._bubble_pos: Any = None
+        # 记录上述落点时的桌宠矩形：桌宠挪过窝就不能再钉回旧坐标（见
+        # _pin_bubble_position）。承接上游 #134 的实机修复：
+        # 开着歌词拖桌宠时，气泡会被按在旧位置、停在原地不动。
+        self._bubble_anchor: Any = None
         # 让路截止时刻：别的弹窗占用期间歌词停发（见 LYRIC_YIELD_SECONDS）。
         self._lyric_yield_until: float = 0.0
         # 右键菜单「退出音乐模式」的临时开关（仅本次运行，不写配置）。
@@ -489,26 +493,43 @@ class MusicLyricController(QObject):
             log.debug("歌词气泡显示失败", exc_info=True)
 
     def _pin_bubble_position(self) -> None:
-        """把气泡钉回上一次的位置，抵消尺寸变化引起的漂移。"""
+        """把气泡钉回上一次的位置，抵消**尺寸变化**引起的漂移。
+
+        **只适用于桌宠没动过的情况**：钉的是绝对屏幕坐标，一旦桌宠被拖走，
+        再钉就等于把气泡按在原地不动（实机 bug：开着歌词拖桌宠，气泡停在
+        旧位置）。所以先比对桌宠矩形，变了就什么都不做——交给气泡自己的
+        reposition 正常跟随。
+        """
         bubble = getattr(self.win, "_speech_bubble", None)
         if bubble is None:
             return
         pos = getattr(self, "_bubble_pos", None)
         if pos is None:
             return
+        anchor_fn = getattr(self.win, "visible_content_rect", None)
+        anchor_now = anchor_fn() if callable(anchor_fn) else None
+        if anchor_now is not None and anchor_now != getattr(self, "_bubble_anchor", None):
+            return  # 桌宠移动过：让气泡跟随，不要钉回旧位置
         try:
             bubble.move(pos)
         except Exception:
             log.debug("钉住气泡位置失败", exc_info=True)
 
     def _remember_bubble_position(self) -> None:
-        """记下气泡当前落点，供下一次粘滞回位。"""
+        """记下气泡当前落点**与当时的桌宠矩形**，供下一次粘滞回位。
+
+        必须一起记桌宠矩形：只记气泡坐标的话，桌宠移动后再钉回去就会把气泡
+        留在旧位置（`_pin_bubble_position` 靠这个矩形判断桌宠有没有动过）。
+        """
         bubble = getattr(self.win, "_speech_bubble", None)
         if bubble is None:
             return
         try:
             if bubble.isVisible():
                 self._bubble_pos = bubble.pos()
+                anchor_fn = getattr(self.win, "visible_content_rect", None)
+                if callable(anchor_fn):
+                    self._bubble_anchor = anchor_fn()
         except Exception:
             log.debug("记录气泡位置失败", exc_info=True)
 

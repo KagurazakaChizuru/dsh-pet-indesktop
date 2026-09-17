@@ -98,3 +98,28 @@ def test_music_submenu_skip_action_reaches_player(app, monkeypatch):
     assert action.isEnabled()
     action.trigger()
     assert calls == ["next"]
+
+
+# ------------------------------------------- 「上一首」菜单项（承接上游 #134）
+
+def test_prev_action_reaches_player(app, monkeypatch):
+    """「上一首」同样直达播放器（不绕歌词控制器），方向必须是 previous。"""
+    calls: list[str] = []
+    monkeypatch.setattr(now_playing, "skip_track", lambda direction="next": calls.append(direction) or True)
+    pet = _Pet(music_lyric_enabled=False)
+
+    menu = QMenu()
+    shared.add_music_prev(menu, pet)
+    action = menu.actions()[0]
+    assert "上一首" in action.text()
+    action.trigger()
+    assert calls == ["previous"]
+
+
+def test_prev_available_without_lyrics(app, monkeypatch):
+    """「上一首」与暂停/切歌同一门控：能读媒体会话就出现，与歌词开关无关。"""
+    monkeypatch.setattr(now_playing, "available", lambda: True)
+    assert "music_prev" in MenuActionRegistry().available_ids(_Pet(music_lyric_enabled=False))
+
+    monkeypatch.setattr(now_playing, "available", lambda: False)
+    assert "music_prev" not in MenuActionRegistry().available_ids(_Pet(music_lyric_enabled=True))

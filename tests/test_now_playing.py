@@ -94,6 +94,62 @@ def test_sampler_loop_uses_adaptive_interval(monkeypatch):
     assert intervals, "采样循环没有调用自适应间隔计算"
 
 
+# --------------------------------------- 播放器进程预判（承接上游 #134/#135）
+
+def test_player_process_running_matches_by_process_name(monkeypatch):
+    """进程在跑 -> True；不在 -> False（按 exe 名精确匹配）。"""
+    import sys as _sys
+
+    class _Proc:
+        def __init__(self, name):
+            self.info = {"name": name}
+
+    fake = type("_FakePsutil", (), {
+        "process_iter": staticmethod(lambda attrs=None: [_Proc("explorer.exe"), _Proc("cloudmusic.exe")])
+    })
+    monkeypatch.setitem(_sys.modules, "psutil", fake)
+
+    assert now_playing.player_process_running("cloudmusic.exe") is True
+    assert now_playing.player_process_running("CLOUDMUSIC.EXE") is True, "大小写不敏感"
+    assert now_playing.player_process_running("qqmusic.exe") is False
+    assert now_playing.player_process_running("") is False
+
+
+def test_player_process_running_fails_open(monkeypatch):
+    """psutil 缺失或扫描失败一律放行（宁可多试一次也不误伤播放器）。"""
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "psutil", None)
+    assert now_playing.player_process_running("cloudmusic.exe") is True
+
+    class _Boom:
+        @staticmethod
+        def process_iter(attrs=None):
+            raise OSError("access denied")
+
+    monkeypatch.setitem(_sys.modules, "psutil", _Boom)
+    assert now_playing.player_process_running("cloudmusic.exe") is True
+
+
+def test_play_session_async_skips_winrt_when_process_absent(monkeypatch):
+    """进程不在就直接返回 False：不发起那次可能永久阻塞的 SMTC 请求。"""
+    import asyncio
+
+    monkeypatch.setattr(now_playing, "player_process_running", lambda _exe: False)
+    requested: list[int] = []
+
+    class _Manager:
+        @staticmethod
+        async def request_async():
+            requested.append(1)
+            return None
+
+    monkeypatch.setattr(now_playing, "_import_winrt", lambda: _Manager)
+
+    assert asyncio.run(now_playing._play_session_async("cloudmusic.exe")) is False
+    assert requested == [], "播放器进程不在时不该去碰 SMTC（它是会卡死的那一步）"
+
+
 def _playback(title: str = "曲名", artist: str = "歌手") -> now_playing.Playback:
     return now_playing.Playback(
         track=now_playing.Track(title=title, artist=artist, playing=True),
