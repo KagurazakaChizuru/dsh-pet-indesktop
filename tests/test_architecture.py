@@ -132,6 +132,7 @@ def test_pure_logic_modules_do_not_import_qt():
     for name in (
         "collision.py", "physics.py", "collision_codec.py",
         "festival_calendar.py", "festival_data.py", "festival.py",
+        "festival_animations.py",
         "festival_quotes_cn.py", "festival_quotes_west.py",
         "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
         "festival_quotes_west_song.py",
