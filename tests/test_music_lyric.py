@@ -8,9 +8,71 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from pet import music_lyric
 from pet.music_lyric import Lyrics, LyricLine, parse_lrc
 from pet.music_lyric_controller import LyricTracker
+
+
+@pytest.fixture(autouse=True)
+def _reset_transport_flag():
+    """传输层"固定直连"是模块级状态：每个用例前后清零。"""
+    music_lyric._force_direct = False
+    yield
+    music_lyric._force_direct = False
+
+
+# ------------------------------------------------- 传输层：代理不通就直连
+
+
+def test_http_get_json_falls_back_to_direct_when_proxy_dead(monkeypatch):
+    """回归（2026-09-17 实机）：系统代理开着但进程没跑时，取词必须自动改直连。
+
+    死代理会让 QQ音乐 / lrclib / 网易云三个源全部 ConnectionRefused → 每首歌都被
+    记成"无词" → 气泡只剩歌名（用户原话："显示一半就剩下歌名了"）。
+    """
+    calls: list[bool] = []
+
+    def _read(url, *, referer, use_proxy):
+        calls.append(use_proxy)
+        if use_proxy:
+            raise OSError("connection refused")
+        return b'{"ok": 1}'
+
+    monkeypatch.setattr(music_lyric, "_http_read", _read)
+
+    assert music_lyric._http_get_json("https://example.com/x") == {"ok": 1}
+    assert calls == [True, False], "先按系统代理试、失败后必须直连重试"
+    assert music_lyric._force_direct is True, "确认代理不可用后应记住直连"
+
+    calls.clear()
+    assert music_lyric._http_get_json("https://example.com/y") == {"ok": 1}
+    assert calls == [False], "后续请求不应再撞一遍死代理"
+
+
+def test_http_get_json_does_not_retry_on_http_error(monkeypatch):
+    """服务器明确答复（404 等）说明链路是通的：不重试、也不切直连。"""
+    calls: list[bool] = []
+
+    def _read(url, *, referer, use_proxy):
+        calls.append(use_proxy)
+        raise music_lyric.urllib.error.HTTPError(url, 404, "Not Found", None, None)
+
+    monkeypatch.setattr(music_lyric, "_http_read", _read)
+
+    assert music_lyric._http_get_json("https://example.com/x") is None
+    assert calls == [True]
+    assert music_lyric._force_direct is False
+
+
+def test_http_get_json_parses_jsonp(monkeypatch):
+    """JSONP 包裹仍要能解析（既有行为不回归）。"""
+    monkeypatch.setattr(
+        music_lyric, "_http_read",
+        lambda url, *, referer, use_proxy: b'cb({"a": 2})',
+    )
+    assert music_lyric._http_get_json("https://example.com/x") == {"a": 2}
 
 
 # ---------------------------------------------------------------- parse_lrc

@@ -305,6 +305,9 @@ _ACTION_TIMEOUT = 1.5      # 用户操作（播放/暂停/切歌）在调用线�
 # 兜底永远轮不到），只走窗口标题兜底；窗口到期后重试一次以探测 SMTC 恢复
 # （2026-09-17 实机 SMTC 间歇性永不返回，spec 见 .scratch/media-window-fallback/）。
 _SMTC_BACKOFF_S = 120.0
+# SMTC 采样最小间隔（秒）：见 _sample_once 的说明——绝不能跟着 0.3s 的采样节拍打
+# RequestAsync()，那等于每秒 3 次以上，实机怀疑就是把系统 SMTC 打挂的原因。
+_SMTC_MIN_INTERVAL_S = 1.0
 
 _sample_lock = threading.Lock()
 _sample_token: object | None = None      # 当前采样线程的身份牌（摘牌即失效）
@@ -316,6 +319,7 @@ _sample_started_at = float("-inf")       # 当前采样线程启动时刻（冷�
 _sample_request_at = 0.0                 # 调用方最近一次取值时刻（空闲退出）
 _stall_reported = False                  # 卡死告警只报一次（恢复后重置）
 _smtc_wedged_until = 0.0                 # SMTC 退避截止时刻（monotonic）
+_smtc_last_at = 0.0                      # 上一次真正调用 SMTC 的时刻（限速用）
 _window_log_key: tuple[str, str, bool] | None = None  # 兜底来源最近上报的（曲目, 播放）
 _window_sticky: tuple[Playback, float] | None = None   # 最近一次成功的兜底样本 + 时刻
 _WINDOW_STICKY_S = 20.0                                # 偶发取不到时沿用的时长（秒）
@@ -358,10 +362,24 @@ def _read_window_media() -> Playback | None:
     return value
 
 
+def _now() -> float:
+    """当前单调时刻（独立函数便于测试注入）。"""
+    return time.monotonic()
+
+
 def _sample_once() -> Playback | None:
-    """一次采样：**SMTC 优先**（带播放进度），退避期内或查不到时退回窗口标题。"""
-    global _stall_reported
-    if time.monotonic() >= _smtc_wedged_until:
+    """一次采样：**SMTC 优先**（带播放进度），退避期内或查不到时退回窗口标题。
+
+    SMTC 那条路被限速：``GlobalSystemMediaTransportControlsSessionManager.
+    RequestAsync()`` 是重家伙，原先跟着采样节拍（0.3s）打，等于 3.3 次/秒——
+    实机 2026-09-17 系统 SMTC 挂死（请求永不返回，重启外壳/播放器都不好，只能重启机器），
+    时间点与高频采样吻合。窗口标题兜底很便宜、照常 0.3s 跑；SMTC 最多
+    :data:`_SMTC_MIN_INTERVAL_S` 一次（与既有歌词 tick 同量级）。
+    """
+    global _smtc_last_at, _stall_reported
+    now = _now()
+    if now >= _smtc_wedged_until and (now - _smtc_last_at) >= _SMTC_MIN_INTERVAL_S:
+        _smtc_last_at = now
         value = _read_blocking()  # 可能永不返回：由取值方监管弃用
         if value is not None:
             if _stall_reported:
@@ -448,7 +466,7 @@ def _stop_sampler() -> None:
     也会在迟到的返回之后自行退场。
     """
     global _sample_ready, _sample_started_at, _sample_thread, _sample_token
-    global _sample_value, _smtc_wedged_until
+    global _sample_value, _smtc_last_at, _smtc_wedged_until
     with _sample_lock:
         _sample_token = None
         _sample_thread = None
@@ -456,6 +474,7 @@ def _stop_sampler() -> None:
         _sample_ready = False
         _sample_started_at = float("-inf")
         _smtc_wedged_until = 0.0  # 重新开始时清掉退避：给 SMTC 一次新机会
+        _smtc_last_at = 0.0       # 限速计时也归零
 
 
 def _run_bounded(factory: Callable[[], object], default):

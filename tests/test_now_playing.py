@@ -290,6 +290,29 @@ def test_window_fallback_sticks_through_transient_probe_failure(monkeypatch):
     assert now_playing._read_window_media() is None
 
 
+def test_smtc_is_rate_limited(monkeypatch):
+    """SMTC 不能被采样节拍（0.3s）带着高频调用——实机怀疑这就是把系统 SMTC 打挂的原因。"""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(now_playing, "_now", lambda: clock["t"])
+    monkeypatch.setattr(now_playing, "_SMTC_MIN_INTERVAL_S", 1.0)
+    calls = {"n": 0}
+
+    def _smtc():
+        calls["n"] += 1
+        return None  # 查不到 → 走窗口兜底（这里不关心结果）
+
+    monkeypatch.setattr(now_playing, "_read_blocking", _smtc)
+
+    for _ in range(10):  # 10 拍 × 0.1s = 1.0s
+        now_playing._sample_once()
+        clock["t"] += 0.1
+    assert calls["n"] == 1, "1 秒内只允许调一次 SMTC，实际 %d 次" % calls["n"]
+
+    clock["t"] += 1.0
+    now_playing._sample_once()
+    assert calls["n"] == 2
+
+
 def test_smtc_retried_after_backoff_expires(monkeypatch):
     """退避到期后应重新尝试 SMTC，以便它恢复时自动切回（有进度的来源）。"""
     monkeypatch.setattr(now_playing, "_SAMPLE_STALL_LIMIT", 0.2)

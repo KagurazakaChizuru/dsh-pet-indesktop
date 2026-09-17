@@ -45,6 +45,11 @@ _UA = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
+# 传输层状态：一旦确认系统代理不可用就固定直连，避免每次请求都先撞一遍死代理
+# （那会让取词耗时翻倍并挤占三源并发的优势窗口）。
+_force_direct = False
+_direct_opener = None
+
 # 形如 [mm:ss.xx] / [mm:ss:xx] / [mm:ss]，可能一行多个。
 _TIME_RE = re.compile(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
 # 只有标签、没有时间戳的行，如 [ti:歌名] —— 按 LRC 规范跳过。
@@ -238,14 +243,60 @@ def clear_cache() -> int:
 # ---------------------------------------------------------------- 网络
 
 
-def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | None:
+def _opener(use_proxy: bool):
+    """取一个 urllib opener：``use_proxy=False`` 时强制直连。
+
+    背景（2026-09-17 实机）：Windows 的系统代理（IE/WinINET 设置）被各类加速器/
+    VPN 打开后如果进程没在跑，`urllib` 仍会照着它走 → 歌词三个源**全部连接被拒** →
+    控制器把每首都记成"无词" → 气泡只剩歌名（用户现象正是"显示一半就剩歌名"）。
+    """
+    if use_proxy:
+        return urllib.request.build_opener()
+    global _direct_opener
+    if _direct_opener is None:
+        _direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _direct_opener
+
+
+def _http_read(url: str, *, referer: str | None, use_proxy: bool) -> bytes:
+    """发起一次请求并读回字节；失败抛异常（[测试接缝]）。"""
     headers = {"User-Agent": _UA}
     if referer:
         headers["Referer"] = referer
     request = urllib.request.Request(url, headers=headers)
+    with _opener(use_proxy).open(request, timeout=HTTP_TIMEOUT) as response:
+        return response.read()
+
+
+def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | None:
+    """GET 一个 JSON 接口。**代理不通时自动改直连**，且此后本进程一直直连。
+
+    重试只在"连不上"这类传输失败时发生；服务器明确答复（HTTPError 4xx/5xx）
+    说明链路是通的，重试无意义，直接返回 None。
+    """
+    global _force_direct
+    # 先按系统代理（尊重用户的加速器/VPN），连不上再直连；一旦确认代理不可用就固定直连。
+    attempts = (False,) if _force_direct else (True, False)
+    last_exc: Exception | None = None
+    raw: bytes | None = None
+    for use_proxy in attempts:
+        try:
+            raw = _http_read(url, referer=referer, use_proxy=use_proxy)
+        except urllib.error.HTTPError:
+            return None
+        except Exception as exc:  # noqa: BLE001 - 传输失败：换下一种方式再试
+            last_exc = exc
+            continue
+        if not use_proxy and not _force_direct:
+            _force_direct = True
+            log.info(
+                "歌词请求改走直连：系统代理不可用（%s）", type(last_exc).__name__
+            )
+        break
+    if raw is None:
+        log.debug("歌词请求失败: %s (%r)", url, last_exc)
+        return None
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-            raw = response.read()
         # 部分接口返回 JSONP，剥掉外层包裹后再解析。
         text = raw.decode("utf-8", "replace").strip()
         if not text.startswith(("{", "[")):
@@ -255,7 +306,7 @@ def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | Non
                 text = text[start + 1:end]
         return json.loads(text)
     except Exception:
-        log.debug("歌词请求失败: %s", url, exc_info=True)
+        log.debug("歌词响应解析失败: %s", url, exc_info=True)
         return None
 
 
