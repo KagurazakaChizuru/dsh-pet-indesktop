@@ -622,6 +622,14 @@ def add_music_next(menu: QMenu, pet, *, icons: bool = True):
     )
 
 
+def add_music_prev(menu: QMenu, pet, *, icons: bool = True):
+    """音乐子菜单：切到上一首。"""
+    return add_action(
+        menu, "人家想再听刚才那首（上一首）", "play" if icons else None,
+        lambda: _skip_track("previous"), close_on_trigger=True,
+    )
+
+
 def add_music_quit(menu: QMenu, pet, *, icons: bool = True):
     """音乐子菜单开关：临时退出音乐模式（勾选=已退出）。"""
     action = add_action(menu, "人家今天不唱了（退出音乐模式）", "stop" if icons else None)
