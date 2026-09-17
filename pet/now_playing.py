@@ -33,6 +33,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from . import media_window
+
 log = logging.getLogger(__name__)
 
 # 判定"不上报进度"的阈值：末位时长小于该值视为无效时间轴。
@@ -299,6 +301,10 @@ _SAMPLE_STALL_LIMIT = 5.0  # 采样线程停摆超过该时长 = 卡死，弃用
 _RESTART_COOLDOWN = 5.0    # 两次重开的最小间隔（卡死时不疯狂开线程）
 _IDLE_STOP = 5.0           # 调用方连续多久不取值就收摊（歌词关/窗口隐藏）
 _ACTION_TIMEOUT = 1.5      # 用户操作（播放/暂停/切歌）在调用线程最多等多久
+# SMTC 被判定卡死后的退避窗口：期间不再调用 SMTC（否则新采样线程立刻又卡死，
+# 兜底永远轮不到），只走窗口标题兜底；窗口到期后重试一次以探测 SMTC 恢复
+# （2026-09-17 实机 SMTC 间歇性永不返回，spec 见 .scratch/media-window-fallback/）。
+_SMTC_BACKOFF_S = 120.0
 
 _sample_lock = threading.Lock()
 _sample_token: object | None = None      # 当前采样线程的身份牌（摘牌即失效）
@@ -309,12 +315,54 @@ _sample_beat = 0.0                       # 采样线程最近一次开工/收工
 _sample_started_at = float("-inf")       # 当前采样线程启动时刻（冷却判定）
 _sample_request_at = 0.0                 # 调用方最近一次取值时刻（空闲退出）
 _stall_reported = False                  # 卡死告警只报一次（恢复后重置）
+_smtc_wedged_until = 0.0                 # SMTC 退避截止时刻（monotonic）
+_window_log_key: tuple[str, str] | None = None  # 兜底来源最近一次上报的曲目（去重日志）
+
+
+def _read_window_media() -> Playback | None:
+    """窗口标题兜底：SMTC 不可用/查不到会话时用它拿到「在放什么歌」。
+
+    没有播放进度（``position=None``，与网易云在 SMTC 下的表现一致，控制器已支持）；
+    ``playing`` 由 media_window 结合逐会话音频判定（拿不到音频信息时假定在放）。
+    """
+    global _window_log_key
+    try:
+        found = media_window.read_window_media()
+    except Exception:
+        return None
+    if not found:
+        return None
+    title, artist, playing = found
+    key = (str(artist), str(title))
+    if key != _window_log_key:
+        # 换歌才记一行：出问题时用户日志里能直接看到兜底来源与判定结果。
+        _window_log_key = key
+        log.info("窗口标题监听：%s - %s（playing=%s）", artist, title, playing)
+    return Playback(
+        track=Track(title=str(title), artist=str(artist), playing=bool(playing)),
+        position=None,
+        updated_at=time.monotonic(),
+    )
+
+
+def _sample_once() -> Playback | None:
+    """一次采样：**SMTC 优先**（带播放进度），退避期内或查不到时退回窗口标题。"""
+    global _stall_reported
+    if time.monotonic() >= _smtc_wedged_until:
+        value = _read_blocking()  # 可能永不返回：由取值方监管弃用
+        if value is not None:
+            if _stall_reported:
+                # SMTC 恢复：解除「只报一次」的抑制，并切回带进度的来源。
+                _stall_reported = False
+                log.info("SMTC 已恢复，切回带播放进度的采样来源")
+            return value
+    return _read_window_media()
 
 
 def _sampler_loop(token: object) -> None:
     """后台采样线程体：循环采样并发布快照；被摘牌或无人取值即退场。"""
     global _sample_beat, _sample_ready, _sample_thread, _sample_token
-    global _sample_value, _stall_reported
+    global _sample_value
     while True:
         with _sample_lock:
             if _sample_token is not token:
@@ -324,13 +372,12 @@ def _sampler_loop(token: object) -> None:
                 _sample_thread = None
                 return  # 没人再取值：收摊，不留常驻轮询
             _sample_beat = time.monotonic()
-        value = _read_blocking()  # 可能永不返回：由取值方监管弃用
+        value = _sample_once()  # 可能永不返回：由取值方监管弃用
         with _sample_lock:
             if _sample_token is not token:
                 return  # 迟到的陈旧结果不得发布
             _sample_value = value
             _sample_ready = True
-            _stall_reported = False
             _sample_beat = time.monotonic()
         time.sleep(_SAMPLE_INTERVAL)
 
@@ -351,7 +398,7 @@ def _start_sampler_locked(now: float) -> threading.Thread:
 
 def _ensure_sampler() -> None:
     """保证有一个采样线程在跑；停摆的线程被摘牌重开（带冷却，绝不阻塞）。"""
-    global _sample_ready, _sample_request_at, _stall_reported
+    global _sample_ready, _sample_request_at, _smtc_wedged_until, _stall_reported
     now = time.monotonic()
     thread = None
     with _sample_lock:
@@ -366,14 +413,16 @@ def _ensure_sampler() -> None:
             return
         if current is not None and current.is_alive():
             # 卡死：摘牌弃用（它随后的返回值会被身份校验拦住），快照同时作废——
-            # 调用方看到「未知」而不是无限期沿用陈旧曲目。
+            # 调用方看到「未知」而不是无限期沿用陈旧曲目。同时进入 SMTC 退避：
+            # 否则新采样线程会立刻再次卡在同一个请求上，窗口兜底永远轮不到。
             _sample_ready = False
+            _smtc_wedged_until = now + _SMTC_BACKOFF_S
             if not _stall_reported:
                 _stall_reported = True
                 log.warning(
-                    "SMTC 采样停摆超过 %.1fs：弃用该采样线程并重开"
-                    "（窗口不会因此冻结，歌词暂时停更）",
-                    _SAMPLE_STALL_LIMIT,
+                    "SMTC 采样停摆超过 %.1fs：退避 %.0fs 并改用窗口标题兜底"
+                    "（窗口不会因此冻结，歌词可能没有进度）",
+                    _SAMPLE_STALL_LIMIT, _SMTC_BACKOFF_S,
                 )
         thread = _start_sampler_locked(now)
     thread.start()
@@ -386,13 +435,14 @@ def _stop_sampler() -> None:
     也会在迟到的返回之后自行退场。
     """
     global _sample_ready, _sample_started_at, _sample_thread, _sample_token
-    global _sample_value
+    global _sample_value, _smtc_wedged_until
     with _sample_lock:
         _sample_token = None
         _sample_thread = None
         _sample_value = None
         _sample_ready = False
         _sample_started_at = float("-inf")
+        _smtc_wedged_until = 0.0  # 重新开始时清掉退避：给 SMTC 一次新机会
 
 
 def _run_bounded(factory: Callable[[], object], default):

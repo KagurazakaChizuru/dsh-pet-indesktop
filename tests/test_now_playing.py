@@ -33,6 +33,12 @@ def _isolate_sampler():
     now_playing._stop_sampler()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_window_probe(monkeypatch):
+    """窗口标题兜底默认按「没在放歌」处理；要用它的用例自行覆盖。"""
+    monkeypatch.setattr(now_playing, "_read_window_media", lambda: None)
+
+
 def _playback(title: str = "曲名", artist: str = "歌手") -> now_playing.Playback:
     return now_playing.Playback(
         track=now_playing.Track(title=title, artist=artist, playing=True),
@@ -93,6 +99,8 @@ def test_stalled_sampler_is_abandoned_and_recovers(monkeypatch):
     """采样线程卡死后必须被弃用重开，且陈旧结果不得发布。"""
     monkeypatch.setattr(now_playing, "_SAMPLE_STALL_LIMIT", 0.2)
     monkeypatch.setattr(now_playing, "_RESTART_COOLDOWN", 0.0)
+    # 本用例只考「摘牌重开」，不考 SMTC 退避：关掉退避让新线程立刻重试 SMTC。
+    monkeypatch.setattr(now_playing, "_SMTC_BACKOFF_S", 0.0)
     state = {"stuck": True}
     entered = threading.Event()
     sample = _playback()
@@ -181,3 +189,104 @@ def test_player_actions_are_bounded_when_winrt_stalls(monkeypatch, invoke):
     assert invoke() is False
     elapsed = time.monotonic() - t0
     assert elapsed < BUDGET, f"播放器操作被阻塞 {elapsed:.2f}s"
+
+
+# ------------------------------------------- 窗口标题兜底（SMTC 卡死时仍能知道在放什么）
+
+
+def _fallback_playback(title: str = "夜曲", artist: str = "周杰伦"):
+    return now_playing.Playback(
+        track=now_playing.Track(title=title, artist=artist, playing=True),
+        position=None,  # 窗口兜底拿不到进度
+        updated_at=time.monotonic(),
+    )
+
+
+def test_smtc_sample_wins_when_healthy(monkeypatch):
+    """SMTC 健康时优先它（有播放进度），兜底不得顶掉。"""
+    smtc = _playback("SMTC曲", "SMTC歌手")
+    monkeypatch.setattr(now_playing, "_read_blocking", lambda: smtc)
+    monkeypatch.setattr(
+        now_playing, "_read_window_media", lambda: _fallback_playback("窗口曲", "窗口歌手")
+    )
+    assert _wait_for_sample(smtc) is smtc
+    assert now_playing.get_now_playing() is smtc
+
+
+def test_window_fallback_used_when_smtc_returns_nothing(monkeypatch):
+    """SMTC 正常但查不到会话（未接入/无会话）→ 用窗口标题兜底。"""
+    monkeypatch.setattr(now_playing, "_read_blocking", lambda: None)
+    fallback = _fallback_playback()
+    monkeypatch.setattr(now_playing, "_read_window_media", lambda: fallback)
+    assert _wait_for_sample(fallback) is fallback
+
+
+def test_window_fallback_takes_over_after_smtc_wedges(monkeypatch):
+    """SMTC 卡死被摘牌后进入退避：改为只用窗口兜底，且退避期内不再触 SMTC。"""
+    monkeypatch.setattr(now_playing, "_SAMPLE_STALL_LIMIT", 0.2)
+    monkeypatch.setattr(now_playing, "_RESTART_COOLDOWN", 0.0)
+    monkeypatch.setattr(now_playing, "_SAMPLE_INTERVAL", 0.05)
+    entered = threading.Event()
+    calls = {"smtc": 0}
+
+    def _stuck():
+        calls["smtc"] += 1
+        entered.set()
+        threading.Event().wait(5.0)  # 模拟 request_async 永不返回
+        return None
+
+    monkeypatch.setattr(now_playing, "_read_blocking", _stuck)
+    fallback = _fallback_playback()
+    monkeypatch.setattr(now_playing, "_read_window_media", lambda: fallback)
+
+    assert now_playing.get_now_playing() is None
+    assert entered.wait(BUDGET), "采样线程未启动"
+
+    # 卡死被监管方摘牌 → 之后只走兜底
+    assert _wait_for_sample(fallback) is fallback
+    smtc_calls = calls["smtc"]
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        assert now_playing.get_now_playing() is fallback
+        time.sleep(0.05)
+    assert calls["smtc"] == smtc_calls, "退避窗口内不得再次调用 SMTC（会被再次卡死）"
+
+
+def test_smtc_retried_after_backoff_expires(monkeypatch):
+    """退避到期后应重新尝试 SMTC，以便它恢复时自动切回（有进度的来源）。"""
+    monkeypatch.setattr(now_playing, "_SAMPLE_STALL_LIMIT", 0.2)
+    monkeypatch.setattr(now_playing, "_RESTART_COOLDOWN", 0.0)
+    monkeypatch.setattr(now_playing, "_SAMPLE_INTERVAL", 0.05)
+    monkeypatch.setattr(now_playing, "_SMTC_BACKOFF_S", 0.3)
+    gate = threading.Event()
+
+    def _stuck_then_ok():
+        if not gate.is_set():
+            gate.set()
+            threading.Event().wait(5.0)
+            return None
+        return _playback("SMTC曲", "SMTC歌手")
+
+    monkeypatch.setattr(now_playing, "_read_blocking", _stuck_then_ok)
+    monkeypatch.setattr(
+        now_playing, "_read_window_media", lambda: _fallback_playback("窗口曲", "窗口歌手")
+    )
+
+    assert now_playing.get_now_playing() is None
+    # 先落到兜底
+    assert _wait_for_sample(_fallback_playback("窗口曲", "窗口歌手"), timeout=5.0) is not None
+    # 退避到期后重试 SMTC：拿到带进度的样本
+    want = now_playing.Playback(
+        track=now_playing.Track(title="SMTC曲", artist="SMTC歌手", playing=True),
+        position=1.0,
+        updated_at=time.monotonic(),
+    )
+    deadline = time.monotonic() + 6.0
+    got = None
+    while time.monotonic() < deadline:
+        got = now_playing.get_now_playing()
+        if got is not None and got.track.title == "SMTC曲":
+            break
+        time.sleep(0.05)
+    assert got is not None and got.track.title == "SMTC曲", "退避到期后未重试 SMTC"
+    del want
