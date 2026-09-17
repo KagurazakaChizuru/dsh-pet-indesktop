@@ -86,7 +86,12 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 # 一个带完整实机取证说明的委托方法：它必须留在 PetWindow 上（showEvent 是唯一
 # 可靠的"原生窗口已就绪/可能被重建"注入点，拆到独立模块反而会产生跨模块的
 # 窗口生命周期耦合）。按约定只校准预算，不为达标压行。
-WINDOW_PY_LINE_BUDGET = 4507
+# 2026-09-17 再上调到 4513：歌词/音乐自动唱歌 与 节日提醒/报时 的跨功能干扰修复
+# （window.py +6，实测 4513）——_on_anim_ended 的 SING_ANIM 续播分支必须先交付
+# 待播联动动作（节日提醒动画），否则唱歌循环会一直续播、把待播动画饿死；该分支与
+# _pending_link_anim / _play_pending_link_anim / _switch 共享窗口状态流，拆出去会切断
+# 调用链。按约定只校准预算，**不为达标压行**（初版误压了上方飞行链注释，已按约定回改）。
+WINDOW_PY_LINE_BUDGET = 4513
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的
