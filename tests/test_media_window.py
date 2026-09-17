@@ -14,6 +14,14 @@ import pytest
 from pet import media_window as mw
 
 
+@pytest.fixture(autouse=True)
+def _clear_active_memory():
+    """「最近 Active 过」是模块级状态：每个用例前后清干净。"""
+    mw._last_active_at.clear()
+    yield
+    mw._last_active_at.clear()
+
+
 # --------------------------------------------------------------- 标题解析
 
 
@@ -61,7 +69,7 @@ def test_music_player_allowlist_is_lowercase_exe_names():
 
 def _stub(monkeypatch, windows, audio):
     monkeypatch.setattr(mw, "_list_windows", lambda: list(windows))
-    monkeypatch.setattr(mw, "_audio_active_pids", lambda: audio)
+    monkeypatch.setattr(mw, "_active_session_pids", lambda: audio)
 
 
 def test_prefers_process_that_is_actually_playing(monkeypatch):
@@ -69,8 +77,8 @@ def test_prefers_process_that_is_actually_playing(monkeypatch):
         monkeypatch,
         [
             (1, "chrome.exe", "某个网页 - Google Chrome"),          # 不在白名单
-            (2, "cloudmusic.exe", "夜曲 - 周杰伦"),                  # 白名单但没出声
-            (3, "cloudmusic.exe", "晴天 - 周杰伦"),                  # 白名单且出声
+            (2, "cloudmusic.exe", "夜曲 - 周杰伦"),                  # 白名单但会话不 Active
+            (3, "cloudmusic.exe", "晴天 - 周杰伦"),                  # 白名单且会话 Active
         ],
         audio={3},
     )
@@ -91,13 +99,30 @@ def test_unparseable_player_title_is_ignored(monkeypatch):
     assert mw.read_window_media() is None
 
 
-def test_paused_player_reports_not_playing(monkeypatch):
-    """窗口还在、标题还在，但那个进程没在出声 → 视为暂停（歌词不推进）。"""
-    _stub(
-        monkeypatch,
-        [(2, "cloudmusic.exe", "夜曲 - 周杰伦")],
-        audio={9},          # 出声的是别的进程
-    )
+def test_active_player_keeps_playing_through_gaps(monkeypatch):
+    """迟滞判定：见过它 Active 之后，换歌瞬间的会话切换**不算暂停**。
+
+    实机回归（2026-09-17）：换歌瞬间峰值为 0 被判成暂停 → 连续两首歌整首不出词。
+    """
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(mw, "_now", lambda: clock["t"])
+    _stub(monkeypatch, [(2, "cloudmusic.exe", "夜曲 - 周杰伦")], audio={2})
+    assert mw.read_window_media() == ("夜曲", "周杰伦", True)   # 听到过 → 记住
+
+    clock["t"] += 3.0
+    _stub(monkeypatch, [(2, "cloudmusic.exe", "晴天 - 周杰伦")], audio=set())
+    assert mw.read_window_media() == ("晴天", "周杰伦", True), "宽限期内不得判暂停"
+
+
+def test_pause_after_lasting_silence_reports_not_playing(monkeypatch):
+    """确实见过它 Active、且离开 Active 超过宽限期 → 视为暂停（歌词冻结）。"""
+    clock = {"t": 2000.0}
+    monkeypatch.setattr(mw, "_now", lambda: clock["t"])
+    _stub(monkeypatch, [(2, "cloudmusic.exe", "夜曲 - 周杰伦")], audio={2})
+    assert mw.read_window_media() == ("夜曲", "周杰伦", True)
+
+    clock["t"] += mw._ACTIVE_GRACE_S + 5.0
+    _stub(monkeypatch, [(2, "cloudmusic.exe", "夜曲 - 周杰伦")], audio=set())
     assert mw.read_window_media() == ("夜曲", "周杰伦", False)
 
 
@@ -107,13 +132,30 @@ def test_no_session_info_assumes_playing(monkeypatch):
     assert mw.read_window_media() == ("夜曲", "周杰伦", True)
 
 
-def test_picks_first_candidate_when_nothing_is_audible(monkeypatch):
+def test_player_never_active_is_treated_as_playing(monkeypatch):
+    """从没见过它 Active（例：音频会话落在别的输出设备上）→ 没有暂停的正证据，按在放。
+
+    实机回归：网易云的音频会话不在默认设备上时，逐会话集合里没有它；
+    若因此判暂停，歌词会整首不出。
+    """
+    _stub(monkeypatch, [(2, "cloudmusic.exe", "夜曲 - 周杰伦")], audio={9})
+    assert mw.read_window_media() == ("夜曲", "周杰伦", True)
+
+
+def test_prefers_recently_active_candidate(monkeypatch):
+    """多个候选：优先会话 Active 的，其次最近 Active 过的，最后才取第一个。"""
+    clock = {"t": 3000.0}
+    monkeypatch.setattr(mw, "_now", lambda: clock["t"])
+    _stub(monkeypatch, [(2, "cloudmusic.exe", "夜曲 - 周杰伦")], audio={2})
+    assert mw.read_window_media() == ("夜曲", "周杰伦", True)   # pid=2 进入"最近听到过"
+
+    clock["t"] += 2.0
     _stub(
         monkeypatch,
         [(2, "cloudmusic.exe", "夜曲 - 周杰伦"), (3, "qqmusic.exe", "晴天 - 周杰伦")],
-        audio=set(),
+        audio=set(),          # 都在间隙里
     )
-    assert mw.read_window_media() == ("夜曲", "周杰伦", False)
+    assert mw.read_window_media() == ("夜曲", "周杰伦", True), "应优先最近听到过的那个"
 
 
 def test_never_raises_on_broken_seams(monkeypatch):

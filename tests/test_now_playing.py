@@ -35,8 +35,18 @@ def _isolate_sampler():
 
 @pytest.fixture(autouse=True)
 def _no_real_window_probe(monkeypatch):
-    """窗口标题兜底默认按「没在放歌」处理；要用它的用例自行覆盖。"""
-    monkeypatch.setattr(now_playing, "_read_window_media", lambda: None)
+    """窗口标题兜底默认按「没在放歌」处理（打到最内层探针，便于用例自替换）。"""
+    monkeypatch.setattr(
+        now_playing.media_window, "read_window_media", lambda: None
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clear_window_sticky():
+    """兜底粘滞是模块级状态：每个用例前后清干净。"""
+    now_playing._window_sticky = None
+    yield
+    now_playing._window_sticky = None
 
 
 def _playback(title: str = "曲名", artist: str = "歌手") -> now_playing.Playback:
@@ -250,6 +260,34 @@ def test_window_fallback_takes_over_after_smtc_wedges(monkeypatch):
         assert now_playing.get_now_playing() is fallback
         time.sleep(0.05)
     assert calls["smtc"] == smtc_calls, "退避窗口内不得再次调用 SMTC（会被再次卡死）"
+
+
+def test_window_fallback_sticks_through_transient_probe_failure(monkeypatch):
+    """兜底探针偶发失败（播放器切窗口/改标题）时沿用上一次结果，不返回 None。
+
+    回归（实机 2026-09-17）：单拍 None 会让控制器复位整条链路 → 重新取词、歌词时间轴
+    从 0 秒重来，用户看到的是「歌词显示一半就只剩歌名，然后从头再唱」。
+    """
+    calls = {"n": 0}
+
+    def _probe():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ("孤独患者", "陈奕迅", True)
+        return None
+
+    monkeypatch.setattr(now_playing.media_window, "read_window_media", _probe)
+
+    first = now_playing._read_window_media()
+    assert first is not None and first.track.title == "孤独患者"
+    # 探针开始失败：粘滞期内必须继续给出同一首（否则控制器会复位）
+    assert now_playing._read_window_media().track.title == "孤独患者"
+    assert now_playing._read_window_media().track.title == "孤独患者"
+
+    # 超过粘滞时长才允许返回 None（播放器真的关了）。用负值：Windows 上
+    # time.monotonic() 分辨率约 15.6ms，紧跟其后的调用可能算出恰好 0.0。
+    monkeypatch.setattr(now_playing, "_WINDOW_STICKY_S", -1.0)
+    assert now_playing._read_window_media() is None
 
 
 def test_smtc_retried_after_backoff_expires(monkeypatch):

@@ -420,6 +420,84 @@ def test_title_shows_immediately_on_track_change():
     assert ctrl._title_line == "我在唱《夜曲》"
 
 
+def test_first_positionless_track_still_shows_title():
+    """首次发现且拿不到进度的曲目：不跟歌词，但**必须亮出歌名**。
+
+    回归（2026-09-17）：原先这里直接 return，连歌名都不显示——用户看到的是
+    「监听完全没在工作」（本机 SMTC 卡死、靠窗口标题兜底时尤其明显，因为兜底
+    来源永远没有进度）。
+    """
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _FakeWin()
+    ctrl = MusicLyricController(win)
+    ctrl._current_key = None
+    ctrl._primed = False         # 首次发现（歌词刚开启 / 桌宠刚起来时已在播）
+    playback = type("P", (), {"position": None, "updated_at": 0.0})()
+
+    ctrl._start_track(("夜曲", "周杰伦"), "夜曲", "周杰伦", playback, 100.0)
+
+    assert win.shown == [("", "我在唱《夜曲》")], win.shown
+    assert ctrl._title_line == "我在唱《夜曲》"
+    # 不取词：拿不到起点就是拿不到，等下一次可信的切歌边界再跟歌词。
+    assert ctrl._loading == set()
+    assert ctrl._no_lyric_keys == set()
+
+
+def test_first_track_with_position_still_fetches_lyrics():
+    """报进度的播放器（如 QQ 音乐）首次发现就能对齐 → 照常取词，不受上面那条影响。"""
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _FakeWin()
+    ctrl = MusicLyricController(win)
+    ctrl._current_key = None
+    ctrl._primed = False
+    playback = type("P", (), {"position": 42.0, "updated_at": 0.0})()
+
+    ctrl._start_track(("夜曲", "周杰伦"), "夜曲", "周杰伦", playback, 100.0)
+
+    assert win.shown == [("", "我在唱《夜曲》")], win.shown
+    assert ("夜曲", "周杰伦") in ctrl._loading
+
+
+def test_single_missing_player_tick_does_not_reset(monkeypatch):
+    """单拍拿不到播放器不得复位链路，只有连续多拍才认定"播放器没了"。
+
+    回归（实机 2026-09-17）：单拍 None 会立刻 _reset() → 下一拍重新 _start_track →
+    先只显示歌名、再取词、歌词时间轴从 0 秒重来。用户看到的是「歌词显示一半就只剩
+    歌名，然后从头再唱一遍」。
+    """
+    from pet import music_lyric_controller as mlc
+    from pet.music_lyric_controller import MusicLyricController
+    from pet.now_playing import Playback, Track
+
+    win = _FakeWin()
+    ctrl = MusicLyricController(win)
+    state = {
+        "value": Playback(
+            track=Track(title="孤独患者", artist="陈奕迅", playing=True),
+            position=None,
+            updated_at=0.0,
+        )
+    }
+    monkeypatch.setattr(mlc.now_playing, "get_now_playing", lambda: state["value"])
+
+    ctrl._on_tick()                       # 首次发现：亮歌名（拿不到进度 → 不取词）
+    assert ctrl._current_key == ("孤独患者", "陈奕迅")
+    ctrl._primed = True                   # 假装已过首次边界
+    ctrl._title_line = "我在唱《孤独患者》"
+
+    state["value"] = None
+    ctrl._on_tick()                       # 单拍抖动
+    assert ctrl._current_key == ("孤独患者", "陈奕迅"), "单拍抖动不该让链路复位"
+    assert ctrl._title_line == "我在唱《孤独患者》"
+
+    for _ in range(mlc._MISS_RESET_TICKS):  # 连续多拍都没有 → 才复位
+        ctrl._on_tick()
+    assert ctrl._current_key is None
+    assert ctrl._title_line is None
+
+
 def test_title_persists_after_lyrics_arrive():
     """歌词到位后，标题必须仍在第一行（这就是本次需求的核心）。"""
     from pet.music_lyric_controller import MusicLyricController

@@ -9,8 +9,8 @@
 
 - 只用 ctypes + pycaw，零 Qt；
 - 只认 :data:`MUSIC_PLAYER_EXES` 白名单里的进程，避免把任意窗口标题当歌曲；
-- 多窗口时**优先选真正在出声的那个进程**（pycaw 逐会话峰值）；
-- 任何一步失败都返回 ``None``——歌词只是锦上添花，绝不惊动桌宠本体。
+- 多窗口时**优先选音频会话处于 Active（正在播放）的那个进程**（pycaw 会话状态；
+-   刻意不用峰值：峰值在间奏/轻声段会掉到 0，会把"安静地放着"误判成暂停）；\n- 任何一步失败都返回 ``None``——歌词只是锦上添花，绝不惊动桌宠本体。
 
 已知边界：播放器缩小到托盘且窗口隐藏时取不到标题；标题里没有播放进度。
 """
@@ -49,8 +49,19 @@ _GENERIC_TITLES = frozenset({
 # 歌名与歌手之间的分隔符（按优先级）。
 _SEPARATORS = (" - ", " • ", " – ", " — ")
 
-# 逐会话峰值阈值：低于它视为该进程没在出声。
-_AUDIO_PEAK_THRESHOLD = 0.02
+# 「最近 Active 过」宽限（秒）：换歌那一瞬会话会短暂离开 Active（旧流结束、新流开始），
+# 立刻判成暂停会让歌词整首不开始（实机 2026-09-17：换歌瞬间判 False → 连续两首没出词）。
+_ACTIVE_GRACE_S = 10.0
+
+# pid -> 最近一次「它的音频会话处于 Active」的时刻（monotonic）。只在进程内累积，不落盘。
+_last_active_at: dict[int, float] = {}
+
+
+def _now() -> float:
+    """当前单调时刻（独立函数便于测试注入）。"""
+    import time
+
+    return time.monotonic()
 
 
 def parse_track_title(title: str) -> tuple[str, str] | None:
@@ -139,12 +150,19 @@ def _list_windows() -> list[tuple[int, str, str]]:
         return []
 
 
-def _audio_active_pids() -> set[int] | None:
-    """当前正在出声的进程 pid 集合；拿不到逐会话信息时返回 ``None``（≠ 空集）。"""
+def _active_session_pids() -> set[int] | None:
+    """音频会话处于 **Active**（= 正在播放，流在跑）的进程 pid 集合；拿不到信息返回 ``None``。
+
+    刻意**不用峰值**判活跃：峰值在间奏/轻声段会掉到 0，把"安静地放着"误判成暂停；
+    而控制器一旦认为暂停就会**冻结歌词基准**，恢复后位置整体落后（实机 2026-09-17
+    用户反馈"歌词对不上"）。WASAPI 的会话状态恰好区分这两件事：
+    真暂停/播完 → ``Inactive``，只是声音小 → 仍是 ``Active``。
+    """
     if sys.platform != "win32":
         return None
     try:
-        from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
+        from pycaw.constants import AudioSessionState
+        from pycaw.pycaw import AudioUtilities
     except Exception:
         return None
     try:
@@ -154,8 +172,7 @@ def _audio_active_pids() -> set[int] | None:
             if proc is None:
                 continue
             try:
-                meter = session._ctl.QueryInterface(IAudioMeterInformation)
-                if meter.GetPeakValue() > _AUDIO_PEAK_THRESHOLD:
+                if session.State == AudioSessionState.Active:
                     pids.add(int(proc.pid))
             except Exception:
                 continue
@@ -167,7 +184,11 @@ def _audio_active_pids() -> set[int] | None:
 def read_window_media() -> tuple[str, str, bool] | None:
     """返回 ``(歌名, 歌手, 是否在播放)``；没有可识别的播放器时返回 ``None``。
 
-    候选 = 白名单进程 × 可解析标题；多个候选时优先「该进程正在出声」的那个。
+    候选 = 白名单进程 × 可解析标题；多个候选时优先「会话处于 Active」的那个。
+    ``playing`` 采用**迟滞**判定（见 :data:`_ACTIVE_GRACE_S`）：只有「确实见过它
+    Active，且已经离开 Active 超过宽限期」才算暂停——否则换歌瞬间的会话切换会被误判
+    成暂停（歌词整首不出、基准冻结导致漂移）；从未见过它 Active 的（例如音频会话
+    落在别的输出设备上）按在播放处理。
     """
     try:
         windows = _list_windows()
@@ -183,16 +204,26 @@ def read_window_media() -> tuple[str, str, bool] | None:
             candidates.append((int(pid), parsed[0], parsed[1]))
         if not candidates:
             return None
-        audio = _audio_active_pids()
-        if audio:
+        now = _now()
+        active = _active_session_pids()
+        for pid in active or ():
+            _last_active_at[pid] = now
+        if active:
+            # 正在播放的优先；其次「最近 Active 过」的（换歌瞬间仍是同一台播放器）。
             for pid, song, artist in candidates:
-                if pid in audio:
+                if pid in active:
+                    return (song, artist, True)
+            for pid, song, artist in candidates:
+                seen = _last_active_at.get(pid)
+                if seen is not None and (now - seen) <= _ACTIVE_GRACE_S:
                     return (song, artist, True)
         pid, song, artist = candidates[0]
-        # 有逐会话信息就信它（暂停/静音 = 该进程不在出声集合里，见上面的优先分支）；
-        # 拿不到逐会话信息时**假定在播放**——宁可显示歌词，也不要因为探测不到音量
-        # 就让整个兜底静默（冻结环境里峰值探测失败过一次）。
-        playing = True if audio is None else (pid in audio)
-        return (song, artist, bool(playing))
+        if active is None:
+            return (song, artist, True)  # 拿不到会话信息：假定在放，别整体静默
+        seen = _last_active_at.get(pid)
+        if seen is None:
+            # 从未见它 Active（会话可能在别的输出设备上）：没有"暂停"的正证据，按在放处理。
+            return (song, artist, True)
+        return (song, artist, (now - seen) <= _ACTIVE_GRACE_S)
     except Exception:
         return None

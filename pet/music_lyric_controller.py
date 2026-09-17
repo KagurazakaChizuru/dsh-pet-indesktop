@@ -32,8 +32,15 @@ from . import music_lyric, now_playing
 
 log = logging.getLogger(__name__)
 
-# 轮询间隔：与现有 music_sing 一致，兼顾开销与切歌响应速度。
-POLL_MS = 1000
+# 轮询间隔（毫秒）：一拍越短，歌词换句越贴合人声——显示的换行时刻最多被拖后一拍。
+# 2026-09-17 实机反馈"歌词对不上"后由 1000 收紧到 500：兜底来源（窗口标题）没有播放
+# 进度，位置全靠本地时钟推算，一拍 1s 的相位误差是可感知的主要滞后项；500ms 下
+# 气泡每秒重送两次（仅一次重绘 + 续期），开销可忽略。
+POLL_MS = 500
+
+# 连续多少拍拿不到播放器才认定"播放器没了"并复位链路（500ms 一拍 → 2 秒）。
+# 单拍抖动（播放器切窗口/改标题/枚举抖动）不得让歌词从头再来。
+_MISS_RESET_TICKS = 4
 
 # 歌词换句时允许气泡重新选位的概率。气泡位置由"当前尺寸"算得，而每句歌词
 # 长短不同，若每句都重算就会一路乱跳；只在换句时以小概率允许移动，
@@ -252,6 +259,9 @@ class MusicLyricController(QObject):
         self._tracker = LyricTracker()
 
         self._current_key: tuple[str, str] | None = None
+        # 连续拿不到播放器的拍数：只有连续多拍都拿不到才认为"播放器没了"（见
+        # _MISS_RESET_TICKS）。单拍抖动（播放器切窗口/改标题）不该让链路复位。
+        self._missing_ticks: int = 0
         # 本次播放已尝试过取词但失败的曲目——避免反复请求同一首无词的歌。
         self._no_lyric_keys: set[tuple[str, str]] = set()
         self._loading: set[tuple[str, str]] = set()
@@ -502,11 +512,14 @@ class MusicLyricController(QObject):
             return
         playback = now_playing.get_now_playing()
         if playback is None:
-            # 播放器没了（退出/会话消失）：整体复位，下次从头来过。
-            if self._last_playing:
+            # 播放器没了（退出/会话消失）：**连续几拍**都拿不到才复位，单拍抖动不该
+            # 让整条链路重来（实机症状：歌词显示一半就只剩歌名、时间轴从 0 秒重唱）。
+            self._missing_ticks += 1
+            if self._last_playing and self._missing_ticks >= _MISS_RESET_TICKS:
                 self._reset()
-            self._last_playing = False
+                self._last_playing = False
             return
+        self._missing_ticks = 0
 
         track = playback.track
         key = track.key()
@@ -558,18 +571,18 @@ class MusicLyricController(QObject):
         # 每首歌都重新记，避免用上一首的旧值把基准带到新歌上。
         self._detected_at = now
 
-        # 功能刚开启时，歌可能已经唱了一半。此时：
-        # - 播放器报真实进度（如 QQ 音乐）→ 直接对齐，不受影响；
-        # - 播放器不报进度（如网易云）  → 无从推断已唱到第几秒，猜一个起点
-        #   只会让歌词一路错位。按约定跳过这首，等下一次可信的切歌边界。
         first_key = not self._primed
         self._primed = True
-        if playback.position is None and first_key:
-            return
-
-        # 先亮出歌名：一是给用户即时反馈，二是填上取词那几秒的空窗——
-        # 否则切歌后会有 3~5 秒什么都不显示。
+        # 先亮出歌名：一是给用户即时反馈（也让"监听确实在工作"看得见），二是填上取词
+        # 那几秒的空窗——否则切歌后会有 3~5 秒什么都不显示。
         self._announce(title, artist)
+        if playback.position is None and first_key:
+            # 桌宠刚起来/歌词刚开启时，歌可能已经唱了一半：
+            # - 播放器报真实进度（如 QQ 音乐）→ 上面已按进度对齐，不受影响；
+            # - 不报进度的（如网易云、窗口标题兜底）→ 无从推断已唱到第几秒，猜一个
+            #   起点只会让歌词一路错位 ⇒ 只留歌名，歌词等下一次可信的切歌边界
+            #   （桌宠运行期间观察到的换歌）再跟。
+            return
 
         if key in self._no_lyric_keys or key in self._loading:
             return

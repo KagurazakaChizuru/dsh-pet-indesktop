@@ -316,33 +316,46 @@ _sample_started_at = float("-inf")       # 当前采样线程启动时刻（冷�
 _sample_request_at = 0.0                 # 调用方最近一次取值时刻（空闲退出）
 _stall_reported = False                  # 卡死告警只报一次（恢复后重置）
 _smtc_wedged_until = 0.0                 # SMTC 退避截止时刻（monotonic）
-_window_log_key: tuple[str, str] | None = None  # 兜底来源最近一次上报的曲目（去重日志）
+_window_log_key: tuple[str, str, bool] | None = None  # 兜底来源最近上报的（曲目, 播放）
+_window_sticky: tuple[Playback, float] | None = None   # 最近一次成功的兜底样本 + 时刻
+_WINDOW_STICKY_S = 20.0                                # 偶发取不到时沿用的时长（秒）
 
 
 def _read_window_media() -> Playback | None:
     """窗口标题兜底：SMTC 不可用/查不到会话时用它拿到「在放什么歌」。
 
     没有播放进度（``position=None``，与网易云在 SMTC 下的表现一致，控制器已支持）；
-    ``playing`` 由 media_window 结合逐会话音频判定（拿不到音频信息时假定在放）。
+    ``playing`` 由 media_window 结合会话状态判定。
+
+    **偶发取不到时不返回 None**：播放器切窗口/改标题会让这个探针单拍失败，而控制器
+    一旦收到 None 就复位整条链路——重新取词、歌词时间轴从 0 秒重来。实机症状正是
+    「歌词显示一半就只剩歌名，然后从头再来」，所以这里对最近的成功结果做短时粘滞
+    （:data:`_WINDOW_STICKY_S`）。
     """
-    global _window_log_key
+    global _window_log_key, _window_sticky
     try:
         found = media_window.read_window_media()
     except Exception:
-        return None
+        found = None
     if not found:
+        if _window_sticky is not None:
+            value, at = _window_sticky
+            if (time.monotonic() - at) <= _WINDOW_STICKY_S:
+                return value
         return None
     title, artist, playing = found
-    key = (str(artist), str(title))
+    key = (str(artist), str(title), bool(playing))
     if key != _window_log_key:
-        # 换歌才记一行：出问题时用户日志里能直接看到兜底来源与判定结果。
+        # 换歌、或播放判定翻转才记一行：出问题时日志里能直接看到兜底来源与判定结果。
         _window_log_key = key
         log.info("窗口标题监听：%s - %s（playing=%s）", artist, title, playing)
-    return Playback(
+    value = Playback(
         track=Track(title=str(title), artist=str(artist), playing=bool(playing)),
         position=None,
         updated_at=time.monotonic(),
     )
+    _window_sticky = (value, value.updated_at)
+    return value
 
 
 def _sample_once() -> Playback | None:
