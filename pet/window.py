@@ -2478,6 +2478,12 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             # 不再每次播完都查一次音频 COM，降低长时间运行的崩溃风险。
             # 音乐停止由 _check_music_sing 定时检测后清掉 _music_sing_active。
             if self._music_sing_enabled and self._music_sing_active:
+                if self._pending_link_anim:
+                    # 唱歌循环会一直续播，待播联动动作（节日提醒动画）永远轮不到
+                    # 下面的消费点：圈末先交付它，唱歌交回每秒轮询重启。
+                    self._music_sing_active = False
+                    self._play_pending_link_anim()
+                    return
                 self._switch(SING_ANIM)
                 return
             self._music_sing_active = False
