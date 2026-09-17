@@ -254,20 +254,6 @@ def toggle_play_pause() -> bool:
     return bool(_run_bounded(lambda: asyncio.run(_play_pause_async()), False))
 
 
-async def _resume_async() -> bool:
-    session = await _pick_playback_session()
-    if session is None:
-        return False
-    return bool(await session.try_play_async())
-
-
-def resume_playback() -> bool:
-    """让当前会话开始播放（用于"打开播放器并自动播放"）。"""
-    if sys.platform != "win32":
-        return False
-    return bool(_run_bounded(lambda: asyncio.run(_resume_async()), False))
-
-
 async def _play_session_async(exe_name: str) -> bool:
     manager_cls = _import_winrt()
     if manager_cls is None:
@@ -297,6 +283,12 @@ def play_session_for(exe_name: str) -> bool:
 # 所以「给 await 加超时」这条路不成立，唯一可靠的做法是让**别的线程**去等它：
 # 采样线程可以被摘牌弃用，调用线程只读快照或做有界等待。
 _SAMPLE_INTERVAL = 0.3     # 后台采样间隔（秒）
+# 采样间隔的"空转档"：一个媒体会话都没有时（没开播放器/播放器不露面）放慢到
+# 这一档。多宠物一起挂在桌面上时，N 个进程 × 每秒 3.3 次窗口枚举 + WASAPI
+# 查询是白白烧 CPU/电；放慢后空闲开销约降到 1/4，而"开始放歌"最多晚
+# _SAMPLE_EMPTY_GRACE 内的这一档被发现（1.2s，用户感知不到）。
+_SAMPLE_IDLE_INTERVAL = 1.2
+_SAMPLE_EMPTY_GRACE = 3.0   # 连续空会话多久后才降档（避免刚起播就被慢节拍拖住）
 _SAMPLE_STALL_LIMIT = 5.0  # 采样线程停摆超过该时长 = 卡死，弃用并重开
 _RESTART_COOLDOWN = 5.0    # 两次重开的最小间隔（卡死时不疯狂开线程）
 _IDLE_STOP = 5.0           # 调用方连续多久不取值就收摊（歌词关/窗口隐藏）
@@ -315,6 +307,7 @@ _sample_thread: threading.Thread | None = None
 _sample_value: Playback | None = None    # 最近一次成功采样（快照）
 _sample_ready = False                    # 快照是否可用（区分「无播放器」与「没采过」）
 _sample_beat = 0.0                       # 采样线程最近一次开工/收工时刻
+_sample_empty_since: float | None = None  # 连续"没有任何会话"的起点（空转降档用）
 _sample_started_at = float("-inf")       # 当前采样线程启动时刻（冷却判定）
 _sample_request_at = 0.0                 # 调用方最近一次取值时刻（空闲退出）
 _stall_reported = False                  # 卡死告警只报一次（恢复后重置）
@@ -390,6 +383,23 @@ def _sample_once() -> Playback | None:
     return _read_window_media()
 
 
+def _next_sample_interval(value: Playback | None, now: float) -> float:
+    """本次采样后该歇多久：一直没有媒体会话就降档（多宠物一起空转时省开销）。
+
+    纯函数 + 模块级状态，便于单测：``value is None`` 表示"这一拍没有任何会话"。
+    """
+    global _sample_empty_since
+    if value is not None:
+        _sample_empty_since = None
+        return _SAMPLE_INTERVAL
+    if _sample_empty_since is None:
+        _sample_empty_since = now
+        return _SAMPLE_INTERVAL
+    if (now - _sample_empty_since) >= _SAMPLE_EMPTY_GRACE:
+        return _SAMPLE_IDLE_INTERVAL
+    return _SAMPLE_INTERVAL
+
+
 def _sampler_loop(token: object) -> None:
     """后台采样线程体：循环采样并发布快照；被摘牌或无人取值即退场。"""
     global _sample_beat, _sample_ready, _sample_thread, _sample_token
@@ -410,7 +420,7 @@ def _sampler_loop(token: object) -> None:
             _sample_value = value
             _sample_ready = True
             _sample_beat = time.monotonic()
-        time.sleep(_SAMPLE_INTERVAL)
+        time.sleep(_next_sample_interval(value, time.monotonic()))
 
 
 def _start_sampler_locked(now: float) -> threading.Thread:
@@ -466,12 +476,13 @@ def _stop_sampler() -> None:
     也会在迟到的返回之后自行退场。
     """
     global _sample_ready, _sample_started_at, _sample_thread, _sample_token
-    global _sample_value, _smtc_last_at, _smtc_wedged_until
+    global _sample_value, _smtc_last_at, _smtc_wedged_until, _sample_empty_since
     with _sample_lock:
         _sample_token = None
         _sample_thread = None
         _sample_value = None
         _sample_ready = False
+        _sample_empty_since = None  # 空转降档状态也归零：重新开始时先按快节拍观察
         _sample_started_at = float("-inf")
         _smtc_wedged_until = 0.0  # 重新开始时清掉退避：给 SMTC 一次新机会
         _smtc_last_at = 0.0       # 限速计时也归零

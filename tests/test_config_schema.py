@@ -91,6 +91,7 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "music_lyric_cache_limit",
         "music_lyric_enabled",
         "music_lyric_lead_seconds",
+        "music_player_paths",
         "music_sing_enabled",
         "music_sing_grace_seconds",
         "no_move",

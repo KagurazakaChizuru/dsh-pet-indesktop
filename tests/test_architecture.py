@@ -91,7 +91,12 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 # 待播联动动作（节日提醒动画），否则唱歌循环会一直续播、把待播动画饿死；该分支与
 # _pending_link_anim / _play_pending_link_anim / _switch 共享窗口状态流，拆出去会切断
 # 调用链。按约定只校准预算，**不为达标压行**（初版误压了上方飞行链注释，已按约定回改）。
-WINDOW_PY_LINE_BUDGET = 4513
+# 2026-09-18 再上调到 4518：歌词显示审计修复批（window.py +5，实测 4518）——
+# show_bubble 改为**返回是否真的显示了**（True/False）：歌词每拍重发、需要知道自己
+# 有没有上屏（被提醒队列/设置窗口/按钮气泡丢弃时不能记账，否则让路与重试逻辑跟着错）。
+# 该返回值必须留在 PetWindow 上（所有冒泡路径的唯一收口），拆出去会切断与
+# _alert_current / _bubble_suppressed 的判定；按约定只校准预算，不为达标压行。
+WINDOW_PY_LINE_BUDGET = 4518
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的

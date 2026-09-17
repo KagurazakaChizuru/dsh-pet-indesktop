@@ -20,6 +20,8 @@ from pathlib import Path
 from .config import APP_DIR_NAME
 from . import __version__
 
+from . import http_util
+
 # 与 pet/__init__.py 保持单一来源：发布时只改一处
 APP_VERSION = __version__
 REPO = 'MerZlin/dsh-pet-indesktop'
@@ -44,7 +46,7 @@ def _fetch_json(url: str, timeout: float):
             url,
             headers={'Accept': 'application/json', 'User-Agent': _USER_AGENT},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with http_util.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode('utf-8'))
     except (urllib.error.URLError, OSError, ValueError):
         return None
@@ -145,7 +147,7 @@ def download(
     """
     try:
         req = urllib.request.Request(url, headers={'User-Agent': _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=30.0) as resp:
+        with http_util.urlopen(req, timeout=30.0) as resp:
             total = int(resp.headers.get('Content-Length') or 0)
             received = 0
             with open(dest, 'wb') as f:

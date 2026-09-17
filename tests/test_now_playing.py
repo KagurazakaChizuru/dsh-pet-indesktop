@@ -31,6 +31,7 @@ def _isolate_sampler():
     now_playing._stop_sampler()
     yield
     now_playing._stop_sampler()
+    now_playing._sample_empty_since = None
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +48,50 @@ def _clear_window_sticky():
     now_playing._window_sticky = None
     yield
     now_playing._window_sticky = None
+
+
+# ------------------------------------------------- 空闲降档（多宠物省开销）
+
+def test_empty_sessions_slow_the_sampler_down():
+    """一个会话都没有 → 连续空转超过宽限期后降档到慢节拍。"""
+    now_playing._sample_empty_since = None
+    assert now_playing._next_sample_interval(None, 100.0) == now_playing._SAMPLE_INTERVAL
+    assert now_playing._next_sample_interval(None, 101.0) == now_playing._SAMPLE_INTERVAL
+    slow = now_playing._next_sample_interval(
+        None, 100.0 + now_playing._SAMPLE_EMPTY_GRACE
+    )
+    assert slow == now_playing._SAMPLE_IDLE_INTERVAL
+    assert slow > now_playing._SAMPLE_INTERVAL
+
+
+def test_playing_session_restores_fast_interval():
+    """一有会话就立刻回到快节拍（不允许慢档拖住切歌/起播的发现）。"""
+    now_playing._sample_empty_since = None
+    now_playing._next_sample_interval(None, 100.0)
+    now_playing._next_sample_interval(None, 100.0 + now_playing._SAMPLE_EMPTY_GRACE)
+    assert now_playing._next_sample_interval(_playback(), 200.0) == now_playing._SAMPLE_INTERVAL
+    # 会话消失后重新计时：先快节拍观察，再降档
+    assert now_playing._next_sample_interval(None, 201.0) == now_playing._SAMPLE_INTERVAL
+
+
+def test_sampler_loop_uses_adaptive_interval(monkeypatch):
+    """采样循环必须真的用 _next_sample_interval 的返回值（不是写死常量）。"""
+    intervals: list[float] = []
+
+    def _fake_interval(value, now):
+        intervals.append(now)
+        return 0.01
+
+    monkeypatch.setattr(now_playing, "_next_sample_interval", _fake_interval)
+    monkeypatch.setattr(now_playing, "_IDLE_STOP", 5.0)
+    monkeypatch.setattr(now_playing, "_read_blocking", lambda: _playback())
+
+    now_playing.get_now_playing()
+    assert _wait_for_sample(_playback()) is not None or intervals, "采样线程没跑起来"
+    deadline = time.monotonic() + 2.0
+    while not intervals and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert intervals, "采样循环没有调用自适应间隔计算"
 
 
 def _playback(title: str = "曲名", artist: str = "歌手") -> now_playing.Playback:
@@ -173,7 +218,6 @@ def test_run_bounded_returns_value_when_work_finishes():
     [
         pytest.param(lambda: now_playing.toggle_play_pause(), id="toggle_play_pause"),
         pytest.param(lambda: now_playing.skip_track("next"), id="skip_track"),
-        pytest.param(lambda: now_playing.resume_playback(), id="resume_playback"),
         pytest.param(
             lambda: now_playing.play_session_for("cloudmusic.exe"),
             id="play_session_for",
@@ -188,7 +232,6 @@ def test_player_actions_are_bounded_when_winrt_stalls(monkeypatch, invoke):
         await asyncio.Event().wait()
 
     for name in (
-        "_resume_async",
         "_play_session_async",
         "_skip_async",
         "_play_pause_async",

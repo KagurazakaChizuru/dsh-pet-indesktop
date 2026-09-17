@@ -6,71 +6,89 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import pytest
 
-from pet import music_lyric
+from pet import http_util, music_lyric
 from pet.music_lyric import Lyrics, LyricLine, parse_lrc
 from pet.music_lyric_controller import LyricTracker
 
 
 @pytest.fixture(autouse=True)
-def _reset_transport_flag():
-    """传输层"固定直连"是模块级状态：每个用例前后清零。"""
-    music_lyric._force_direct = False
+def _reset_transport():
+    """传输层「固定直连」是 pet.http_util 的模块级状态：每个用例前后清零。"""
+    http_util.reset_transport()
+    music_lyric._last_failure_sig = None
     yield
-    music_lyric._force_direct = False
+    http_util.reset_transport()
+    music_lyric._last_failure_sig = None
 
 
 # ------------------------------------------------- 传输层：代理不通就直连
+# 兜底逻辑本身收敛在 pet.http_util（用例见 tests/test_http_util.py）；
+# 这里只守住"歌词取词确实走共享传输层"和"HTTP 明确答复不重试"两条契约。
 
 
-def test_http_get_json_falls_back_to_direct_when_proxy_dead(monkeypatch):
-    """回归（2026-09-17 实机）：系统代理开着但进程没跑时，取词必须自动改直连。
+def test_http_read_goes_through_shared_transport(monkeypatch):
+    """歌词取词必须走 pet.http_util：否则死代理再来一次还是全军覆没。
 
-    死代理会让 QQ音乐 / lrclib / 网易云三个源全部 ConnectionRefused → 每首歌都被
-    记成"无词" → 气泡只剩歌名（用户原话："显示一半就剩下歌名了"）。
+    实机（2026-09-17）：系统代理开着、进程没跑，`urllib` 照它走 → QQ音乐 / lrclib /
+    网易云三个源全部 ConnectionRefused → 每首歌都被记成"无词" → 气泡只剩歌名。
     """
-    calls: list[bool] = []
+    calls: list[object] = []
 
-    def _read(url, *, referer, use_proxy):
-        calls.append(use_proxy)
-        if use_proxy:
-            raise OSError("connection refused")
-        return b'{"ok": 1}'
+    class _Resp:
+        def __enter__(self):
+            return self
 
-    monkeypatch.setattr(music_lyric, "_http_read", _read)
+        def __exit__(self, *exc):
+            return False
 
-    assert music_lyric._http_get_json("https://example.com/x") == {"ok": 1}
-    assert calls == [True, False], "先按系统代理试、失败后必须直连重试"
-    assert music_lyric._force_direct is True, "确认代理不可用后应记住直连"
+        def read(self):
+            return b'{"ok": 1}'
 
-    calls.clear()
-    assert music_lyric._http_get_json("https://example.com/y") == {"ok": 1}
-    assert calls == [False], "后续请求不应再撞一遍死代理"
+    def _urlopen(request, *, timeout, **kwargs):
+        calls.append((request.full_url, timeout))
+        return _Resp()
+
+    monkeypatch.setattr(http_util, "urlopen", _urlopen)
+
+    assert music_lyric._http_read("https://example.com/x", referer=None) == b'{"ok": 1}'
+    assert calls and calls[0][0] == "https://example.com/x"
 
 
-def test_http_get_json_does_not_retry_on_http_error(monkeypatch):
-    """服务器明确答复（404 等）说明链路是通的：不重试、也不切直连。"""
-    calls: list[bool] = []
+def test_http_get_json_returns_none_on_http_error(monkeypatch):
+    """服务器明确答复（404 等）说明链路是通的：当作"这次没结果"，不抛给上层。"""
+    calls: list[str] = []
 
-    def _read(url, *, referer, use_proxy):
-        calls.append(use_proxy)
-        raise music_lyric.urllib.error.HTTPError(url, 404, "Not Found", None, None)
+    def _read(url, *, referer):
+        calls.append(url)
+        raise http_util.urllib.error.HTTPError(url, 404, "Not Found", None, None)
 
     monkeypatch.setattr(music_lyric, "_http_read", _read)
 
     assert music_lyric._http_get_json("https://example.com/x") is None
-    assert calls == [True]
-    assert music_lyric._force_direct is False
+    assert calls == ["https://example.com/x"], "HTTPError 不该在歌词层重试"
+
+
+def test_http_get_json_returns_none_on_transport_failure(monkeypatch):
+    """连不上（换 http_util 的直连兜底也救不回）时返回 None，交给上层换源。"""
+
+    def _read(url, *, referer):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(music_lyric, "_http_read", _read)
+
+    assert music_lyric._http_get_json("https://example.com/x") is None
 
 
 def test_http_get_json_parses_jsonp(monkeypatch):
     """JSONP 包裹仍要能解析（既有行为不回归）。"""
     monkeypatch.setattr(
         music_lyric, "_http_read",
-        lambda url, *, referer, use_proxy: b'cb({"a": 2})',
+        lambda url, *, referer: b'cb({"a": 2})',
     )
     assert music_lyric._http_get_json("https://example.com/x") == {"a": 2}
 
@@ -169,6 +187,66 @@ def test_name_matches_rejects_unrelated():
     assert not music_lyric._name_matches("周杰伦", "")
 
 
+# ------------------------------------------------------------ 搜索结果选曲
+# 实机（2026-09-17）：搜索"十年/陈奕迅"，返回列表里紧跟着「十年 (Live)」；
+# 原实现只校验歌手就取第一条，于是拿到现场版时间轴 → 整首歌的歌词对不上。
+
+
+def test_pick_song_requires_title_match_not_only_artist():
+    """只匹配歌手的候选项必须被排除（同歌手的别的歌不算命中）。"""
+    picked = music_lyric._pick_song(
+        [("富士山下", "陈奕迅", "wrong"), ("十年", "陈奕迅", "right")],
+        "十年",
+        "陈奕迅",
+    )
+    assert picked == "right"
+
+
+def test_pick_song_prefers_studio_over_live():
+    """同名同歌手时优先录音室版：现场/重制/伴奏版的时间轴对不上原曲。"""
+    for noise in ("十年 (Live)", "十年（现场版）", "十年 (remix)", "十年 (伴奏)"):
+        assert music_lyric._pick_song(
+            [(noise, "陈奕迅", "live"), ("十年", "陈奕迅", "studio")],
+            "十年",
+            "陈奕迅",
+        ) == "studio", noise
+        # 顺序反过来也必须挑到录音室版
+        assert music_lyric._pick_song(
+            [("十年", "陈奕迅", "studio"), (noise, "陈奕迅", "live")],
+            "十年",
+            "陈奕迅",
+        ) == "studio", noise
+
+
+def test_pick_song_rejects_artist_mismatch():
+    """歌名对上但歌手不对：不能取（翻唱/串烧会带偏整首歌）。"""
+    assert music_lyric._pick_song(
+        [("十年", "其他歌手", "cover")], "十年", "陈奕迅"
+    ) is None
+
+
+def test_pick_song_tolerates_title_decoration():
+    """歌名带括号补充说明仍算命中（"十年 (《…》插曲)"）。"""
+    assert music_lyric._pick_song(
+        [("十年 (《相爱穿梭千年》插曲)", "陈奕迅", "ok")], "十年", "陈奕迅"
+    ) == "ok"
+
+
+def test_pick_song_returns_none_when_nothing_matches():
+    assert music_lyric._pick_song([], "十年", "陈奕迅") is None
+    assert music_lyric._pick_song(
+        [("浮夸", "陈奕迅", "x")], "十年", "陈奕迅"
+    ) is None
+
+
+def test_pick_song_prefers_exact_title_over_substring():
+    """归一后完全相等的歌名优先于"包含"关系（避免选中加长版/串烧）。"""
+    assert music_lyric._pick_song(
+        [("十年 (Live)", "陈奕迅", "long"), ("十年", "陈奕迅", "exact")],
+        "十年", "陈奕迅",
+    ) == "exact"
+
+
 # ---------------------------------------------------------------- 取词流程
 
 
@@ -224,6 +302,69 @@ def test_fetch_lyrics_returns_none_when_all_fail(monkeypatch):
 
 def test_fetch_lyrics_empty_query_returns_none():
     assert music_lyric.fetch_lyrics("", "") is None
+
+
+# ------------------------------------------- 取词失败必须可见（审计：只落 DEBUG）
+# 发布版日志级别是 INFO：源异常如果只写 DEBUG，用户遇到"歌词一直没有"时
+# 日志里什么都看不到。约定见 music_lyric._report_source_failures。
+
+
+def _boom_sources(monkeypatch, failing: set[str]):
+    """把 _SOURCES 换成"指定源抛异常、其余源返回一句词"的替身。"""
+    def _fail(title, artist):
+        raise OSError("connection refused")
+
+    def _ok(title, artist):
+        return [LyricLine(1.0, "词")]
+
+    monkeypatch.setattr(
+        music_lyric, "_SOURCES",
+        tuple((name, _fail if name in failing else _ok)
+              for name in ("qq", "lrclib", "netease")),
+    )
+    monkeypatch.setattr(music_lyric, "_read_cache", lambda *a, **k: None)
+    monkeypatch.setattr(music_lyric, "_write_cache", lambda *a, **k: None)
+
+
+def test_all_sources_failing_logs_warning_once(monkeypatch, caplog):
+    _boom_sources(monkeypatch, {"qq", "lrclib", "netease"})
+    with caplog.at_level(logging.DEBUG, logger="pet.music_lyric"):
+        assert music_lyric.fetch_lyrics("十年", "陈奕迅", use_cache=False) is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, caplog.text
+        assert "全部源取词失败" in warnings[0].getMessage()
+        assert "connection refused" in warnings[0].getMessage()
+
+        # 同一原因继续失败：不再刷屏（降到 DEBUG）
+        caplog.clear()
+        assert music_lyric.fetch_lyrics("富士山下", "陈奕迅", use_cache=False) is None
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_partial_source_failure_is_info(monkeypatch, caplog):
+    """部分源失败但拿到了词 = 正常降级：INFO 提示，不进 WARNING。"""
+    _boom_sources(monkeypatch, {"netease"})
+    with caplog.at_level(logging.DEBUG, logger="pet.music_lyric"):
+        assert music_lyric.fetch_lyrics("十年", "陈奕迅", use_cache=False) is not None
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert any("部分歌词源取词失败" in r.getMessage() for r in infos), caplog.text
+
+
+def test_failure_warning_returns_after_recovery(monkeypatch, caplog):
+    """恢复过一次之后再全失败，仍要重新警告（抑制只针对连续同因）。"""
+    _boom_sources(monkeypatch, {"qq", "lrclib", "netease"})
+    with caplog.at_level(logging.DEBUG, logger="pet.music_lyric"):
+        music_lyric.fetch_lyrics("十年", "陈奕迅", use_cache=False)
+        caplog.clear()
+        # 中间成功一次（同一原因签名被清空）
+        _boom_sources(monkeypatch, set())
+        music_lyric.fetch_lyrics("十年", "陈奕迅", use_cache=False)
+        caplog.clear()
+        _boom_sources(monkeypatch, {"qq", "lrclib", "netease"})
+        music_lyric.fetch_lyrics("十年", "陈奕迅", use_cache=False)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, "恢复后应重新警告一次"
 
 
 # ---------------------------------------------------------------- 缓存
@@ -291,12 +432,60 @@ def test_cache_prune_evicts_oldest(monkeypatch, tmp_path):
     assert len(list(tmp_path.glob("*.json"))) == 2
 
 
-def test_clear_cache(monkeypatch, tmp_path):
+# ------------------------------------------------ 缓存上限：配置必须真的生效
+# `music_lyric_cache_limit` 以前只在 config 里登记、从没人读（审计发现）。
+
+
+@pytest.fixture
+def _restore_cache_limit():
+    """缓存上限是模块级状态：用例后复原，避免污染其他用例。"""
+    original = music_lyric._cache_limit
+    yield
+    music_lyric._cache_limit = original
+
+
+def test_set_cache_limit_clamps_and_ignores_garbage(_restore_cache_limit):
+    music_lyric.set_cache_limit(120)
+    assert music_lyric._cache_limit == 120
+    music_lyric.set_cache_limit(3)
+    assert music_lyric._cache_limit == 50, "下限 50：别把缓存压成 0"
+    music_lyric.set_cache_limit("abc")
+    assert music_lyric._cache_limit == 50, "非法值保持原值"
+    music_lyric.set_cache_limit(None)
+    assert music_lyric._cache_limit == 50
+
+
+def test_prune_cache_uses_configured_limit(monkeypatch, tmp_path, _restore_cache_limit):
+    """_prune_cache 缺省必须用配置生效值，而不是写死的 CACHE_LIMIT。"""
     monkeypatch.setattr(music_lyric, "cache_dir", lambda: tmp_path)
-    for i in range(3):
-        music_lyric._write_cache(f"歌{i}", "手", Lyrics(lines=(LyricLine(1.0, "x"),)))
-    assert music_lyric.clear_cache() == 3
-    assert list(tmp_path.glob("*.json")) == []
+    import os
+
+    for i in range(55):
+        path = tmp_path / f"k{i}.json"
+        path.write_text("{}", encoding="utf-8")
+        os.utime(path, (1000 + i, 1000 + i))
+    music_lyric.set_cache_limit(50)
+    music_lyric._prune_cache()
+    remaining = sorted(p.name for p in tmp_path.glob("*.json"))
+    assert len(remaining) == 50
+    assert "k0.json" not in remaining, "按修改时间淘汰最旧的"
+    assert "k54.json" in remaining
+
+
+def test_sync_music_lyric_wires_cache_limit(monkeypatch, _restore_cache_limit):
+    """接线：sync_music_lyric 读配置并把上限交给 music_lyric（审计缺口）。"""
+    from pet.window_optional_services import WindowFeatureGateMixin
+
+    seen: list[object] = []
+    monkeypatch.setattr(music_lyric, "set_cache_limit", lambda limit: seen.append(limit))
+
+    class _Host:
+        def __init__(self):
+            self.cfg = {"music_lyric_enabled": False, "music_lyric_cache_limit": 321}
+            self._music_lyric = None  # 从未启用：走早退分支，不装配控制器
+
+    WindowFeatureGateMixin.sync_music_lyric(_Host())
+    assert seen == [321]
 
 
 # ---------------------------------------------------------------- LyricTracker
@@ -772,3 +961,98 @@ def test_hidden_bubble_is_not_treated_as_taken():
     ctrl._title_line = "我在唱《夜曲》"
     win._speech_bubble._visible = False
     assert ctrl._bubble_taken_by_other() is False
+
+
+# ------------------------------------------- 窗口气泡明确拒绝时不许记账
+# window.show_bubble 现在返回"是否真的显示了"（提醒队列占用/窗口隐藏/按钮气泡
+# 都会让它返回 False）。控制器必须据此判断，否则会把"没显示"当成"已显示"。
+
+
+class _RefusingWin(_FakeWin):
+    """气泡位被占用：show_bubble 收下调用但明确返回 False。"""
+
+    def __init__(self):
+        super().__init__()
+        self.refuse = True
+
+    def show_bubble(self, text, duration_ms=3200, subtitle=None, **kw):
+        super().show_bubble(text, duration_ms, subtitle, **kw)
+        return False if self.refuse else True
+
+
+def test_refused_bubble_is_not_accounted_as_shown():
+    """被拒绝时不记账、也不锁宽：下一拍必须原样重试。"""
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _RefusingWin()
+    ctrl = MusicLyricController(win)
+    ctrl._title_line = "我在唱《夜曲》"
+
+    ctrl._show("一句歌词", title="我在唱《夜曲》", force=True)
+    assert win.shown, "调用本身要发出去（让窗口自己决定）"
+    assert ctrl._last_shown is None, "被拒绝就不该记账"
+    assert ctrl._width_locked is False, "没真的显示过就不该锁宽"
+
+    # 下一拍：即便内容与上次相同，也必须再发一次（因为上次没显示）
+    before = len(win.shown)
+    ctrl._show("一句歌词", title="我在唱《夜曲》", force=True)
+    assert len(win.shown) == before + 1, "被拒绝的那次不能算作已显示"
+
+
+def test_accepted_bubble_is_accounted_once():
+    """对照组：正常显示后记账，同内容不再每拍空发（force=False 时）。"""
+    from pet.music_lyric_controller import MusicLyricController
+
+    win = _RefusingWin()
+    win.refuse = False
+    ctrl = MusicLyricController(win)
+    ctrl._title_line = "我在唱《夜曲》"
+
+    ctrl._show("一句歌词", title="我在唱《夜曲》", force=True)
+    assert ctrl._last_shown is not None
+    assert ctrl._width_locked is True
+    before = len(win.shown)
+    ctrl._show("一句歌词", title="我在唱《夜曲》", force=False)
+    assert len(win.shown) == before, "同内容无需重复发送"
+
+
+def test_blank_interlude_line_keeps_previous_lyric(monkeypatch):
+    """间奏空行（时间戳在、正文空）不能把歌词清空：保持上一句。
+
+    实机表现：间奏一到正文消失，只剩"正在听《…》"标题——用户看到的就是
+    "歌词突然没了"。**两个入口都要守**：取词完成时的即时刷新、以及每拍 tick
+    （实测撞上的正是前者：刷新那一刻的进度恰好落在空行上）。
+    """
+    from pet import music_lyric_controller as mlc
+    from pet.music_lyric_controller import MusicLyricController
+    from pet.now_playing import Playback, Track
+
+    win = _FakeWin()
+    ctrl = MusicLyricController(win)
+    # Track.key() 是 (标题, 歌手) 的小写去空白形式，这里必须与之一致
+    ctrl._current_key = ("l", "a")
+    ctrl._primed = True
+    ctrl._title_line = "我在唱《L》"
+    ctrl._tracker.lead = 0.0    # 去掉提前量，让"落在哪一句"完全由 position 决定
+    ctrl._on_lyrics_ready(
+        ("l", "a"), Lyrics(lines=(LyricLine(0.0, "第一句"), LyricLine(5.0, "")))
+    )
+    assert win.shown[-1][1] == "第一句", "即时刷新就该显示第一句"
+
+    state = {"pos": 1.0}
+
+    def _now_playing():
+        return Playback(
+            track=Track(title="L", artist="A", playing=True),
+            position=state["pos"],
+            updated_at=time.monotonic(),
+        )
+
+    monkeypatch.setattr(mlc.now_playing, "get_now_playing", _now_playing)
+
+    ctrl._on_tick()
+    assert win.shown[-1][1] == "第一句"
+
+    state["pos"] = 6.0          # 进度落到间奏空行上
+    ctrl._on_tick()
+    assert win.shown[-1][1] == "第一句", "间奏空行必须保持上一句，不能清空正文"

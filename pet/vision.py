@@ -18,6 +18,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import http_util
+
 # 注意：不在此处顶层 import PIL —— Image/ImageGrab 只在截屏路径
 # （capture_window_rect / capture_screen_bytes）用到，而本模块随 pet.window
 # 顶层导入常驻进程；PIL 顶层导入会让它在启动期常驻数 MB。用到的地方在
@@ -391,7 +393,7 @@ def _post_vision_request(
             if not consume_budget():
                 raise VisionError('每日请求上限已到，今天先陪你到这儿了')
         try:
-            with urllib.request.urlopen(req, timeout=max(float(p.timeout), 60.0),
+            with http_util.urlopen(req, timeout=max(float(p.timeout), 60.0),
                                         context=_make_ssl_context(p.verify_ssl)) as resp:
                 data = json.loads(resp.read().decode('utf-8', 'replace'))
             break

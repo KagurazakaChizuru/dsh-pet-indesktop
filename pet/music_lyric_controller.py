@@ -42,6 +42,12 @@ POLL_MS = 500
 # 单拍抖动（播放器切窗口/改标题/枚举抖动）不得让歌词从头再来。
 _MISS_RESET_TICKS = 4
 
+# 歌词气泡的显示时长与占位时长：**固定秒数**，不跟着 POLL_MS 走。
+# 曾经写成 POLL_MS*2 / POLL_MS*3，把 tick 从 1000ms 收紧到 500ms 后它们跟着缩到
+# 1.0s / 1.5s ⇒ 任何一次超过 1 秒的抖动都会让气泡先隐藏再重现（闪）。
+LYRIC_BUBBLE_MS = 3000
+LYRIC_HOLD_SECONDS = 3.0
+
 # 歌词换句时允许气泡重新选位的概率。气泡位置由"当前尺寸"算得，而每句歌词
 # 长短不同，若每句都重算就会一路乱跳；只在换句时以小概率允许移动，
 # 其余时候钉在原位（用户要求"不要经常性改变位置"）。
@@ -326,10 +332,6 @@ class MusicLyricController(QObject):
         value = max(LEAD_MIN_SECONDS, min(LEAD_MAX_SECONDS, value))
         self._tracker.lead = value
 
-    def shutdown(self) -> None:
-        self._timer.stop()
-        self._reset()
-
     # ------------------------------------------------------------ 右键菜单入口
 
     def set_music_mode_enabled(self, on: bool) -> None:
@@ -467,10 +469,15 @@ class MusicLyricController(QObject):
         try:
             hold = getattr(self.win, "hold_bubble", None)
             if callable(hold):
-                hold(POLL_MS / 1000.0 * 3)
-            # 时长给足一拍有余：真正的续期由每拍重新调用完成。
-            shower(text, duration_ms=POLL_MS * 2, subtitle=subtitle or None,
-                   title_first=True, width_locked=self._width_locked)
+                hold(LYRIC_HOLD_SECONDS)
+            # 时长给足一拍有余：真正的续期由每拍重新调用完成（气泡层对"内容没变"
+            # 的续期只续时、不重建，见 speech_bubble._same_content）。
+            shown = shower(text, duration_ms=LYRIC_BUBBLE_MS, subtitle=subtitle or None,
+                           title_first=True, width_locked=self._width_locked)
+            if shown is False:
+                # 窗口明确拒绝（当前有提醒/设置窗口打开/按钮气泡占用）：不记账，
+                # 下一拍再试；否则会把"没显示"当"已显示"，让路逻辑跟着错。
+                return
             self._last_shown = (text, subtitle)
             # 首句显示完就把宽度定下来，后续同首歌不再改宽。
             self._width_locked = True
@@ -557,10 +564,22 @@ class MusicLyricController(QObject):
             self._tracker.position(now, reported=playback.position)
             return
         index = self._tracker.advance(now, reported=playback.position)
-        lyric = self._tracker.text_at(index) if index >= 0 else self._last_lyric
-        self._last_lyric = lyric
+        self._last_lyric = self._lyric_for_index(index)
         # 每拍都重送：一是续期（防气泡先于句子超时消失），二是标题必须一直在。
-        self._show(lyric, title=self._title_line, force=True)
+        self._show(self._last_lyric, title=self._title_line, force=True)
+
+    def _lyric_for_index(self, index: int) -> str:
+        """取当前该显示的歌词；空行（间奏）保持上一句，别把正文清空。
+
+        LRC 里间奏常常只留一个时间戳、正文为空。原实现直接把空串送进气泡：
+        `split_bubble_text` 于是把标题挪进正文（正文空时不渲染），用户看到的就是
+        "歌词突然没了、只剩正在听《…》"。**两个入口都要走这里**：每拍 tick 与
+        取词完成时的即时刷新（后者正是实测撞上的那一处）。
+        """
+        lyric = self._tracker.text_at(index) if index >= 0 else self._last_lyric
+        if not lyric.strip():
+            lyric = self._last_lyric
+        return lyric
 
     def _start_track(self, key, title, artist, playback, now: float) -> None:
         """切歌：先判断能否定位，再决定是否后台取词。"""
@@ -697,5 +716,5 @@ class MusicLyricController(QObject):
             return
         # 立即用「标题 + 当前歌词」刷新，不必等下一拍。
         index = self._tracker.advance(now)
-        self._last_lyric = self._tracker.text_at(index) if index >= 0 else ""
+        self._last_lyric = self._lyric_for_index(index)
         self._show(self._last_lyric, title=self._title_line, force=True)

@@ -533,11 +533,16 @@ def _music_controller(pet):
     return controller if isinstance(controller, MusicLyricController) else None
 
 
-def _skip_track(pet, direction: str) -> bool:
-    controller = _music_controller(pet)
-    if controller is None:
-        return False
-    return controller.skip_track(direction)
+def _skip_track(direction: str) -> bool:
+    """菜单「切歌」：直接把指令发给播放器（SMTC）。
+
+    以前绕道歌词控制器：歌词功能一关（控制器压根没装配）这个菜单项就成了
+    **静默无效**——点了什么都不发生。切歌本来就是播放器操作，与"要不要显示歌词"
+    无关，所以直接走 :mod:`pet.now_playing`。
+    """
+    from .. import now_playing
+
+    return now_playing.skip_track(direction)
 
 
 def music_mode_active(pet) -> bool:
@@ -613,7 +618,7 @@ def add_music_next(menu: QMenu, pet, *, icons: bool = True):
     """音乐子菜单：切歌。"""
     return add_action(
         menu, "给主人换一首（切歌）", "play" if icons else None,
-        lambda: _skip_track(pet, "next"), close_on_trigger=True,
+        lambda: _skip_track("next"), close_on_trigger=True,
     )
 
 

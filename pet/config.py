@@ -664,6 +664,7 @@ class Config:
             "music_lyric_enabled": False,  # 在气泡里显示当前播放歌曲的歌词（Windows SMTC）
             "music_lyric_lead_seconds": 1.0,  # 歌词提前量（秒）：正值=歌词抢先于音频
             "music_lyric_cache_limit": 2000,  # 歌词缓存条数上限，超出按最旧淘汰
+            "music_player_paths": {},  # 播放器可执行文件手动路径 {播放器 key: 路径}（留空=自动搜索）
             "agent_cost_enabled": False,  # Agent 本轮结束时显示消费金额（用余额差值估算）
             "golden_spin_on_click": False,  # 点击回应动画结束后自动接一段黄金回旋
             "golden_spin_direct": False,  # 点击触发黄金回旋时跳过点击动画，直接回旋并逐圈加速
@@ -922,6 +923,7 @@ class Config:
             "music_lyric_enabled",
             "music_lyric_cache_limit",
             "music_lyric_lead_seconds",
+            "music_player_paths",
             "agent_cost_enabled",
             "golden_spin_on_click",
             "golden_spin_direct",
