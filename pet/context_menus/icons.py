@@ -160,6 +160,11 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
         painter.drawLine(QPointF(4.8, 7.0), QPointF(8.0, 10.2))
         painter.drawLine(QPointF(11.2, 7.0), QPointF(8.0, 10.2))
         painter.drawLine(QPointF(3.0, 13.5), QPointF(13.0, 13.5))
+    elif name == "file":
+        painter.drawRoundedRect(QRectF(2.5, 1.5, 9.5, 13.0), 1.6, 1.6)
+        painter.drawLine(QPointF(5.0, 5.5), QPointF(11.0, 5.5))
+        painter.drawLine(QPointF(5.0, 8.5), QPointF(11.0, 8.5))
+        painter.drawLine(QPointF(5.0, 11.5), QPointF(9.0, 11.5))
     elif name == "settings":
         gear = QPolygonF()
         for index in range(24):

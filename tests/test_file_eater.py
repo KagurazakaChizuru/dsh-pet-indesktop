@@ -166,9 +166,13 @@ def test_petinstance_build_window_wires_file_eater(tmp_path, monkeypatch):
     class _SpyWindow:
         def __init__(self, *args, **kwargs):
             self.file_eater_install_calls = 0
+            self.file_interpret_install_calls = 0
 
         def install_file_eater(self):
             self.file_eater_install_calls += 1
+
+        def install_file_interpreter(self):
+            self.file_interpret_install_calls += 1
 
         def show(self):
             pass
@@ -185,6 +189,7 @@ def test_petinstance_build_window_wires_file_eater(tmp_path, monkeypatch):
         try:
             spy = shell.instance._build_window("shenshen", lib=FakeLibrary(), build_tray=False)
             assert spy.file_eater_install_calls == 1, "建窗路径必须调用 install_file_eater()（PR73 接线，#76 后丢失）"
+            assert spy.file_interpret_install_calls == 1, "建窗路径必须调用 install_file_interpreter()（拖文件解读接线）"
         finally:
             try:
                 shell.instance.collision_ipc.stop()
@@ -192,3 +197,21 @@ def test_petinstance_build_window_wires_file_eater(tmp_path, monkeypatch):
                 pass
     finally:
         monkeypatch.setattr(app_mod, "PetWindow", real_petwindow)
+
+
+def test_eat_paths_forwards_interpret_offer(tmp_path):
+    """接缝：吃完后把拖入路径原样转发给注入的解读入口（getattr 防御，未注入不炸）。"""
+    _qapp()
+    pet = _make_pet(tmp_path)
+    handler = FileEaterDropHandler(pet)
+    note = tmp_path / "note.md"
+    note.write_text("内容", encoding="utf-8")
+
+    # 未注入解读入口：正常吃完不炸
+    handler.eat_paths([str(note)])
+
+    offers = []
+    handler.interpret_offer = lambda paths: offers.append(list(paths))
+    handler.eat_paths([str(note)])
+
+    assert offers == [[str(note)]]

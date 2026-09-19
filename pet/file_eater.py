@@ -180,6 +180,10 @@ class FileEaterDropHandler(QObject):
         stats = self._record(files, folders, files + folders, total_bytes)
         self._play_eating_animation()
         self._show_feedback(files, folders, total_bytes, stats)
+        # 解读询问接缝（install_file_interpreter 注入；未注入/无 chat 模块时为 None）
+        offer = getattr(self, "interpret_offer", None)
+        if callable(offer):
+            offer(paths)
         return {
             "files": files,
             "folders": folders,

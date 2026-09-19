@@ -4,6 +4,7 @@
 - 常驻顶层小窗，可显示图标、名称、信息槽、状态灯；
 - 支持拖拽、四边停靠半隐藏（收成细条、鼠标靠近滑出）、位置持久化；
 - 单击胶囊按 ``click_action`` 展开卡片（余额/最近消息/快捷按钮）或切换桌宠显隐；
+  桌宠隐藏时（``hidden_chat`` 开启）单击改为弹岛对话气泡（island_chat.py）；
 - 事件动效（``event_effects``）：AI 回复/余额刷新/峰谷切换时位移弹跳 +
   表面轻压 + 短暂呼吸，静止时完全无定时器开销；dsh 工作时状态灯变蓝；
 - ``bump()`` 供碰撞系统调用：被撞时表面压扁回弹（史莱姆果冻形变只作用于
@@ -17,7 +18,7 @@ import math
 import time
 
 from PySide6.QtCore import (
-    QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal,
+    QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
     QColor, QGuiApplication, QLinearGradient, QPainter, QPen, QPixmap,
@@ -71,6 +72,13 @@ _ACCENT_PRESETS = {
     "orange": "#ffa94d",
 }
 _DEFAULT_ACCENT = "blue"
+
+# 图标模式："auto"=鱼本体头像位图（默认）；"img:<路径>"=用户自定义图片；
+# 其他字符串=文字/emoji 图标（用户主动选择，愿意付 emoji 字体栈的一次性税）。
+_ICON_AUTO = "auto"
+_ICON_IMG_PREFIX = "img:"
+_ICON_PIXMAP_PX = 22  # 头像画进 26px 底圈内的尺寸
+_ICON_STRIP_PX = 16  # 左右停靠细条里的头像尺寸
 
 
 def spring_step(
@@ -137,6 +145,7 @@ class DynamicIsland(QWidget):
     open_chat_requested = Signal()
     open_settings_requested = Signal()
     card_expanded = Signal()  # 卡片展开（AppShell 借此静默刷新余额）
+    chat_requested = Signal()  # 桌宠隐藏时单击胶囊（hidden_chat 开启）：弹岛对话气泡
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -185,6 +194,11 @@ class DynamicIsland(QWidget):
         self._scale_v = 0.0
         self._breathe_until = 0.0
         self._hover_scale_target = 1.0
+        # 图标位图状态（icon="auto"/"img:<路径>" 时用；emoji 模式不碰）
+        self._icon_provider = None  # 头像取图回调，AppShell 注入
+        self._icon_pixmap_cache: QPixmap | None = None
+        self._icon_img_failed = False  # img: 加载失败也记住，免每帧重试磁盘 IO
+        self._icon_pixmap_token = 0  # 头像换代计数：内容层缓存按它判失效
         # 内容层位图缓存（paintEvent 的文字绘制是实测大头，见 _content_cache）
         self._content_pixmap: QPixmap | None = None
         self._content_cache_key: tuple | None = None
@@ -239,6 +253,10 @@ class DynamicIsland(QWidget):
     def _click_action(self) -> str:
         return str(self._cfg.get("click_action") or "expand")
 
+    def _hidden_chat_enabled(self) -> bool:
+        """桌宠隐藏时的对话气泡开关（点击岛弹气泡 + 回复到达自动预览）。"""
+        return bool(self._cfg.get("hidden_chat", True))
+
     def _event_effects_enabled(self) -> bool:
         return bool(self._cfg.get("event_effects", True))
 
@@ -258,6 +276,16 @@ class DynamicIsland(QWidget):
         return QColor(_ACCENT_PRESETS.get(key, _ACCENT_PRESETS[_DEFAULT_ACCENT]))
 
     # ------------------------------------------------------------ 对外
+    def set_icon_provider(self, fn) -> None:
+        """注入"鱼本体头像"取图回调（AppShell 提供：取首个桌宠窗的当前帧图标）。
+
+        回调返回 QPixmap 或 None（帧尚未就绪，岛侧下次重建内容层时重试）。
+        注入即作废已缓存头像/内容层：换形象后要立刻取到新头像。
+        """
+        self._icon_provider = fn if callable(fn) else None
+        self._clear_icon_cache()
+        self.update()
+
     def set_balance_info(self, tier_text: str, balance_text: str) -> None:
         self._balance_tier_text = str(tier_text or "余额峰谷 --")
         self._balance_text = str(balance_text or "余额 --")
@@ -318,9 +346,14 @@ class DynamicIsland(QWidget):
 
     def refresh_from_config(self) -> None:
         old_edge = self.dock_edge
+        old_icon = self._icon_spec()
         self._cfg = _cfg_dict(self.config)
         self._schedule_next_balance_tier_refresh()
         self._sync_card_labels()
+        # 头像必须跟着刷新作废：provider 取的是**当前形象**的帧，而角色热切换
+        # 只调 refresh_from_config（不动 island 配置），不换缓存就一直挂旧头像
+        if self._icon_image_mode() or self._icon_spec() != old_icon:
+            self._clear_icon_cache()
         if self.dock_edge != old_edge:
             self._apply_position()
         # 「靠边半隐藏」被关闭时已停靠的岛要复位回正常形态——否则一直是
@@ -676,8 +709,81 @@ class DynamicIsland(QWidget):
         character_id = str(self.config.get("character", catalog.DEFAULT_CHARACTER))
         return self.config.character_alias(character_id) or character_id
 
+    def _icon_spec(self) -> str:
+        """图标配置原值（auto / img:<路径> / 文字或 emoji）。"""
+        return str(self._cfg.get("icon") or _ICON_AUTO).strip()
+
+    def _icon_image_mode(self) -> bool:
+        """当前图标是否走图片路径（auto / img:）——只有文字模式才允许画字符。"""
+        spec = self._icon_spec()
+        return spec == _ICON_AUTO or spec.startswith(_ICON_IMG_PREFIX)
+
+    def _clear_icon_cache(self) -> None:
+        """丢弃头像位图与内容层位图；换代计数自增让缓存 key 必然失配。"""
+        self._icon_pixmap_cache = None
+        self._icon_img_failed = False
+        self._icon_pixmap_token += 1
+        self._content_pixmap = None
+        self._content_cache_key = None
+
     def _icon_text(self) -> str:
-        return str(self._cfg.get("icon") or "🐳").strip()[:8] or "🐳"
+        """文字/emoji 模式画在底圈里的字符（用户主动选择才走这条路）。
+
+        默认 icon="auto" 不经过这里：进程内第一次用 QPainter/QLabel 画 emoji
+        字符会触发 DirectWrite 彩色 emoji 字体栈加载，实测定案一次性 +33.6MB
+        私有内存（纯文字窗口 61.5MB → 画一个 🐳 后 95.1MB，且与 emoji 个数
+        无关）。空值兜底也不再回 "🐳"，避免隐形地重新付这笔税。
+        """
+        return str(self._cfg.get("icon") or "").strip()[:8]
+
+    def _icon_pixmap(self) -> QPixmap | None:
+        """图片模式的图标位图；文字/emoji 模式返回 None。
+
+        auto：provider 命中缓存直接返回；未命中才回调取图，成功即缓存，失败
+        （帧未就绪）不缓存——下次重建内容层时重试。
+        img:：读文件并缓存，**失败结果也缓存**（否则每帧都去碰磁盘）。
+        """
+        spec = self._icon_spec()
+        if spec.startswith(_ICON_IMG_PREFIX):
+            if self._icon_pixmap_cache is not None:
+                return self._icon_pixmap_cache
+            if self._icon_img_failed:
+                return None
+            path = spec[len(_ICON_IMG_PREFIX):].strip()
+            pm = QPixmap(path) if path else QPixmap()
+            if pm.isNull():
+                self._icon_img_failed = True
+                logger.warning("灵动岛自定义图标加载失败：%s", path)
+                return None
+            self._icon_pixmap_cache = pm
+            self._icon_pixmap_token += 1
+            return pm
+        if spec != _ICON_AUTO or not callable(self._icon_provider):
+            return None
+        if self._icon_pixmap_cache is not None:
+            return self._icon_pixmap_cache
+        try:
+            pm = self._icon_provider()
+        except Exception:
+            logger.exception("灵动岛头像回调失败")
+            return None
+        if not isinstance(pm, QPixmap) or pm.isNull():
+            return None
+        self._icon_pixmap_cache = pm
+        self._icon_pixmap_token += 1
+        return pm
+
+    def _icon_pixmap_scaled(self, logical_px: float) -> QPixmap | None:
+        """头像按逻辑尺寸出图（乘 DPR + SmoothTransformation，防 hi-dpi 糊）。"""
+        pm = self._icon_pixmap()
+        if pm is None:
+            return None
+        dpr = self.devicePixelRatioF()
+        edge = max(1, round(logical_px * dpr))
+        scaled = pm.scaled(edge, edge, Qt.AspectRatioMode.KeepAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+        scaled.setDevicePixelRatio(dpr)
+        return scaled
 
     def _capsule_width(self) -> int:
         icon, name, info, status = self._visible_parts()
@@ -947,16 +1053,23 @@ class DynamicIsland(QWidget):
         dot_size = 8
         painter.setBrush(self._status_dot_color())
         if edge in ("left", "right"):
-            # 竖条：上方角色图标（小字号防裁切）、下方状态点
-            painter.setPen(primary if isinstance(primary, QColor) else QColor(31, 35, 40))
-            icon_font = painter.font()
-            icon_font.setPixelSize(11)
-            painter.setFont(icon_font)
-            fm = painter.fontMetrics()
-            painter.drawText(
-                QRectF(0, 8, rect.width(), fm.height()),
-                Qt.AlignmentFlag.AlignCenter, self._icon_text())
-            painter.setPen(Qt.PenStyle.NoPen)
+            # 竖条：上方角色图标、下方状态点。头像走 drawPixmap（不碰文字栈）；
+            # emoji 文字模式维持原小字号（11px）防裁切；auto 模式 provider 没
+            # 就绪就只留状态点，绝不回退去画 🐳（那等于白付 33MB 税额）
+            icon_pm = self._icon_pixmap_scaled(_ICON_STRIP_PX)
+            if icon_pm is not None:
+                painter.drawPixmap(
+                    QPointF((rect.width() - _ICON_STRIP_PX) / 2.0, 8.0), icon_pm)
+            elif not self._icon_image_mode():
+                painter.setPen(primary if isinstance(primary, QColor) else QColor(31, 35, 40))
+                icon_font = painter.font()
+                icon_font.setPixelSize(11)
+                painter.setFont(icon_font)
+                fm = painter.fontMetrics()
+                painter.drawText(
+                    QRectF(0, 8, rect.width(), fm.height()),
+                    Qt.AlignmentFlag.AlignCenter, self._icon_text())
+                painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(self._status_dot_color())
             painter.drawEllipse(QRectF(
                 (rect.width() - dot_size) / 2, rect.height() - dot_size - 8,
@@ -975,7 +1088,7 @@ class DynamicIsland(QWidget):
         blit（亚毫秒）。blit 走同一 painter 的整窗变换（kick 为整数平移，
         文字锐利口径不变）；squish 只调制胶囊外形、本来就不碰内容层。
         key 覆盖所有影响像素的输入（可见项/文本/颜色/字体/DPR/宽度），
-        任一变化自动重建，无需显式失效钩子。
+        任一变化自动重建，无需显式失效钩子（头像换代走 _icon_pixmap_token）。
         """
         icon, name, info, status = self._visible_parts()
         _background, primary_color, secondary_color = self._style_palette()
@@ -994,6 +1107,14 @@ class DynamicIsland(QWidget):
         )
         if self._content_pixmap is not None and self._content_cache_key == key:
             return self._content_pixmap
+        # 内容层的命中路径不问 provider（否则拖拽期间每帧取图），只有重建时才问。
+        # auto 模式 provider 返回 None 时也不写进 key，于是"没头像"的内容层照样
+        # 命中缓存，等下次真正重建（时间/余额/配置变化）时再重试取图。
+        icon_pm = self._icon_pixmap_scaled(_ICON_PIXMAP_PX) if icon else None
+        if icon_pm is not None:
+            key = key + (self._icon_pixmap_token,)
+            if self._content_pixmap is not None and self._content_cache_key == key:
+                return self._content_pixmap
         pm = QPixmap(max(1, round(self.width() * dpr)),
                      max(1, round(_CAPSULE_HEIGHT * dpr)))
         pm.setDevicePixelRatio(dpr)
@@ -1006,14 +1127,23 @@ class DynamicIsland(QWidget):
         if icon:
             painter.setBrush(self._accent_color())
             painter.drawEllipse(QRectF(x, (_CAPSULE_HEIGHT - 26) / 2, 26, 26))
-            painter.setPen(QColor(255, 255, 255))
-            fm = self.fontMetrics()
-            painter.drawText(
-                QRectF(x, (_CAPSULE_HEIGHT - fm.height()) / 2 - 1, 26, fm.height()),
-                Qt.AlignmentFlag.AlignCenter,
-                self._icon_text(),
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
+            if icon_pm is not None:
+                # 头像居中画进底圈：drawPixmap 不碰文字/emoji 字体栈
+                painter.drawPixmap(
+                    QPointF(x + (26 - _ICON_PIXMAP_PX) / 2.0,
+                            (_CAPSULE_HEIGHT - _ICON_PIXMAP_PX) / 2.0),
+                    icon_pm)
+            elif not self._icon_image_mode():
+                painter.setPen(QColor(255, 255, 255))
+                fm = self.fontMetrics()
+                painter.drawText(
+                    QRectF(x, (_CAPSULE_HEIGHT - fm.height()) / 2 - 1, 26, fm.height()),
+                    Qt.AlignmentFlag.AlignCenter,
+                    self._icon_text(),
+                )
+                painter.setPen(Qt.PenStyle.NoPen)
+            # auto 模式 provider 没就绪：只画底圈，绝不回退画 🐳（那是白付
+            # 一次 33MB 的 DirectWrite 彩色 emoji 字体栈税）
             x += 26 + 8
         painter.setPen(primary_color)
         if name:
@@ -1184,6 +1314,10 @@ class DynamicIsland(QWidget):
                 self._dock_back_timer.start()
             elif self._click_action() == "toggle_pet":
                 self.clicked.emit()
+            elif self._hidden_chat_enabled() and not self._pet_visible:
+                # 桌宠隐藏时岛是唯一常驻交互面：单击直接弹对话气泡
+                #（恢复桌宠的入口由气泡内的「显示桌宠」按钮承接）
+                self.chat_requested.emit()
             else:
                 self.expand_card()
         else:

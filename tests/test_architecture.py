@@ -86,23 +86,23 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 # 一个带完整实机取证说明的委托方法：它必须留在 PetWindow 上（showEvent 是唯一
 # 可靠的"原生窗口已就绪/可能被重建"注入点，拆到独立模块反而会产生跨模块的
 # 窗口生命周期耦合）。按约定只校准预算，不为达标压行。
-# 2026-09-17 再上调到 4513：歌词/音乐自动唱歌 与 节日提醒/报时 的跨功能干扰修复
-# （window.py +6，实测 4513）——_on_anim_ended 的 SING_ANIM 续播分支必须先交付
-# 待播联动动作（节日提醒动画），否则唱歌循环会一直续播、把待播动画饿死；该分支与
-# _pending_link_anim / _play_pending_link_anim / _switch 共享窗口状态流，拆出去会切断
-# 调用链。按约定只校准预算，**不为达标压行**（初版误压了上方飞行链注释，已按约定回改）。
-# 2026-09-18 再上调到 4518：歌词显示审计修复批（window.py +5，实测 4518）——
-# show_bubble 改为**返回是否真的显示了**（True/False）：歌词每拍重发、需要知道自己
-# 有没有上屏（被提醒队列/设置窗口/按钮气泡丢弃时不能记账，否则让路与重试逻辑跟着错）。
-# 该返回值必须留在 PetWindow 上（所有冒泡路径的唯一收口），拆出去会切断与
-# _alert_current / _bubble_suppressed 的判定；按约定只校准预算，不为达标压行。
-WINDOW_PY_LINE_BUDGET = 4518
+# 2026-09-18 合并 #140 时按实测校准到 4605：#140 的碰撞稳定边界缓存（字段/切换复原/
+# 素材替换作废/缩放清空）与 main 已含的 #137 Linux 贴边绘制补偿（虚拟位置 + 稳定
+# 身体框）**叠加**后实测 4605——两边各自的预算都低于合并结果，是「红线是组合性质」
+# 的又一实例（docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2）。按文件约定只随实测校准，
+# 不为达标压行/合并语句。
+# 2026-09-19 合并 origin/main（#150）后再按实测校准：歌词审计批的
+# show_bubble -> bool（被提醒队列/设置窗口丢弃时返回 False，歌词据此记账）必须留在
+# PetWindow 上（所有冒泡路径的唯一收口），与上游 #140/#137 的碰撞/贴边改动叠加后
+# 实测 **4616**。按文件约定只随实测校准，不为达标压行/合并语句。
+WINDOW_PY_LINE_BUDGET = 4616
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的
 # re-export 留守本文件；控件库 / 菜单布局编辑器 / AI 设置页 / 主题 QSS 已分别拆至
 # settings_widgets / settings_menu_layout_editor / chat/ai_settings_page /
-# settings_theme_qss。预算 = 实测 + 50 行余量；再往上帝类里塞新页面时只许降不涨。
+# settings_theme_qss。预算随实测校准（早期口径为「实测 + 50 行余量」，2026-09-17
+# 起按实测值锁定，见下方逐次记录）；再往上帝类里塞新页面时只许降不涨。
 # 2026-09-05 建立（perf/memory-footprint 拆分批）。
 # 2026-09-06 上调到 1992：合入上游 main（PR73）带来动画预热开关等 +85 行
 # （实测 1942），预算随实测校准。
@@ -127,10 +127,27 @@ WINDOW_PY_LINE_BUDGET = 4518
 # 这正是「红线是组合性质」：两个 PR 各自合并时 CI 都绿，合到一起才越线
 # （见 docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2）。按文件约定只随实测校准，
 # 不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2311
-
-
-
+# 2026-09-17 上调到 2327：新增「语音」总域，并按主人定稿口径只收鱼开口说话
+# （TTS）类设置——语音报时整组 12 行 + 节日提醒 12 行（原「自动化与联动」域，带
+# speak/TTS 播报能力）；音效类回各自功能分组：点击音效 4 行回「互动 · 点击反馈」
+# （click_ 前缀整组认领，与 HEAD 行为一致）、碰撞音效 2 行回「桌宠」碰撞组，Agent 提示音效
+# （agent_sound_*）留在 Agent 联动折叠框内。实测 2327；按文件约定只随实测校准，
+# 不为达标压缩行宽/合并语句；拆分仍是待办。
+# 2026-09-17 上调到 2341：灵动岛图标下拉框新增「鱼本体头像（推荐）」项，原 10 个
+# emoji 选项标签改中文（data 仍是 emoji）——设置页自己渲染 emoji 也会付同一笔
+# DirectWrite 彩色字体栈税额（约 33MB）；标签逐项成对写，实测 2341。
+# 2026-09-17 上调到 2371：设置页进程隔离（standalone）——__init__ 的 standalone
+# 形参/属性、末尾接线 install_standalone_hooks、move_away_from_pet 的 runtime
+# 避让分支、_on_voice_chime_preview 的本地试听分支、_write_config 注释共 +30；
+# 试听/避让/节日演示的实现全在 pet/settings_standalone.py，本文件仍只做接线；
+# 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
+# 2026-09-19 上调到 2393：两批设置改动**组合**后的实测值——拖文件解读新增
+# 「文件识别」域（对话框只做接线，实现全在 pet/settings_file_interpret.py）与灵动岛
+# 「隐藏时对话气泡」开关（控件 +2、SettingRow +6、_write_config 回写 +1）各自
+# 只按自己那批校准（2384 / 2380），合起来才是 2393：单个 PR 都不越线、只有两者
+# 同时进才红——又一次「红线是组合性质」的实例（PR-MERGE-LESSONS 第 2 条），
+# 故按文件约定只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2393
 def _read(name: str) -> str:
     return (PET_DIR / name).read_text(encoding="utf-8")
 

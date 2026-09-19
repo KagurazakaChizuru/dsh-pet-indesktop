@@ -353,9 +353,17 @@ def _set_speech_bubble_interactive(pet) -> None:
 
 
 def _content_frame_rect(pet) -> QRect:
-    """落地帧矩形；捕获头顶空间时也保持人物贴窗口底线。"""
-    return QRect(0,
-                 getattr(pet, "_capture_headroom", 0) + int(round(catalog.PAD * pet.scale)),
+    """落地帧矩形；捕获头顶空间时也保持人物贴窗口底线。
+
+    含贴边绘制偏移 _draw_delta：窗口被钳在工作区内时，帧在窗口内平移，
+    使角色身体继续贴到屏幕边缘（paintEvent/_sync_mask/命中测试共用本
+    矩形，三者自动逐像素一致）。
+    """
+    delta = getattr(pet, "_draw_delta", None)
+    if delta is None:
+        delta = QPoint(0, 0)
+    return QRect(delta.x(),
+                 delta.y() + getattr(pet, "_capture_headroom", 0) + int(round(catalog.PAD * pet.scale)),
                  int(round(catalog.CANVAS_W * pet.scale)),
                  int(round(catalog.CANVAS_H * pet.scale)))
 
@@ -371,6 +379,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     # 它们继承真实 moveEvent/_on_squash_tick——这些属性必须有类级默认。
     _last_mask_sync_at = 0.0   # squash 高节拍下 mask ~30Hz 限频用
     _last_dpr_poll_at = 0.0    # moveEvent 的 DPR 兜底轮询 10Hz 限频用
+    # 贴边绘制偏移（虚拟窗口位置 - 实际窗口位置）：GNOME/mutter 不允许窗口
+    # 移出工作区，窗口本体被主动钳在工作区内，角色靠这个偏移在窗口内平移
+    # 贴到屏幕边缘。屏幕中央时恒为 (0,0)，各平台行为与引入前逐像素一致。
+    # 类级默认供测试轻量桩；实例永不原地 mutate，只整体替换。
+    _draw_delta = QPoint(0, 0)
 
     def __init__(self, lib: MovieLibrary, config: Config, collision_session=None,
                  broker_facade=None, *, clock=None, single_process_spawn: bool = False, agent_link_manager=None, proactive_watcher=None) -> None:
@@ -552,6 +565,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # 使直播姬/OBS 的窗口捕获能枚举到桌宠（Tool 窗口会被捕获软件过滤）。
         self._stream_capture_mode = bool(config.get('stream_capture_mode', False))
         self._capture_headroom = 0  # 捕获子气泡需要的透明头顶空间（逻辑像素）
+        self._draw_delta = QPoint(0, 0)  # 贴边绘制偏移（见类属性注释）
         flags = build_window_flags(config, self.mouse_through, self._stream_capture_mode)
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -594,6 +608,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # 碰撞体稳定边界：当前动画各帧 _mask_bounds 的并集（只增不减，
         # 切换动画/缩放时重置），避免圆链随动画帧缩放跳动导致漏判
         self._collision_local_bounds: QRect | None = None
+        # 各动画稳定边界的缓存：同一段动画的并集是确定的，播过一次就记住，
+        # 轮换/续播回来直接复原，不再每圈从零重长（气泡锚点跟着漂移）。
+        # 缩放/余量变化（画布几何变了）时整体清空。
+        self._collision_bounds_cache: dict[str, QRect] = {}
         self._hit_alpha_image: QImage | None = None
         # 已重建帧的输入签名：movie 身份 + 完整帧签名（素材路径+mtime+大小、
         # 帧号、朝向、镜像、scale、DPR、动画名）。相同签名重复 rebuild 时整条
@@ -927,34 +945,79 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._h += getattr(self, "_capture_headroom", 0)
         self.setFixedSize(self._w, self._h)
 
+    # ------------------------------------------------------------ 贴边（绘制补偿）
+    def _stable_body_local_rect(self) -> QRect:
+        """稳定身体框（窗口局部坐标）；实现见 window_placement.stable_body_local_rect。"""
+        return window_placement.stable_body_local_rect(self)
+
+    def _virtual_pos(self) -> QPoint:
+        """虚拟窗口位置 = 实际位置 + 绘制偏移；实现见 window_placement.virtual_pos。"""
+        return window_placement.virtual_pos(self)
+
+    def _move_window_towards(self, x: float, y: float,
+                             body_bounds: QRect | None = None) -> None:
+        """统一位置出口（虚拟窗口坐标）；实现见 window_placement.move_window_towards。"""
+        return window_placement.move_window_towards(self, x, y, body_bounds=body_bounds)
+
+    def _throw_bounds(self) -> tuple[float, float, float, float]:
+        """抛掷/碰撞边界（虚拟窗口坐标）；实现见 window_placement.throw_bounds。"""
+        return window_placement.throw_bounds(self)
+
     def set_capture_headroom(self, headroom: int) -> bool:
-        """Set/clear capture headroom while preserving the window bottom edge."""
+        """Set/clear capture headroom while preserving the character's feet."""
         headroom = max(0, int(headroom))
         if headroom == self._capture_headroom:
             return False
-        old_bottom = self.geometry().bottom()
-        self._capture_headroom = headroom
-        self._apply_scale()
-        self.move(self.x(), old_bottom - self._h + 1)
+        vp_fn = getattr(self, '_virtual_pos', None)
+        sbr_fn = getattr(self, '_stable_body_local_rect', None)
+        mover = getattr(self, '_move_window_towards', None)
+        if callable(vp_fn) and callable(sbr_fn) and callable(mover):
+            # 保持角色脚底不动（身体框底边）：虚拟坐标系下重落位
+            vp = vp_fn()
+            old_feet = vp.y() + sbr_fn().bottom()
+            self._capture_headroom = headroom
+            self._apply_scale()
+            mover(vp.x(), old_feet - sbr_fn().bottom())
+        else:
+            old_bottom = self.geometry().bottom()
+            self._capture_headroom = headroom
+            self._apply_scale()
+            self.move(self.x(), old_bottom - self._h + 1)
         self._collision_local_bounds = None
+        self._collision_bounds_cache.clear()  # 画布几何变了，缓存全部作废
         self._sync_mask()
         self.update()
         return True
 
     def change_scale(self, scale: float) -> None:
-        """切换缩放；保持窗口底边不动（脚踩的地面不变）。"""
+        """切换缩放；保持角色脚底不动（身体框底边=脚踩的地面）。"""
         if abs(scale - self.scale) < 1e-6:
             return
-        old_bottom = self.geometry().bottom()
-        self.scale = scale
-        self._apply_scale()
-        self._collision_local_bounds = None
-        self.move(self.x(), old_bottom - self._h + 1)
+        vp_fn = getattr(self, '_virtual_pos', None)
+        sbr_fn = getattr(self, '_stable_body_local_rect', None)
+        mover = getattr(self, '_move_window_towards', None)
+        if callable(vp_fn) and callable(sbr_fn) and callable(mover):
+            # #137：缩放走贴边换算（虚拟位置 + 稳定身体框），脚底保持不动
+            vp = vp_fn()
+            old_feet = vp.y() + sbr_fn().bottom()
+            self.scale = scale
+            self._apply_scale()
+            self._collision_local_bounds = None
+            self._collision_bounds_cache.clear()  # 画布几何变了，缓存全部作废
+            mover(vp.x(), old_feet - sbr_fn().bottom())
+        else:
+            # 轻量桩兼容（测试里有绕过 __init__ 的 FakePet）：保持窗口底边
+            old_bottom = self.geometry().bottom()
+            self.scale = scale
+            self._apply_scale()
+            self._collision_local_bounds = None
+            self._collision_bounds_cache.clear()  # 画布几何变了，缓存全部作废
+            self.move(self.x(), old_bottom - self._h + 1)
         self._rebuild_frame()
         bubble = getattr(self, "_speech_bubble", None)
         if bubble is not None and bubble.isVisible():
             bubble.reflow(
-                self.visible_content_rect(), pet_scale=self.scale
+                window_placement.bubble_anchor_rect(self), pet_scale=self.scale
             )
         self.update()
         # 右键菜单改大小属于用户主动设置：子肥鱼置位 user_customized（占位），
@@ -1029,12 +1092,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         _disarm = getattr(self, '_disarm_screen_restore_retry', None)
         if callable(_disarm):
             _disarm()
-        # Position can still be written by the animation interpolation timer or
-        # drag-physics timer after a direct move. Stop both first, otherwise the
-        # pet briefly reaches the corner and is immediately snapped back.
-        self._cancel_move()
-        self._stop_physics()
-        self._drag_target = None
         # 探头会话若未退出，宠物会保持 ±45° 倾斜姿态出现在右下角；显式“回右下角”
         # 是普通位置命令，应先取消探头（不恢复原 off-screen 位置）。
         edge = getattr(self, "_edge_probe", None)
@@ -1042,15 +1099,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             cancel = getattr(edge, "cancel", None)
             if callable(cancel):
                 cancel("return_corner", restore=False)
-        scr = self._screen_available()
-        avail = scr.availableGeometry()
-        x = avail.right() - self._w - catalog.CORNER_MARGIN
-        y = avail.bottom() - self._h
-        logging.info('回到右下角 screen=%s avail=(%d,%d,%d,%d) dpr=%s -> (%d,%d)',
-                     scr.name(), avail.left(), avail.top(), avail.right(),
-                     avail.bottom(), scr.devicePixelRatio(), x, y)
-        self.move(x, y)
-        self._save_position()
+        # 落位实现收敛在 window_placement.go_default_corner（停移动/物理 →
+        # 角色语义右下角 → 统一出口落窗 → 保存位置），此处不再复制一份。
+        window_placement.go_default_corner(self)
 
     def go_default_corner(self) -> None:
         """公开转发：手动回到右下角（等价 _go_default_corner）。"""
@@ -1233,7 +1284,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             bubble = getattr(self, "_speech_bubble", None)
             if bubble is not None:
                 bubble.show_text(
-                    self._sticky_text, self.visible_content_rect(), 0,
+                    self._sticky_text, window_placement.bubble_anchor_rect(self), 0,
                     pet_scale=self.scale, subtitle=self._sticky_subtitle, sticky=True,
                     buttons=self._sticky_buttons,
                 )
@@ -1631,7 +1682,13 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         pp = getattr(self, 'predictive_prewarm', None)
         if pp is not None:
             pp.begin_anim(name)
-        self._collision_local_bounds = None
+        # 切动画：稳定边界优先从缓存复原（播过的动画并集是确定的），
+        # 没播过的才归零重长——轮换回来不再每圈从零漂移。复原拷一份
+        # （QRect 值语义假象：直接赋同一对象会被就地修改反向污染缓存）。
+        cached_bounds = self._collision_bounds_cache.get(name)
+        self._collision_local_bounds = (
+            QRect(cached_bounds) if cached_bounds is not None else None
+        )
         movie = self.lib.movie(name)
         self._connect_movie(name, movie)
         self.movie = movie
@@ -2014,6 +2071,20 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 perfstats.note('rebuild.skip')
                 perfstats.time('rebuild.total', perfstats.clock() - _rf_t0)
             return
+        # 素材原地替换（签名里素材身份四项：路径/mtime/大小/指纹）：该动画的
+        # 稳定边界缓存与活体并集作废——否则旧轮廓会被"只增不减"地带到新素材
+        # 上（实审 P2-4）。首见只登记不清除：缓存并集本来就出自这份素材。
+        asset_stamp = key[1][:4]
+        stamps = getattr(self, '_asset_stamps', None)
+        if stamps is None:
+            stamps = self._asset_stamps = {}
+        prev_stamp = stamps.get(self.anim)
+        stamps[self.anim] = asset_stamp
+        if prev_stamp is not None and prev_stamp != asset_stamp:
+            cache = getattr(self, '_collision_bounds_cache', None)
+            if cache is not None:
+                cache.pop(self.anim, None)
+            self._collision_local_bounds = None
         pm = self.movie.currentPixmap()
         if pm is None or pm.isNull():
             # ffmpeg 缺失/素材损坏时首帧解码可能失败返回 None，跳过本帧而不是崩溃
@@ -2145,16 +2216,19 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
 
     def _frame_draw_rect(self) -> QRect:
         """当前帧在窗口内的绘制矩形（逻辑坐标）；paintEvent 与命中测试共用。"""
+        content = _content_frame_rect(self)
         if self._squash_active:
+            # Q 弹跟随帧位置（含贴边偏移）：偏移为零时与旧的"窗口居中+贴底"
+            # 算式逐像素一致（content 宽=画布宽、底=窗口底）。
             x, y, w, h = _squash_geometry(
-                self._w,
-                self._h,
-                int(round(catalog.CANVAS_W * self.scale)),
-                int(round(catalog.CANVAS_H * self.scale)),
+                content.width(),
+                content.height(),
+                content.width(),
+                content.height(),
                 self._squash_progress,
             )
-            return QRect(x, y, w, h)
-        return _content_frame_rect(self)
+            return QRect(content.x() + x, content.y() + y, w, h)
+        return content
 
     def _sync_mask(self) -> None:
         """更新角色可见轮廓与窗口 mask。
@@ -2193,11 +2267,21 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         elif not self.mask().isEmpty():
             self.clearMask()  # Windows：清掉历史遗留 mask（本路径不 setMask）
         if not self._mask_bounds.isEmpty():
-            stable = getattr(self, '_collision_local_bounds', None)
-            if stable is None:
-                self._collision_local_bounds = QRect(self._mask_bounds)
+            if getattr(self, '_squash_active', False):
+                # Q 弹瞬态帧不并入稳定边界/缓存：拉宽轮廓会把"只增不减"的
+                # 并集（及动画缓存）永久撑胖，气泡锚点跟着平移（实审 P2-1
+                # 实测左右各 +22px）。
+                pass
             else:
-                self._collision_local_bounds = stable.united(self._mask_bounds)
+                stable = getattr(self, '_collision_local_bounds', None)
+                if stable is None:
+                    self._collision_local_bounds = QRect(self._mask_bounds)
+                else:
+                    self._collision_local_bounds = stable.united(self._mask_bounds)
+                # 写回缓存：同段动画再切回来时 _switch 直接复原，不用重长一圈。
+                # QRect 拷一份再存——缓存与活体共享同一对象时，任何就地修改
+                # （adjust/setLeft）都会静默污染缓存。
+                self._collision_bounds_cache[self.anim] = QRect(self._collision_local_bounds)
         if perfstats.ENABLED:
             # mask 生成（canvas 绘制 + createAlphaMask + QRegion，P0 观测）。
             perfstats.time('rebuild.mask', perfstats.clock() - _mask_t0)
@@ -2312,20 +2396,23 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                         painter.drawEllipse(QPointF(tx, ty), radius, radius)
             elif self._squash_active:
                 # Q 弹：使用逻辑帧尺寸；QPixmap.width() 可能是 DPR 物理像素尺寸。
+                content_rect = _content_frame_rect(self)
                 if self._slingshot_rebound_progress > 0.0:
                     amount = self._slingshot_rebound_progress * (1.0 - self._squash_progress) ** 2
                     x, y, w, h = self._slingshot_geometry(
-                        _content_frame_rect(self),
+                        content_rect,
                         QPoint(1, 0), amount, QRect(0, 0, self._w, self._h),
                     )
                 else:
-                    x, y, w, h = _squash_geometry(
-                        self._w,
-                        self._h,
-                        int(round(catalog.CANVAS_W * self.scale)),
-                        int(round(catalog.CANVAS_H * self.scale)),
+                    sq_x, sq_y, sq_w, sq_h = _squash_geometry(
+                        content_rect.width(),
+                        content_rect.height(),
+                        content_rect.width(),
+                        content_rect.height(),
                         self._squash_progress,
                     )
+                    x, y, w, h = (content_rect.x() + sq_x, content_rect.y() + sq_y,
+                                  sq_w, sq_h)
                 # 彩蛋/探头旋转在 squash 期间必须保持：碰撞触发 220ms Q 弹时丢
                 # 旋转会让头槌飞行中的桌宠闪一瞬间回正姿态（实机观感反馈），
                 # 且 _sync_mask 的旋转路径一直在转——不转会导致画面与 mask
@@ -2709,10 +2796,14 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             return False
         avail = scr.availableGeometry()
         dir_sign = 1 if self.facing == 'right' else -1
-        cx = self.x() + self._w / 2
+        # 漫游空间按角色身体框算（虚拟窗口坐标）：身体不越出工作区，
+        # 不再依赖"窗口中心 + _w/2"这类画布经验值。
+        sbr = self._stable_body_local_rect()
+        vp = self._virtual_pos()
+        cx = vp.x() + sbr.x() + sbr.width() / 2
         distance = random.randint(catalog.MOVE_MIN_PX, catalog.MOVE_MAX_PX)
         target_cx = cx + dir_sign * distance
-        half_w = self._w / 2
+        half_w = sbr.width() / 2
         left_bound = avail.left() + catalog.MOVE_MARGIN + half_w
         right_bound = avail.right() - catalog.MOVE_MARGIN - half_w
         if target_cx < left_bound or target_cx > right_bound:
@@ -2728,12 +2819,13 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             # 窗口位移三者不一致。
             return False
         self._move_plan = {
-            'start_x': self.x(),
-            'target_x': int(round(target_cx - half_w)),
-            'start_y': self.y(),
+            'start_x': vp.x(),
+            'target_x': int(round(target_cx - half_w)) - sbr.x(),
+            'start_y': vp.y(),
             'target_y': wander_target_y(
-                self.y(), avail.top(), avail.bottom(), self._h, catalog.MOVE_MARGIN
-            ),
+                vp.y() + sbr.y(), avail.top(), avail.bottom(), sbr.height(),
+                catalog.MOVE_MARGIN
+            ) - sbr.y(),
             'duration': duration,
         }
         self._move_timer.start()
@@ -2781,7 +2873,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             progress = (t - lead) / max(0.1, dur - lead - tail)
             x = plan['start_x'] + (plan['target_x'] - plan['start_x']) * progress
             y = plan['start_y'] + (plan['target_y'] - plan['start_y']) * progress
-        self.move(int(round(x)), int(round(y)))
+        self._move_window_towards(x, y)
         if t >= dur - tail:
             # 到位：提交终点，动画自然播完后续链。
             # 不把自动移动的终点写入记忆位置，否则重启后桌宠会停在
@@ -2794,13 +2886,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._move_plan = None
 
     def _collision_clamp_pos(self, x: float, y: float) -> tuple[float, float]:
-        """把碰撞分离位置限制在抛掷物理使用的屏幕边界内。"""
-        avail = self._screen_available().availableGeometry()
-        margin = self._w / 3.0
-        left = avail.left() - margin
-        top = avail.top()
-        right = avail.right() - self._w + margin
-        bottom = avail.bottom() - self._h
+        """把碰撞分离位置限制在抛掷物理使用的屏幕边界内（角色身体贴边语义）。"""
+        left, top, right, bottom = self._throw_bounds()
         return min(max(x, left), right), min(max(y, top), bottom)
 
     # ================================================================ 交互
@@ -2879,7 +2966,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     def _enter_slingshot(self, global_pos: QPoint) -> None:
         self._flush_drag_move()  # 进入瞄准前应用最后一次跟手位置（锚点=当前窗口位置）
         self._interaction_state = "SLINGSHOT_AIMING"
-        self._slingshot_anchor_pos = QPoint(self.pos())
+        self._slingshot_anchor_pos = QPoint(self._virtual_pos())  # 虚拟坐标：发射/回锚与物理同一坐标系
         self._slingshot_anchor_mouse = QPoint(global_pos)
         self._slingshot_mouse = QPoint(global_pos)
         self._slingshot_pull = QPoint(0, 0)
@@ -2934,7 +3021,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._slingshot_pull = QPoint(0, 0)
         self._context_menu_suppressed = True
         if self.drag_physics and self._drag_target is None:
-            self._drag_target = QPoint(self.pos())
+            self._drag_target = QPoint(self._virtual_pos())
         self._start_slingshot_rebound(progress)
         self._submit_collision_state(force=True)
         self.update()
@@ -2942,7 +3029,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     def _cancel_slingshot_to_anchor(self) -> None:
         progress = self._slingshot_progress()
         if self._slingshot_anchor_pos is not None:
-            self.move(self._slingshot_anchor_pos)
+            self._move_window_towards(self._slingshot_anchor_pos.x(),
+                                      self._slingshot_anchor_pos.y())
         self._clear_slingshot_input()
         self._interaction_state = "IDLE"
         self._context_menu_suppressed = True
@@ -2955,7 +3043,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         progress = self._slingshot_progress()
         distance = min(math.hypot(self._slingshot_pull.x(), self._slingshot_pull.y()),
                        physics_mod.SLINGSHOT_MAX_DISTANCE * self.scale)
-        anchor = QPoint(self._slingshot_anchor_pos or self.pos())
+        anchor = QPoint(self._slingshot_anchor_pos or self._virtual_pos())
         pull = QPoint(self._slingshot_pull)
         if distance < physics_mod.SLINGSHOT_MIN_DISTANCE * self.scale:
             self._cancel_slingshot_to_anchor()
@@ -2967,7 +3055,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         length = math.hypot(pull.x(), pull.y()) or 1.0
         self._phys_pos[:] = [float(anchor.x()), float(anchor.y())]
         self._phys_vel[:] = [pull.x() / length * speed, pull.y() / length * speed]
-        self.move(anchor)
+        self._move_window_towards(anchor.x(), anchor.y())
         self._clear_slingshot_input()
         self._interaction_state = "THROWN"
         self._suppress_click_after_slingshot()
@@ -2983,8 +3071,14 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self.update()
 
     def _is_in_interactive_area(self, local_pos) -> bool:
-        """由于动画左右有留白，只把窗口中间 1/3 宽度作为可交互区域。"""
-        return self._w / 3.0 <= local_pos.x() <= self._w * 2.0 / 3.0
+        """可交互区域 = 稳定身体框（含贴边绘制偏移）的水平区间；y 不限。
+
+        原实现是"窗口中间 1/3"经验值；身体框是它的精确化（manifest 声明的
+        稳定包围盒），未声明 body_box 的角色包回退为整个窗口宽度。
+        """
+        sbr = self._stable_body_local_rect()
+        left = sbr.x() + self._draw_delta.x()
+        return left <= local_pos.x() <= left + sbr.width()
 
     def _set_interaction_hold(self, active: bool) -> None:
         """同步低优先级预热让路闸门：只在状态翻转时通知库，避免每事件抖动。"""
@@ -3074,7 +3168,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             return
         target = self._drag_move_pending
         self._drag_move_pending = None
-        self.move(target)
+        self._move_window_towards(target.x(), target.y())
         if perfstats.ENABLED:
             perfstats.note('drag.move_applied')  # 实测拖拽位置更新率（P0 定案测量）
 
@@ -3086,7 +3180,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if self._drag_move_pending is not None:
             target = self._drag_move_pending
             self._drag_move_pending = None
-            self.move(target)
+            self._move_window_towards(target.x(), target.y())
 
     def _clear_drag_move(self) -> None:
         """丢弃未消费的合帧目标并停止 timer（不移动窗口，防御性清理）。"""
@@ -3126,7 +3220,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._press_global = event.globalPosition().toPoint()
             self._sync_drag_polling(True)
             self._interaction_state = "PRESS_CANDIDATE"
-            self._grab_offset = self._press_global - self.pos()
+            # 抓取偏移必须用虚拟窗口坐标系：贴边状态下窗口被钳在工作区内、
+            # 角色靠绘制偏移贴边，若用实际窗口位置，拖拽一开始角色就会
+            # 向窗口内方向跳变一个偏移量。
+            self._grab_offset = self._press_global - self._virtual_pos()
             self._dragging = False
             self._cancel_move()  # 按下即打断移动
             self._clear_drag_move()  # 丢弃上一次拖拽遗留的未消费合帧目标（防御）
@@ -3134,7 +3231,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._last_move_time = time.monotonic()
             self._trail = [(self._last_move_time, self._press_global.x(), self._press_global.y())]
             self._phys_vel = [0.0, 0.0]
-            self._phys_pos = [float(self.x()), float(self.y())]
+            _vp = self._virtual_pos()
+            self._phys_pos = [float(_vp.x()), float(_vp.y())]
             self._stop_physics()
             self.setFocus(Qt.FocusReason.OtherFocusReason)
             self._update_interaction_hold()  # 左键按住 → 低优先级预热让路
@@ -3179,7 +3277,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             if self.drag:
                 self._switch(self.drag)  # 进入拖拽：播放悬空反馈动画
             if self.drag_physics:
-                self._phys_pos = [float(self.x()), float(self.y())]
+                _vp = self._virtual_pos()
+                self._phys_pos = [float(_vp.x()), float(_vp.y())]
                 self._drag_target = g - self._grab_offset
                 self._enter_physics_mode('drag')
                 self._last_physics_tick_time = None
@@ -3187,7 +3286,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             else:
                 # 拖拽开始的第一帧仍立即跟手（既有交互语义），此后由
                 # ~120Hz 合帧 timer 消费最新目标
-                self.move(g - self._grab_offset)
+                self._move_window_towards(g.x() - self._grab_offset.x(),
+                                          g.y() - self._grab_offset.y())
                 self._position_sync_now()  # 拖拽开始的第一帧立即同步（气泡/监听器）
             self._last_global = g
             self._last_move_time = time.monotonic()
@@ -3244,7 +3344,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 )
                 if math.hypot(rvx, rvy) < physics_mod.DEAD_ZONE_SPEED:
                     if self._grab_offset is not None:
-                        self.move(g - self._grab_offset)
+                        self._move_window_towards(g.x() - self._grab_offset.x(),
+                                                  g.y() - self._grab_offset.y())
                     self._stop_physics()
                     self._save_position()
                 else:
@@ -3254,7 +3355,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                     self._physics_timer.start()
             else:
                 if self._grab_offset is not None:
-                    self.move(g - self._grab_offset)  # 停在松手处
+                    self._move_window_towards(g.x() - self._grab_offset.x(),
+                                              g.y() - self._grab_offset.y())  # 停在松手处
                 self._save_position()
             self._position_sync_now()  # 松手后的最终位置立即同步（气泡/监听器），不等去抖
             if self.idles and self._physics_mode != 'throw':
@@ -3414,8 +3516,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         provider = copy.copy(settings.active_config)
         provider.api_key = self.cfg.resolve_api_key(provider)
         system_prompt = settings.default_system_prompt
-        # 自我识别提示用的角色显示名（截图里的桌宠就是它自己）
-        pet_name = catalog.character_display_name(
+        # 自我识别提示用的角色显示名（截图里的桌宠就是它自己）；别名优先
+        pet_name = self.cfg.character_display_name(
             str(self.cfg.get('character', catalog.DEFAULT_CHARACTER))
         )
 
@@ -3748,7 +3850,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._sticky_buttons = list(buttons) if buttons else None
             # sticky 不 hold 气泡位（否则会永久挡自言自语）；靠 _sticky_bubble_active 挡
             self._speech_bubble.show_text(
-                self._sticky_text, self.visible_content_rect(), 0,
+                self._sticky_text, window_placement.bubble_anchor_rect(self), 0,
                 pet_scale=self.scale, subtitle=self._sticky_subtitle, sticky=True,
                 buttons=self._sticky_buttons,
             )
@@ -3756,7 +3858,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         _set_speech_bubble_interactive(self)
         self.hold_bubble(duration_ms / 1000.0 + 2.0)
         self._speech_bubble.show_text(
-            str(text), self.visible_content_rect(), duration_ms, pet_scale=self.scale,
+            str(text), window_placement.bubble_anchor_rect(self), duration_ms, pet_scale=self.scale,
             subtitle=str(subtitle or ""), title_first=title_first, width_locked=width_locked)
         return True
 
@@ -3901,7 +4003,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             return
         _set_speech_bubble_interactive(self)
         self._speech_bubble.show_text(
-            text, self.visible_content_rect(), duration_ms=2200,
+            text, window_placement.bubble_anchor_rect(self), duration_ms=2200,
             pet_scale=self.scale,
         )
 
@@ -3998,14 +4100,14 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     def _rename_character(self) -> None:
         """自定义当前角色的显示名（空输入 = 恢复默认目录名）。"""
         cid = str(self.cfg.get('character', catalog.DEFAULT_CHARACTER))
-        current = self.cfg.character_alias(cid) or catalog.character_display_name(cid)
+        current = self.cfg.character_display_name(cid)
         name, ok = QInputDialog.getText(
             self, '重命名角色', f'给 {cid} 起个名字（留空恢复默认）：', text=current,
         )
         if not ok:
             return
         self.cfg.set_character_alias(cid, name)
-        shown = self.cfg.character_alias(cid) or catalog.character_display_name(cid)
+        shown = self.cfg.character_display_name(cid)
         self.show_bubble(f'角色名：{shown}')
 
     def rename_character(self) -> None:
@@ -4293,18 +4395,12 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._phys_vel[1] = physics_mod.spring_velocity(self._phys_vel[1], py, ty, dt)
         self._phys_pos[0] += self._phys_vel[0] * dt
         self._phys_pos[1] += self._phys_vel[1] * dt
-        self.move(int(round(self._phys_pos[0])), int(round(self._phys_pos[1])))
+        self._move_window_towards(self._phys_pos[0], self._phys_pos[1])
 
     def _tick_throw_physics(self, dt: float = 0.016) -> None:
-        scr = self._screen_available()
-        avail = scr.availableGeometry()
-        # 忽略左右留白：角色实际可视区域约为窗口中间 1/3，
-        # 允许窗口略微超出屏幕边界，让角色形象真正碰到边缘才反弹。
-        margin = self._w / 3.0
-        left = avail.left() - margin
-        top = avail.top()
-        right = avail.right() - self._w + margin
-        bottom = avail.bottom() - self._h
+        # 虚拟窗口坐标系下的边界：角色身体框贴到工作区四边才反弹
+        # （原 `_w/3` 经验值的精确化；出屏由绘制偏移兑现，窗口不出工作区）。
+        left, top, right, bottom = self._throw_bounds()
 
         max_sub_dt = 0.008
         remaining = dt
@@ -4332,7 +4428,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         predict_bounce = getattr(self, '_predict_collision_bounce', None)
         if callable(predict_bounce):
             predict_bounce(start_px, start_py)
-        self.move(int(round(self._phys_pos[0])), int(round(self._phys_pos[1])))
+        self._move_window_towards(self._phys_pos[0], self._phys_pos[1])
         speed = math.hypot(self._phys_vel[0], self._phys_vel[1])
         # 低速段入口过渡：一降速就切出悬空动画，不等 clip 自然播完
         # （拖拽 clip 时长可能超过整个低速段，等播完就永远看不到切换——
@@ -4427,7 +4523,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         bubble = getattr(self, "_speech_bubble", None)
         if bubble is None:
             return  # 窗口已关闭/气泡已销毁：丢弃迟到回调
-        bubble.reposition(self.visible_content_rect())
+        bubble.reposition(window_placement.bubble_anchor_rect(self))
         for listener in tuple(self._position_listeners):
             try:
                 listener(self)
@@ -4474,6 +4570,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # 不主动停会让旧窗口在 deleteLater 之后仍被轮询线程保活（B9）
         if getattr(self, 'agent_link_manager', None) is not None:
             self.agent_link_manager.shutdown()
+        # 歌词控制器同持轮询 timer，关闭路径一并收口（close 只隐藏不销毁窗口）
+        self.shutdown_music_lyric()
         if getattr(self, "_interaction_state", IDLE) == SLINGSHOT_AIMING:
             self._cancel_slingshot_to_anchor()
         self._disarm_screen_restore_retry()  # 窗口销毁前摘掉 screenAdded 监听/超时回调
