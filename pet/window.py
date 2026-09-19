@@ -2853,6 +2853,8 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             'loops_done': 0,
             'frames_per_loop': self.lib.frames(move_name),
             'total_frames': loops * self.lib.frames(move_name),
+            # 圈内逐帧位移曲线（动帧才动、静帧不动）；无曲线时帧驱动线性插值
+            'curve': (getattr(self.lib, 'move_curves', None) or {}).get(move_name),
         }
         self._move_timer.start()
         return True

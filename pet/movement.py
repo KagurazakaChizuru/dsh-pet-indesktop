@@ -114,13 +114,32 @@ def quantize_move(
 
 
 def move_position_at_frame(plan: dict, frames_elapsed: float) -> tuple[float, float]:
-    """按帧进度线性插值窗口位置：progress = frames_elapsed/total_frames 夹到 [0,1]。
+    """按帧进度插值窗口位置，与墙钟/播放速度解耦。
 
-    无 lead/tail 冻结：移动从第 0 帧开始、在整圈边界结束，位置只跟解码帧号
-    走，与墙钟/播放速度解耦（playback_speed 变化不再造成位置/动画失步）。
+    无 curve：progress = frames_elapsed/total_frames 线性插值，夹到 [0,1]。
+    有 curve（圈内逐帧位移曲线，curve[i] = 源帧 i 的圈内累计进度 0..1）：
+    progress = (已完成圈数 + curve[当前帧]) / 总圈数——动画静帧段曲线走平，
+    窗口原地停住；动帧段匀速推进。动帧才动、静帧不动，且位置只跟解码帧号
+    走（playback_speed 变化不失步）。
     """
-    total = max(1, int(plan['total_frames']))
-    progress = min(1.0, max(0.0, frames_elapsed / total))
+    curve = plan.get('curve')
+    if curve:
+        per_loop = max(1, int(plan['frames_per_loop']))
+        loops = max(1, int(plan['loops']))
+        total = max(1, int(plan['total_frames']))
+        f = min(float(total), max(0.0, frames_elapsed))
+        loop_idx = min(int(f // per_loop), loops - 1)
+        intra = f - loop_idx * per_loop
+        # 曲线按下标对齐源帧号；长度不符时按比例折算（防御性，正常逐帧等长）
+        last = len(curve) - 1
+        pos = min(float(last), intra * last / max(1, per_loop - 1))
+        lo = int(pos)
+        frac = pos - lo
+        intra_progress = curve[lo] + (curve[min(lo + 1, last)] - curve[lo]) * frac
+        progress = (loop_idx + intra_progress) / loops
+    else:
+        total = max(1, int(plan['total_frames']))
+        progress = min(1.0, max(0.0, frames_elapsed / total))
     x = plan['start_x'] + (plan['target_x'] - plan['start_x']) * progress
     y = plan['start_y'] + (plan['target_y'] - plan['start_y']) * progress
     return x, y

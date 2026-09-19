@@ -91,7 +91,8 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 # 身体框）**叠加**后实测 4605——两边各自的预算都低于合并结果，是「红线是组合性质」
 # 的又一实例（docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2）。按文件约定只随实测校准，
 # 不为达标压行/合并语句。
-WINDOW_PY_LINE_BUDGET = 4605
+# 2026-09-19 移动计划挂圈内逐帧位移曲线（'curve' 键 + 注释，+2 行），实测校准到 4607。
+WINDOW_PY_LINE_BUDGET = 4607
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的

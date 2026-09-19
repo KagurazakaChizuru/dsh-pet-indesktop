@@ -75,6 +75,38 @@ def test_position_clamped_to_plan():
     assert move_position_at_frame(PLAN, 999) == (300.0, 160.0)
 
 
+# 圈内逐帧位移曲线：curve[i] = 播到源帧 i 时圈内累计进度（0..1 单调不减）。
+# 静帧段曲线走平 → 窗口不动；动帧段线性 → 匀速。无 curve 键时回退线性插值。
+CURVE_PLAN = {'start_x': 0, 'target_x': 200, 'start_y': 100, 'target_y': 100,
+              'loops': 1, 'frames_per_loop': 10, 'total_frames': 10,
+              'curve': [0.0, 0.0, 0.25, 0.5, 0.5, 0.5, 0.75, 1.0, 1.0, 1.0]}
+
+
+def test_position_curve_pauses_on_still_frames():
+    # 帧 3→4→5 曲线走平（0.5）：窗口必须原地停住，不得继续滑
+    assert move_position_at_frame(CURVE_PLAN, 3) == (100.0, 100)
+    assert move_position_at_frame(CURVE_PLAN, 4) == (100.0, 100)
+    assert move_position_at_frame(CURVE_PLAN, 5) == (100.0, 100)
+    # 帧 0 静止起步、末帧到达终点
+    assert move_position_at_frame(CURVE_PLAN, 0) == (0, 100)
+    assert move_position_at_frame(CURVE_PLAN, 10) == (200.0, 100)
+
+
+def test_position_curve_multi_loop():
+    plan = dict(CURVE_PLAN, loops=2, total_frames=20)
+    # 第二圈帧 2：progress = (1 + 0.25) / 2
+    assert move_position_at_frame(plan, 12)[0] == pytest.approx(125.0)
+    assert move_position_at_frame(plan, 20)[0] == pytest.approx(200.0)
+
+
+def test_position_curve_monotonic():
+    prev = -1.0
+    for f in range(0, 11):
+        x = move_position_at_frame(CURVE_PLAN, f)[0]
+        assert x >= prev
+        prev = x
+
+
 # ============================================================================
 # MovieLibrary.move_strides sidecar
 # ============================================================================
@@ -102,6 +134,60 @@ def test_move_strides_missing_file_returns_empty(tmp_path):
 def test_move_strides_unparseable_returns_empty(tmp_path):
     (tmp_path / 'move_strides.json').write_text('{oops', encoding='utf-8')
     assert _lib_on_dir(tmp_path)._load_move_strides() == {}
+
+
+def test_move_strides_object_value_stride(tmp_path):
+    """对象值 {'stride': N, 'curve': [...]} 的步幅同样进 move_strides。"""
+    (tmp_path / 'move_strides.json').write_text(json.dumps(
+        {'螃蟹走路': {'stride': 220, 'curve': [0.0, 0.5, 1.0]}, '漂浮踏步': 90},
+        ensure_ascii=False), encoding='utf-8')
+    assert _lib_on_dir(tmp_path)._load_move_strides() == {'螃蟹走路': 220.0, '漂浮踏步': 90.0}
+
+
+# ============================================================================
+# MovieLibrary.move_curves sidecar（圈内逐帧位移曲线）
+# ============================================================================
+
+
+def test_move_curves_loaded_from_object_values(tmp_path):
+    (tmp_path / 'move_strides.json').write_text(json.dumps(
+        {'螃蟹走路': {'stride': 220, 'curve': [0.0, 0.25, 0.5, 0.5, 1.0]},
+         '漂浮踏步': 90,  # 纯数值项：无曲线
+         '左转奔跑': {'stride': 240}},  # 无 curve 键：无曲线
+        ensure_ascii=False), encoding='utf-8')
+    lib = _lib_on_dir(tmp_path)
+    assert lib._load_move_curves() == {'螃蟹走路': [0.0, 0.25, 0.5, 0.5, 1.0]}
+
+
+@pytest.mark.parametrize('curve', [
+    [0.5, 1.0],            # 不从 0 开始
+    [0.0, 0.9],            # 不以 1 结束
+    [0.0, 0.8, 0.5, 1.0],  # 非单调（回退）
+    [1.0],                 # 太短
+    [0.0, 'x', 1.0],       # 非数值
+    'not-a-list',          # 不是列表
+])
+def test_move_curves_rejects_invalid(tmp_path, curve):
+    (tmp_path / 'move_strides.json').write_text(json.dumps(
+        {'螃蟹走路': {'stride': 220, 'curve': curve}},
+        ensure_ascii=False), encoding='utf-8')
+    assert _lib_on_dir(tmp_path)._load_move_curves() == {}
+
+
+def test_move_curves_missing_file_returns_empty(tmp_path):
+    assert _lib_on_dir(tmp_path)._load_move_curves() == {}
+
+
+def test_shenshen_move_curves_cover_move_clips():
+    """shenshen 角色包：每个移动动画都必须带逐帧位移曲线（动帧才动）。"""
+    from pet.library import MovieLibrary
+
+    lib = MovieLibrary(character_id='shenshen')
+    for name in catalog.MOVES:
+        curve = lib.move_curves.get(name)
+        assert curve, f'{name} 缺位移曲线'
+        assert curve[0] == 0.0 and curve[-1] == 1.0
+        assert len(curve) == lib.frames(name), '曲线必须逐帧对齐素材'
 
 
 def test_shenshen_move_strides_sidecar_covers_move_clips():
@@ -176,6 +262,7 @@ class FakeLibrary:
         self.folder_files = None
         self.no_mirror = set()
         self.move_strides = {}
+        self.move_curves = {}
 
     def names(self):
         return list(NAMES)
@@ -279,6 +366,20 @@ def test_try_move_falls_back_to_default_stride(app, tmp_path, monkeypatch):
         assert win._try_move(MOVE) is True
         stride = catalog.MOVE_STRIDE_DEFAULT_PX * win.scale
         assert win._move_plan['loops'] == max(1, round(240 / stride))
+    finally:
+        _close(win, app)
+
+
+def test_try_move_attaches_move_curve(app, tmp_path, monkeypatch):
+    """角色带有位移曲线时写进移动计划；无曲线时计划不带曲线（线性回退）。"""
+    lib = FakeLibrary(move_frames=10)
+    lib.move_strides = {MOVE: 100.0}
+    lib.move_curves = {MOVE: [0.0, 0.5, 1.0]}
+    win = _make_win(tmp_path, monkeypatch, lib)
+    try:
+        _pin_rng(monkeypatch, distance=150)
+        assert win._try_move(MOVE) is True
+        assert win._move_plan['curve'] == [0.0, 0.5, 1.0]
     finally:
         _close(win, app)
 
