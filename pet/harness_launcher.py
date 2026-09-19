@@ -752,7 +752,7 @@ def launch_harness_gui(parent=None, action: str = "start") -> None:
             show(text, duration)
 
     def _show() -> None:
-        holders.clear()  # 已投递：放行 bridge 回收
+        holders.clear()  # 已投递：解除持活，bridge 随闭包链断开回收
         status = result.get("status")
         info = result.get("info", "")
         if status in ("already", "started"):
@@ -799,12 +799,21 @@ def launch_harness_gui(parent=None, action: str = "start") -> None:
             proceed = threading.Event()
 
             def _ask() -> None:
-                confirmed["ok"] = _confirm_harness_stop(
-                    parent, target, restart=(action == "restart"))
-                proceed.set()
+                try:
+                    confirmed["ok"] = _confirm_harness_stop(
+                        parent, target, restart=(action == "restart"))
+                except Exception as exc:  # 父窗口销毁/对话框构造失败
+                    confirmed["error"] = exc
+                finally:
+                    proceed.set()  # 任何结局都必须放行 worker，否则永久挂起零反馈
 
             QTimer.singleShot(0, bridge, _ask)
             proceed.wait()
+            if "error" in confirmed:
+                result["status"] = "error"
+                result["info"] = str(confirmed["error"])
+                QTimer.singleShot(0, bridge, _show)
+                return
             if not confirmed.get("ok"):
                 return
         try:

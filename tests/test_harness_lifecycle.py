@@ -574,3 +574,41 @@ def test_launch_harness_gui_stop_confirmed_runs_in_worker(monkeypatch):
     assert stop_threads and stop_threads[0] is not gui_thread
     assert bubbles == ["已停止。"]
     del app
+
+
+def test_launch_harness_gui_confirm_raises_does_not_hang_worker(monkeypatch):
+    """确认框回调抛异常（父窗口销毁/对话框构造失败）：worker 必须收尾并
+    给出错误反馈，不得永久挂起零反馈，且不得执行停止。"""
+    import time
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(hl, "describe_harness_process", lambda: None)
+
+    def boom(parent, target, *, restart):
+        raise RuntimeError("parent destroyed")
+
+    monkeypatch.setattr(hl, "_confirm_harness_stop", boom)
+    criticals: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox, "critical",
+        lambda *a, **k: criticals.append(str(a[-1]) if a else ""))
+    stops: list = []
+    monkeypatch.setattr(
+        hl, "stop_harness",
+        lambda port=hl.DEFAULT_PORT: stops.append(1) or ("stopped", "ok"))
+
+    class _Pet:
+        def show_bubble(self, text, duration=0):
+            pass
+
+    hl.launch_harness_gui(_Pet(), action="stop")
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not criticals:
+        app.processEvents()
+        time.sleep(0.01)
+    assert criticals, "确认框异常必须给出错误反馈（worker 不得静默挂死）"
+    assert "parent destroyed" in criticals[0]
+    assert stops == [], "确认框异常时不得执行停止"
+    del app
