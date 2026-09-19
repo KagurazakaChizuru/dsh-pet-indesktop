@@ -187,6 +187,7 @@ class MovieLibrary(QObject):
         self.low_warm_batch_finished.connect(self._on_low_warm_batch_finished)
         self.media_type: str = 'webm'
         self.no_mirror: set[str] = self._load_no_mirror()
+        self.move_strides: dict[str, float] = self._load_move_strides()
 
         self._load_all()
 
@@ -200,6 +201,23 @@ class MovieLibrary(QObject):
             return set()
         names = data.get('no_mirror', [])
         return {str(n) for n in names} if isinstance(names, list) else set()
+
+    def _load_move_strides(self) -> dict[str, float]:
+        '''加载 move_strides.json：移动动画每圈（scale=1.0）地面位移像素数。
+
+        缺文件/解析失败 → 空 dict（窗口回退 catalog.MOVE_STRIDE_DEFAULT_PX），
+        绝不抛异常。只收数值项："_comment" 等备注字段与非数值项静默忽略。
+        '''
+        import json
+        path = self._asset_dir / 'move_strides.json'
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): float(v) for k, v in data.items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)}
 
     def _load_all(self) -> None:
         if self._manifest is None:

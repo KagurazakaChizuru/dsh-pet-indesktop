@@ -84,7 +84,7 @@ from .config import (
     _float_or_default,
 )
 from .library import MovieLibrary
-from .movement import body_reach, choose_move_direction, inward_facing, wander_target_y
+from .movement import body_reach, choose_move_direction, inward_facing, move_position_at_frame, quantize_move, wander_target_y
 from .predictive_prewarm import PredictivePrewarm, pick_from_pool, roll_next
 from .report_gates import REPORT_GATE_DEFAULTS
 from . import slot_manager as slot_manager_mod
@@ -647,7 +647,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # ---- 移动驱动 ----
         self._move_plan: dict | None = None
         self._move_timer = QTimer(self)
-        self._move_timer.setInterval(33)         # ~30fps 位置插值
+        self._move_timer.setInterval(33)         # ~30fps 移动守卫节拍（位移由 _on_frame 帧驱动）
         self._move_timer.timeout.connect(self._on_move_tick)
 
         # ---- 交互节拍跟随屏幕刷新率 ----
@@ -1902,7 +1902,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._pending_link_anim = None
 
     def _on_frame(self, name: str, n: int) -> None:
-        """媒体帧推进回调：重建画面；最后一帧触发播完处理。
+        """媒体帧推进回调：重建画面；移动计划按帧驱动位移；最后一帧触发播完处理。
 
         n = 素材源时间线上的 0-based 显示帧索引（WebMClip/GifClip 统一契约，
         由播放器按源时间线打标，队列满丢帧后仍一致——P1 复审）。降帧相位
@@ -1915,6 +1915,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if name != self.anim or self.movie is None:
             return
         is_last = n >= self.lib.frames(name) - 1  # n 是 0-based 源帧号：末帧判定不提前
+        plan = self._move_plan
+        if plan is not None and name == plan.get('anim') and 'total_frames' in plan:
+            self._move_window_towards(*move_position_at_frame(plan, plan['loops_done'] * plan['frames_per_loop'] + n))  # 帧驱动位移：与墙钟解耦
         reduced = self._idle_reduction_active()
         # 批11 解码节流联动：把当前门控状态推给 movie（WebMClip 消费端
         # interval ×divisor + reader 背压阻塞，解码速率 ≈半帧率）。推送先于
@@ -1931,16 +1934,26 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             # 帧号锚定（显示帧索引 = 源时间线）在两路径都不变。
             # 末帧的动画链推进绝不能因跳帧而丢（否则停在最后一帧）。
             if is_last and not self._ended_fired:
-                self._ended_fired = True
-                self.movie.stop()
-                self._on_anim_ended(name)
+                self._end_move_or_anim(name)
             return
         self._rebuild_frame()
         self.update()
         if is_last and not self._ended_fired:
-            self._ended_fired = True
-            self.movie.stop()  # 停在最后一帧，等 _on_anim_ended 切走
-            self._on_anim_ended(name)
+            self._end_move_or_anim(name)
+
+    def _end_move_or_anim(self, name: str) -> None:
+        """末帧收口：多圈移动中间圈续圈（不推链），末圈/非移动走正常播完。"""
+        plan = self._move_plan
+        if plan is not None and name == plan.get('anim') and 'loops' in plan:
+            if plan['loops_done'] + 1 < plan['loops']:
+                plan['loops_done'] += 1
+                self.movie.jumpToFrame(0)  # 圈末软停驻留 → start() 续圈重进帧 0
+                if self.movie.start() is not False:
+                    return  # 续圈成功：链推进留给末圈（start 被拒则落播完降级）
+            self._cancel_move()  # 末圈播完：progress 已到 1，清计划走播完链
+        self._ended_fired = True
+        self.movie.stop()  # 停在最后一帧，等 _on_anim_ended 切走
+        self._on_anim_ended(name)
 
     def _frame_signature(self, frame_n: int | None, dpr: float) -> tuple:
         """帧内容签名：素材路径+mtime+大小+内容弱指纹、帧号、朝向、动画名、scale、DPR。
@@ -2740,6 +2753,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         pp = getattr(self, 'predictive_prewarm', None)
         if pp is None or not self.acts or self._animation_gap_active:
             return
+        plan = self._move_plan or {}
+        if name == plan.get('anim') and plan.get('loops', 1) - plan.get('loops_done', 0) > 1:
+            return  # 多圈移动非末圈不预热：圈末提前掷骰会逐圈重掷预测
         frames = self.lib.frames(name)
         dur = self.lib.duration(name)
         pp.on_frame(
@@ -2809,9 +2825,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             return False
         room = (sp.cx - sp.left) if dir_sign < 0 else (sp.right - sp.cx)
         distance = random.randint(catalog.MOVE_MIN_PX, min(catalog.MOVE_MAX_PX, int(room)))
-        target_cx = sp.cx + dir_sign * distance
         move_name = name or self._pick(self.moves)
-        duration = self.lib.duration(move_name)
+        stride = (getattr(self.lib, 'move_strides', None) or {}).get(move_name, catalog.MOVE_STRIDE_DEFAULT_PX) * self.scale
+        # 步幅量化：位移锁到步态整圈（位置帧驱动后速度恒等于动画步态，不打滑）
+        loops, distance, duration = quantize_move(distance, stride, room, self.lib.duration(move_name))
+        target_cx = sp.cx + dir_sign * distance
         if not self._switch(move_name):
             # 切换被拒：_switch 已回退到上一动画/待机并安排重试（B7 审查
             # P1-1 / 复审 R2）。绝不能按失败移动动画建立移动计划——否则
@@ -2822,6 +2840,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # 朝向凭空翻转（朝向只跟随实际发生的移动）。
         self.facing = 'right' if dir_sign > 0 else 'left'
         self._move_plan = {
+            'anim': move_name,
             'start_x': sp.vp.x(),
             'target_x': int(round(target_cx - sp.sbr.width() / 2)) - sp.sbr.x(),
             'start_y': sp.vp.y(),
@@ -2830,6 +2849,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 sp.sbr.height(), catalog.MOVE_MARGIN
             ) - sp.sbr.y(),
             'duration': duration,
+            'loops': loops,
+            'loops_done': 0,
+            'frames_per_loop': self.lib.frames(move_name),
+            'total_frames': loops * self.lib.frames(move_name),
         }
         self._move_timer.start()
         return True
@@ -2845,35 +2868,12 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._trigger_move(name)
 
     def _on_move_tick(self) -> None:
-        """位置驱动：跟随动画播放进度插值（前后各 2s 不动，中间走完全程）。"""
+        """位移守卫：位置由 _on_frame 帧驱动，这里只做异常清场（物理接管/动画丢失）。"""
         if self._physics_mode is not None:
-            self._move_timer.stop()
-            self._move_plan = None
+            self._cancel_move()
             return
-        plan = self._move_plan
-        if not plan or self.movie is None:
+        if not self._move_plan or self.movie is None:
             self._move_timer.stop()
-            return
-        t = self.movie.currentTimeSeconds()
-        lead, tail = catalog.MOVE_LEAD_SEC, catalog.MOVE_TAIL_SEC
-        dur = plan['duration']
-        if t <= lead:
-            x = plan['start_x']
-            y = plan['start_y']
-        elif t >= dur - tail:
-            x = plan['target_x']
-            y = plan['target_y']
-        else:
-            progress = (t - lead) / max(0.1, dur - lead - tail)
-            x = plan['start_x'] + (plan['target_x'] - plan['start_x']) * progress
-            y = plan['start_y'] + (plan['target_y'] - plan['start_y']) * progress
-        self._move_window_towards(x, y)
-        if t >= dur - tail:
-            # 到位：提交终点，动画自然播完后续链。
-            # 不把自动移动的终点写入记忆位置，否则重启后桌宠会停在
-            # 上次随机游走的位置，而不是用户手动放置的位置。
-            self._move_timer.stop()
-            self._move_plan = None
 
     def _cancel_move(self) -> None:
         self._move_timer.stop()

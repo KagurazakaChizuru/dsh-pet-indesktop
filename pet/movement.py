@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
-"""移动驱动的纯逻辑（无 Qt）：纵向漫游目标与朝向判定。
+"""移动驱动的纯逻辑（无 Qt）：漫游目标、朝向判定、步幅量化与帧驱动位置。
 
 规则单一事实来源：朝向由「移动目标 + 屏幕位置」决定，与随机数无关——
 随机只用来挑方向（两侧都够得着时）和步长。RNG 一律可注入，便于钉死分支。
+位移按步态整圈量化（quantize_move），窗口位置由解码帧号推进
+（move_position_at_frame）——移动速度恒等于动画步态速度，不打滑。
 """
 
 from __future__ import annotations
 
 import random
 
-__all__ = ["body_reach", "choose_move_direction", "inward_facing", "wander_target_y"]
+__all__ = ["body_reach", "choose_move_direction", "inward_facing",
+           "move_position_at_frame", "quantize_move", "wander_target_y"]
 
 
 def wander_target_y(
@@ -87,3 +90,37 @@ def inward_facing(
     if cx > center + band:
         return "left"
     return None
+
+
+def quantize_move(
+    distance_px: float,
+    stride_px: float,
+    room_px: float,
+    loop_duration: float,
+) -> tuple[int, float, float]:
+    """把目标位移量化为整圈步态：返回 (loops, distance, duration)。
+
+    位置帧驱动后窗口速度 = stride/loop_duration 恒等于动画步态速度（不打滑），
+    位移因此必须是步幅整倍数：n = max(1, round(distance/stride))。量化结果
+    越出可达空间（room）时递减圈数（下限 1 圈）；单圈仍越界（room < stride，
+    贴边场景）时位移夹到 room——此时速度略慢于步态，但身体绝不越界。
+    duration = n × loop_duration（loop_duration 已含 playback_speed 换算）。
+    """
+    stride = max(1.0, float(stride_px))
+    loops = max(1, round(distance_px / stride))
+    while loops > 1 and loops * stride > room_px:
+        loops -= 1
+    return loops, min(loops * stride, float(room_px)), loops * float(loop_duration)
+
+
+def move_position_at_frame(plan: dict, frames_elapsed: float) -> tuple[float, float]:
+    """按帧进度线性插值窗口位置：progress = frames_elapsed/total_frames 夹到 [0,1]。
+
+    无 lead/tail 冻结：移动从第 0 帧开始、在整圈边界结束，位置只跟解码帧号
+    走，与墙钟/播放速度解耦（playback_speed 变化不再造成位置/动画失步）。
+    """
+    total = max(1, int(plan['total_frames']))
+    progress = min(1.0, max(0.0, frames_elapsed / total))
+    x = plan['start_x'] + (plan['target_x'] - plan['start_x']) * progress
+    y = plan['start_y'] + (plan['target_y'] - plan['start_y']) * progress
+    return x, y
