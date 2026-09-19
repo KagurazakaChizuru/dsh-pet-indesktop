@@ -2884,7 +2884,7 @@ class AppShell:
         self.todo_panel = None
 
     def trigger_voice_chime_now(self, text: str = "") -> None:
-        """手动报时：右键菜单「立即报时」/ 设置页试听共用。
+        """手动报时：菜单「立即报时」（默认隐藏，菜单编辑器可加回）/ 设置页试听共用。
 
         无论报时总开关是否开启都会执行（试听/手动触发语义），服务懒创建。
         """
@@ -2892,13 +2892,13 @@ class AppShell:
         service.say_now(text=text)
 
     def toggle_voice_chime(self) -> None:
-        """右键菜单「启用语音报时」开关：翻转配置并同步服务启停。"""
+        """菜单「启用语音报时」开关（默认隐藏）：翻转配置并同步服务启停。"""
         self.config.set("voice_chime_enabled", not bool(self.config.get("voice_chime_enabled", False)))
         self.config.save()
         self._sync_chime_service()
 
     def trigger_festival_now(self) -> None:
-        """手动提醒「今日节日」：右键菜单入口。
+        """手动提醒「今日节日」：菜单入口（默认隐藏，菜单编辑器可加回）。
 
         与语音报时的手动触发同语义——**无视总开关**，服务懒创建；当天没有
         节日/节气时给出明确文案，不做静默无反应。
@@ -2907,7 +2907,7 @@ class AppShell:
         service.remind_now()
 
     def toggle_festival_reminder(self) -> None:
-        """右键菜单「启用节日提醒」开关：翻转配置并同步服务启停。"""
+        """菜单「启用节日提醒」开关（默认隐藏）：翻转配置并同步服务启停。"""
         self.config.set(
             "festival_reminder_enabled",
             not bool(self.config.get("festival_reminder_enabled", False)),

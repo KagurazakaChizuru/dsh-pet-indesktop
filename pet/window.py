@@ -4256,7 +4256,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
 
     def _enter_physics_mode(self, mode: str) -> None:
         """进入物理模式（'drag'/'throw'）：统一取消自主移动计划与动画间隔，
-        避免移动插值与物理位移双写位置（画面在两个位置间闪现）。"""
+        避免自主移动（帧驱动位移）与物理位移双写位置（画面在两个位置间闪现）。"""
         self._cancel_move()
         self._cancel_animation_gap()
         self._physics_mode = mode
