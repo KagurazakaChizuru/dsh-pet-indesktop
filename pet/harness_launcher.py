@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import socket
 import struct
 import subprocess
@@ -597,11 +598,15 @@ def describe_harness_process(port: int = DEFAULT_PORT) -> HarnessProcess | None:
 
 
 def _terminate_process_tree(pid: int) -> None:
-    """终止进程及其子进程树（Windows taskkill /T /F；POSIX 先 TERM 后 KILL）。
+    """终止进程及其子进程树（Windows taskkill /T /F；POSIX 按进程组先 TERM 后 KILL）。
 
     与 child_pet_cleanup._terminate_pet_process 同款：Windows 上的 .cmd shim
     会让 dsh 以「cmd → node」两层形态存在，/T 才能收干净；CREATE_NO_WINDOW
     防止 GUI 进程里凭空弹一个空白控制台窗口（实机反馈）。
+    POSIX 上 dsh 常为「npx → node」两层：只 kill 顶层 pid 会留下 node 子进程，
+    故按进程组终止（桌宠自拉实例 spawn 时 start_new_session=True，进程组即
+    dsh 自己的组）。目标组恰好是本进程组时回退单 pid kill——killpg 打自己
+    的组会把桌宠一起带走。
     """
     if os.name == "nt":
         result = subprocess.run(
@@ -616,20 +621,31 @@ def _terminate_process_tree(pid: int) -> None:
                 (result.stdout or "").strip(), (result.stderr or "").strip(),
             )
         return
-    import signal
 
-    try:
-        os.kill(int(pid), signal.SIGTERM)
-    except OSError:
-        return
+    def _group_kill(sig) -> None:
+        pgid = None
+        try:
+            pgid = os.getpgid(int(pid))
+        except (OSError, ProcessLookupError):
+            pgid = None
+        # 绝不向本进程组发信号（见 docstring）；组不可达时回退单 pid
+        if pgid is not None and pgid != os.getpgrp():
+            try:
+                os.killpg(pgid, sig)
+                return
+            except (OSError, ProcessLookupError):
+                pass
+        try:
+            os.kill(int(pid), sig)
+        except OSError:
+            pass
+
+    _group_kill(signal.SIGTERM)
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and is_running_pid(pid):
         time.sleep(0.05)
     if is_running_pid(pid):
-        try:
-            os.kill(int(pid), signal.SIGKILL)
-        except OSError:
-            pass
+        _group_kill(signal.SIGKILL)
 
 
 def is_running_pid(pid: int) -> bool:
