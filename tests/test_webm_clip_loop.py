@@ -326,24 +326,31 @@ def test_loop_boundary_parks_then_exits_on_grace_timeout(app, tmp_path, monkeypa
         app.processEvents()
 
 
-def test_loop_boundary_wakes_on_hard_stop(app, tmp_path):
+def test_loop_boundary_wakes_on_hard_stop(app, monkeypatch, tmp_path):
     """驻留期间硬停（stop_evt + gate）：立即退出，不等宽限期。"""
     clip = _make_clip(tmp_path)
     q = queue.Queue(maxsize=8)
     stop_evt = clip._stop_evt  # 与 _hard_stop 作用的是同一个事件对象
     result = []
+    # 宽限期放大到 60s：硬停若失效，reader 只能等宽限期自然退出——join(10s)
+    # 超时必红。旧写法宽限期 1.0s < 断言上界 2.0s，硬停坏掉也照样全绿。
+    monkeypatch.setattr(webm_clip_mod, "_LOOP_REARM_GRACE_SECS", 60.0)
     t = threading.Thread(
         target=lambda: result.append(clip._loop_boundary(q, stop_evt, clip._generation)),
         daemon=True,
     )
     t.start()
     try:
-        time.sleep(0.1)  # 让 reader 进入驻留
+        # 轮询确认 reader 真的进入驻留再测（赌固定 sleep 会在未驻留时平凡变绿）
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not clip._reader_parked:
+            time.sleep(0.01)
+        assert clip._reader_parked, "reader 必须先进入驻留，硬停唤醒才有判别力"
         t0 = time.monotonic()
         clip._hard_stop()
-        t.join(3.0)
-        assert not t.is_alive(), "硬停必须立即唤醒驻留的 reader"
-        assert time.monotonic() - t0 < 2.0
+        t.join(10.0)
+        assert not t.is_alive(), "硬停必须立即唤醒驻留的 reader（60s 宽限期等不起）"
+        assert time.monotonic() - t0 < 5.0, "硬停后必须立即退出（远小于 60s 宽限期）"
         assert result == [False]
     finally:
         clip.cleanup()
@@ -932,7 +939,10 @@ def test_recycle_disabled_never_triggers(app, monkeypatch, tmp_path):
         assert clip.start() is True
         assert clip._reader_ready.wait(5.0)
         proc, gen = spawns[0][0], spawns[0][1]
-        clip._reader_born_at = time.monotonic() - 3000.0  # 已远超任何合理阈值
+        # 恒正但极老的出生时刻：任何机器上「年龄」都足够大（fresh CI 的
+        # monotonic 可能只有几百秒，-3000s 回拨会算出非正值，触发
+        # _recycle_due() 的 born_at<=0 防御守卫 → 本测试恒绿虚过）。
+        clip._reader_born_at = 1.0
         for _ in range(3):
             gen.release()
         assert _consume_until(clip, lambda: len(finished) == 1), f"srcs={srcs}"
@@ -964,7 +974,12 @@ def test_recycle_only_fires_at_boundary_not_mid_loop(app, monkeypatch, tmp_path)
         assert clip.start() is True
         assert clip._reader_ready.wait(5.0)
         proc, gen = spawns[0][0], spawns[0][1]
-        clip._reader_born_at = time.monotonic() - 1200.0  # 已远超阈值
+        # 强制「必到期」（对齐 test_recycle_at_boundary 的写法）：极小阈值 +
+        # 恒正出生时刻，不依赖 monotonic 绝对值（fresh CI 上 -1200s 回拨会
+        # 算出非正值触发 born_at<=0 守卫，due 恒 False，「中途不回收」从未被
+        # 真正考察）。
+        clip._recycle_seconds = 0.001
+        clip._reader_born_at = 1.0
         # 循环中途（未达圈边界）：回收必须不生效——进程继续存活出帧
         gen.release()
         assert _consume_until(clip, lambda: srcs == [0])
