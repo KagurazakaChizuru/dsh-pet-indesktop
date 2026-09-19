@@ -498,9 +498,21 @@ class StuckDetector(QObject):
             while w and w[0].ts < cutoff:
                 w.pop(0)
             if not w:
+                # 窗口清空 = 卡住状态自然解除：与 _reset 同款发射 stuck_resolved，
+                # 否则「卡住」的消费者永远等不到恢复信号。
+                had_score = self._scores.get(agent_key, 0) > 0
                 del self._windows[agent_key]
                 self._last_assistant_text.pop(agent_key, None)
                 self._scores.pop(agent_key, None)
+                self._last_intervene.pop(agent_key, None)
+                self._last_intervene_score.pop(agent_key, None)
+                if had_score:
+                    self.stuck_resolved.emit(agent_key)
+            else:
+                # 事件部分过期后窗口非空：分数必须按剩余事件重算（否则
+                # get_score 返回剪枝前陈旧分）；降分穿过阈值由 _recompute
+                # 自己发射 stuck_resolved。
+                self._recompute(agent_key)
 
     @staticmethod
     def _pick_primary_reason(reasons: list[str], score: int) -> str:

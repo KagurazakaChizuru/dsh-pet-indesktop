@@ -278,3 +278,49 @@ class TestStuckHelpers:
         assert "{name}" not in stuck_reminder_text("DSH")
         assert "DSH" in stuck_reminder_text("DSH")
         assert stuck_reminder_text("DSH", "快去看 {name}！") == "快去看 DSH！"
+
+
+class TestStuckDetectorPrune:
+    def test_prune_emits_stuck_resolved_when_window_expires(self):
+        """窗口随时间清空 = 卡住状态自然解除：必须发射 stuck_resolved，
+        否则「卡住」的消费者（提示/干预 UI）永远等不到恢复信号。"""
+        det, clock = _make_detector(window_seconds=30)
+        resolved: list[str] = []
+        det.stuck_resolved.connect(lambda k: resolved.append(k))
+        for _ in range(3):
+            det.feed_record("dsh", _result("pip", False, error_code="ETIMEDOUT",
+                                           error_text="timed out", timeout=True))
+        assert det.get_score("dsh") >= DEFAULT_WORRIED_THRESHOLD
+        clock.advance(60)  # 全部事件过期
+        det._prune()
+        assert det.get_score("dsh") == 0
+        assert resolved == ["dsh"], "窗口清空时必须发射 stuck_resolved"
+
+    def test_prune_recomputes_score_for_remaining_events(self):
+        """部分事件过期后窗口非空：分数必须按剩余事件重算，
+        否则 get_score 返回剪枝前的陈旧分。"""
+        det, clock = _make_detector(window_seconds=30)
+        det.feed_record("dsh", _result("pip", False, error_text="boom"))
+        det.feed_record("dsh", _result("curl", False, error_text="boom2"))
+        assert det.get_score("dsh") >= 1  # 连续失败 +1
+        clock.advance(20)
+        det.feed_record("dsh", _result("pip", True))  # 窗口内只剩这次成功
+        clock.advance(20)  # 两次失败（t=0）过期，成功（t=20）仍在窗内
+        det._prune()
+        assert det.get_score("dsh") == 0, "过期事件不得再贡献分数"
+
+    def test_prune_emits_resolved_when_recompute_drops_below_worried(self):
+        """重算降分穿过 worried 阈值时同样要发 stuck_resolved（走 _recompute 链路）。"""
+        det, clock = _make_detector(window_seconds=30)
+        resolved: list[str] = []
+        det.stuck_resolved.connect(lambda k: resolved.append(k))
+        for _ in range(3):
+            det.feed_record("dsh", _result("pip", False, error_code="ETIMEDOUT",
+                                           error_text="timed out", timeout=True))
+        assert det.get_score("dsh") >= DEFAULT_WORRIED_THRESHOLD
+        clock.advance(20)
+        det.feed_record("dsh", _call("bash", "argv0:ls"))  # 只占窗，不贡献分数
+        clock.advance(20)  # 失败事件过期，只剩占窗事件
+        det._prune()
+        assert det.get_score("dsh") == 0
+        assert resolved == ["dsh"]
