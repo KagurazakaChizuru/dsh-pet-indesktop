@@ -605,8 +605,11 @@ def _terminate_process_tree(pid: int) -> None:
     防止 GUI 进程里凭空弹一个空白控制台窗口（实机反馈）。
     POSIX 上 dsh 常为「npx → node」两层：只 kill 顶层 pid 会留下 node 子进程，
     故按进程组终止（桌宠自拉实例 spawn 时 start_new_session=True，进程组即
-    dsh 自己的组）。目标组恰好是本进程组时回退单 pid kill——killpg 打自己
-    的组会把桌宠一起带走。
+    dsh 自己的组）。**仅当目标是自己进程组的组长（pgid == pid）才 killpg**：
+    交互 shell 的前台作业与 start_new_session 的子进程都是组长；而脚本里
+    `dsh web &` 这类后台启动的 dsh 属于脚本的组，killpg 会把整个脚本组连带
+    终止——该场景回退单 pid kill（爆炸半径宁小勿大）。目标组恰为本进程组
+    时同样回退单 pid kill，绝不向自己的组发信号。
     """
     if os.name == "nt":
         result = subprocess.run(
@@ -623,13 +626,12 @@ def _terminate_process_tree(pid: int) -> None:
         return
 
     def _group_kill(sig) -> None:
-        pgid = None
         try:
             pgid = os.getpgid(int(pid))
         except (OSError, ProcessLookupError):
             pgid = None
-        # 绝不向本进程组发信号（见 docstring）；组不可达时回退单 pid
-        if pgid is not None and pgid != os.getpgrp():
+        # 只杀目标自己领导的组；本进程组与非目标领导的组都回退单 pid
+        if pgid is not None and pgid == int(pid) and pgid != os.getpgrp():
             try:
                 os.killpg(pgid, sig)
                 return
