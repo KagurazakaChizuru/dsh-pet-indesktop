@@ -38,6 +38,19 @@ _REPLY_PREVIEW_LIMIT = 150
 _REPLY_PREVIEW_SUFFIX = "…（全文见聊天窗）"
 
 
+def _surface_radius(preset: dict) -> float:
+    """气泡主体圆角。
+
+    breath_bubble 是有机水滴形（speech_bubble 专属几何，preset 里 radius=0）：
+    quick_chat 不支持该形状，按 0 渲染会变直角方框——同一
+    self_talk_bubble_style 设置在桌宠气泡与快速对话两套观感。这里用大圆角
+    近似，与 speech_bubble 同设置不破解；普通预设用自己的 radius。
+    """
+    if preset.get("shape") == "breath_bubble":
+        return 22.0
+    return float(preset.get("radius", 14))
+
+
 class QuickChatBubble(QFrame):
     def __init__(self, config, pet_window=None, parent=None):
         super().__init__(parent)
@@ -177,7 +190,7 @@ class QuickChatBubble(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect()).adjusted(6, 8, -6, -8)
-        radius = float(self._preset.get("radius", 14))
+        radius = _surface_radius(self._preset)
         body = QPainterPath()
         body.addRoundedRect(rect, radius, radius)
         tail = QPainterPath()
