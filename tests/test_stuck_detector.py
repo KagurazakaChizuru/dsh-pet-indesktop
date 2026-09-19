@@ -343,3 +343,36 @@ def test_prune_recompute_does_not_emit_intervention_without_new_events():
     recommends = [e for e in events if e.get("severity") == StuckSeverity.RECOMMEND]
     assert len(recommends) == 1, "定时剪枝不得重发干预推荐"
     assert det.get_score("dsh") >= DEFAULT_INTERVENE_THRESHOLD, "分数仍按剩余事件重算"
+
+
+def test_feed_record_from_worker_thread_emits_on_gui_thread():
+    """feed_record 从 worker 线程喂入时，信号槽必须在 GUI 线程执行
+    （PySide6 对非 QObject 接收者默认 queued 投递）。这条是护栏：当前
+    _prune/_recompute 与同一线程前提成立依赖该投递语义，未来若改连接
+    方式（如 DirectConnection），本测试会把「恰好安全」变成可见的红。"""
+    import threading
+    import time as _time
+
+    from PySide6.QtWidgets import QApplication
+
+    qapp = QApplication.instance() or QApplication([])
+    det, _ = _make_detector()
+    gui_thread = threading.current_thread()
+    slot_threads: list = []
+    det.stuck_resolved.connect(lambda k: slot_threads.append(threading.current_thread()))
+    for _ in range(2):
+        det.feed_record("dsh", _result("pip", False, error_text="boom"))
+    assert det.get_score("dsh") > 0
+
+    def _feed():
+        det.feed_record("dsh", {"event": "turn/end"})  # 触发 _reset → stuck_resolved
+
+    t = threading.Thread(target=_feed, daemon=True)
+    t.start()
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline and not slot_threads:
+        qapp.processEvents()
+        _time.sleep(0.01)
+    t.join(timeout=2.0)
+    assert slot_threads, "worker 线程喂入后信号必须被投递"
+    assert all(th is gui_thread for th in slot_threads), "信号槽必须在 GUI 线程执行"
