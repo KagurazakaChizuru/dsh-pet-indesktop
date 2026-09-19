@@ -820,6 +820,13 @@ class ModernSettingsDialog(QDialog):
                 "桌宠显示",
                 [
                     SettingRow("scale", "桌宠大小", "调整桌宠在桌面上的显示尺寸。", self.scale_combo),
+                    SettingRow(
+                        "bubble_text_scale",
+                        "气泡文字大小",
+                        "气泡里文字的显示尺寸：气泡与字号一起等比放大（100% 为默认）。"
+                        "大屏上嫌气泡字小时调大；审批/提问气泡为固定布局，不随本项变化。",
+                        self.bubble_text_scale_spin,
+                    ),
                     SettingRow("pet_opacity", "不透明度", "调整桌宠窗口的整体透明度；100% 为完全不透明。", self.pet_opacity_spin),
                     SettingRow(
                         "self_talk_bubble_style",
@@ -1712,7 +1719,7 @@ class ModernSettingsDialog(QDialog):
         )
         pet = page_content(
             [
-                ("显示", claim("scale", "pet_opacity")),
+                ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
                 ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead")),
                 ("拖拽与弹射", claim("drag_physics", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
@@ -2212,6 +2219,7 @@ class ModernSettingsDialog(QDialog):
         self.config.set("self_talk_texts", texts or list(DEFAULT_SELF_TALK_TEXTS))
         self.config.set("self_talk_image_dir", self.self_talk_image_dir_picker.text())
         self.config.set("self_talk_image_scale", self.self_talk_image_scale_spin.value())
+        self.config.set("bubble_text_scale", self.bubble_text_scale_spin.value())
         # Agent 联动：自定义 thinking 文案与音效（合并写回，不覆盖 agent_link 其他开关）
         self.config.set("dialogue_mode", str(self.dialogue_mode_select.currentData() or "legacy"))
         # 统一预设：编辑区当前层 flush 后，global 层 + agents delta 分层写回

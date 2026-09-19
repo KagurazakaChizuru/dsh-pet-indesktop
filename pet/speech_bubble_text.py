@@ -45,24 +45,59 @@ def bubble_wrap_width(column: int = BUBBLE_TEXT_COLUMN, slack: int = BUBBLE_TEXT
     return max(1, int(column) - int(slack))
 
 
-def bubble_column_for_text(text: str) -> int:
+# 「气泡文字大小」（配置键 bubble_text_scale，百分比/100）的缩放口径。
+# 缩放系数同时作用于**列宽**（进而作用于换行预算与 label 尺寸）与**字号**，
+# 气泡因此整体等比放大——只放大字号会让长行超出列宽被 label 右边界切掉，
+# 只放大气泡会让文字看起来更小（两者必须同一个系数）。
+BUBBLE_TEXT_SCALE_MIN = 0.5
+BUBBLE_TEXT_SCALE_MAX = 3.0
+# 各形态的基础字号（px），也是缩放前的原值：正文 13 / 副标题与页码 10 /
+# 标题态副标题 11。绘制侧按同一系数取整，度量侧从 label.font() 读回。
+BUBBLE_BODY_FONT_PX = 13
+BUBBLE_SUBTITLE_FONT_PX = 10
+BUBBLE_TITLE_FONT_PX = 11
+
+
+def clamp_bubble_text_scale(scale: float) -> float:
+    """把文字缩放系数钳进支持区间（非法值回退 1.0 = 与旧版逐像素一致）。"""
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        return 1.0
+    if value != value:  # NaN
+        return 1.0
+    return max(BUBBLE_TEXT_SCALE_MIN, min(BUBBLE_TEXT_SCALE_MAX, value))
+
+
+def scale_bubble_font_px(base_px: int, scale: float = 1.0) -> int:
+    """基础字号 × 缩放系数（取整、下限 1px）。scale=1.0 时原值返回。"""
+    return max(1, int(round(int(base_px) * clamp_bubble_text_scale(scale))))
+
+
+def bubble_column_for_text(text: str, scale: float = 1.0) -> int:
     """按文案长度选择文本列宽：≤60 字保持 248px，之后逐步放宽、上限 360px。
 
     只与「规整后的字数」有关（与换行度量无关），因此同一段文案在分页、量宽
     与绘制三处拿到的是同一个列宽；空文案/短文案走原列宽，行为零变化。
+
+    ``scale`` 是「气泡文字大小」系数：列宽整体等比缩放（换行预算与 label
+    尺寸都跟着变，字号由绘制侧按同一系数取整），默认 1.0 时与旧版零差异。
     """
+    factor = clamp_bubble_text_scale(scale)
+    base = BUBBLE_TEXT_COLUMN * factor
+    ceiling = BUBBLE_TEXT_COLUMN_MAX * factor
     length = len(normalize_bubble_text(text))
     if length <= BUBBLE_TEXT_COLUMN_GROWTH_CHARS:
-        return BUBBLE_TEXT_COLUMN
-    grown = BUBBLE_TEXT_COLUMN + ceil(
+        return int(round(base))
+    grown = base + ceil(
         (length - BUBBLE_TEXT_COLUMN_GROWTH_CHARS)
-        * (BUBBLE_TEXT_COLUMN_MAX - BUBBLE_TEXT_COLUMN)
+        * (ceiling - base)
         / BUBBLE_TEXT_COLUMN_GROWTH_SPAN
     )
-    return min(BUBBLE_TEXT_COLUMN_MAX, grown)
+    return int(min(ceiling, grown))
 
 
-def breath_bubble_size_for_anchor(anchor_rect: QRect) -> QSize:
+def breath_bubble_size_for_anchor(anchor_rect: QRect, scale: float = 1.0) -> QSize:
     """Scale the decorative water bubble with the pet's visible silhouette.
 
     The original 240 x 195 reference canvas looks oversized beside the smaller
@@ -70,16 +105,26 @@ def breath_bubble_size_for_anchor(anchor_rect: QRect) -> QSize:
     width choose a bounded 168..216 px canvas.  Using the alpha-mask bounds
     (rather than the transparent video window) makes the result stable across
     the 320/461/544/640 px pet presets.
+
+    ``scale`` 是内容缩放系数（文字气泡吃「气泡文字大小」、配图吃「配图大小」），
+    默认 1.0 时与旧版零差异。
     """
     visible_width = max(1, int(anchor_rect.width()))
     width = max(168, min(216, int(round(visible_width * 0.82))))
+    factor = max(0.0, float(scale))
+    width = max(1, int(round(width * factor)))
     return QSize(width, int(width * 195 / 240 + 0.5))
 
 
-def breath_bubble_size_for_scale(pet_scale: float) -> QSize:
-    """Return stable, strictly increasing sizes for the supported pet scales."""
-    scale = max(0.5, min(1.0, float(pet_scale)))
-    width = int(round(120 + 96 * scale))
+def breath_bubble_size_for_scale(pet_scale: float, scale: float = 1.0) -> QSize:
+    """Return stable, strictly increasing sizes for the supported pet scales.
+
+    ``scale`` 语义同 :func:`breath_bubble_size_for_anchor`（内容缩放系数）。
+    """
+    pet = max(0.5, min(1.0, float(pet_scale)))
+    width = int(round(120 + 96 * pet))
+    factor = max(0.0, float(scale))
+    width = max(1, int(round(width * factor)))
     return QSize(width, int(width * 195 / 240 + 0.5))
 
 

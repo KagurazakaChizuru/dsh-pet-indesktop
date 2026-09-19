@@ -483,6 +483,13 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._self_talk_image_dir = str(config.get('self_talk_image_dir', '') or '')
         self._self_talk_images = list_self_talk_images(_resolve_self_talk_image_dir(self._self_talk_image_dir))
         self._self_talk_image_scale = max(0.5, min(3.0, float(config.get('self_talk_image_scale', 100)) / 100.0))
+        # 气泡文字大小（bubble_text_scale，百分比/100）：与配图大小并列的独立
+        # 系数，作用于文字气泡的列宽 + 字号 + 呼吸气泡画布（见 speech_bubble
+        # set_text_scale 的说明）。100% 时与旧版逐像素一致。
+        self._bubble_text_scale = max(0.5, min(3.0, float(config.get('bubble_text_scale', 100)) / 100.0))
+        _apply_text_scale = getattr(self._speech_bubble, 'set_text_scale', None)
+        if callable(_apply_text_scale):
+            _apply_text_scale(self._bubble_text_scale)
         self._self_talk_min_interval = max(5.0, float(config.get('self_talk_min_interval', DEFAULT_SELF_TALK_MIN_INTERVAL)))
         self._self_talk_max_interval = max(self._self_talk_min_interval, float(config.get('self_talk_max_interval', DEFAULT_SELF_TALK_MAX_INTERVAL)))
         self._self_talk_timer = QTimer(self)
@@ -1227,7 +1234,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if hasattr(self, 'proactive_watcher') and self.proactive_watcher is not None:
             self.proactive_watcher.pause()
         if hasattr(self, 'agent_link_manager') and self.agent_link_manager is not None:
-            self.agent_link_manager.pause()
+            self.pause_agent_link_for_hide()
         if hasattr(self, 'lib') and self.lib is not None and hasattr(self.lib, 'pause_warm'):
             self.lib.pause_warm()
         # 交互让路闸门随隐藏对称释放（库侧 pause_warm 已换代清零时 end 是
@@ -3972,6 +3979,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._self_talk_image_dir = str(self.cfg.get('self_talk_image_dir', '') or '')
         self._self_talk_images = list_self_talk_images(_resolve_self_talk_image_dir(self._self_talk_image_dir))
         self._self_talk_image_scale = max(0.5, min(3.0, float(self.cfg.get('self_talk_image_scale', 100)) / 100.0))
+        self._bubble_text_scale = max(0.5, min(3.0, float(self.cfg.get('bubble_text_scale', 100)) / 100.0))
+        _apply_text_scale = getattr(self._speech_bubble, 'set_text_scale', None)
+        if callable(_apply_text_scale):
+            _apply_text_scale(self._bubble_text_scale)
         self._self_talk_min_interval = max(5.0, float(self.cfg.get('self_talk_min_interval', DEFAULT_SELF_TALK_MIN_INTERVAL)))
         self._self_talk_max_interval = max(self._self_talk_min_interval, float(self.cfg.get('self_talk_max_interval', DEFAULT_SELF_TALK_MAX_INTERVAL)))
         self._throw_speed_cap = physics_mod.throw_speed_cap(self.cfg.get('throw_strength'))

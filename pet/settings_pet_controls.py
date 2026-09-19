@@ -313,6 +313,11 @@ def build_pet_controls(host) -> None:
     host.self_talk_image_scale_spin.setRange(50, 300)
     host.self_talk_image_scale_spin.setSuffix(" %")
     host.self_talk_image_scale_spin.setValue(int(host.config.get("self_talk_image_scale", 100)))
+    # 气泡文字大小：与配图大小并列的独立系数（气泡与字号一起等比放大）
+    host.bubble_text_scale_spin = BrowserSpinBox(host)
+    host.bubble_text_scale_spin.setRange(50, 300)
+    host.bubble_text_scale_spin.setSuffix(" %")
+    host.bubble_text_scale_spin.setValue(int(host.config.get("bubble_text_scale", 100)))
     host.click_talk_bindings_btn = QPushButton("编辑…", host)
     host.click_talk_bindings_btn.setObjectName("clickTalkBindingsButton")
     host.click_talk_bindings_btn.clicked.connect(host._open_click_talk_bindings)

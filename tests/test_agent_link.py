@@ -1350,6 +1350,77 @@ class TestAgentLinkBubbles:
         assert any("已完成" in b for b in bubbles), f"应弹完成气泡: {bubbles}"
 
 
+    def test_hidden_pet_redirects_feedback_bubble_to_island(self, tmp_path):
+        """桌宠隐藏时联动反馈气泡改道灵动岛反馈面（不再静默丢弃）。"""
+        mgr, win, bubbles, clock = self._make_mgr(tmp_path)
+        redirected = []
+
+        def fake_redirect(text, subtitle="", duration_ms=3200):
+            redirected.append((text, duration_ms))
+            return True
+
+        win.isVisible = lambda: False
+        win.hidden_bubble_redirect = fake_redirect
+
+        mgr._show_link_bubble("DSH 开始干活啦～", important=True, duration_ms=4500)
+
+        assert redirected == [("DSH 开始干活啦～", 4500)]
+        assert bubbles == []
+
+    def test_hidden_dsh_full_scenario_start_and_done_redirect(self, tmp_path):
+        """场景回归：桌宠全程隐藏，DSH 两轮状态轮转——start/thinking/done
+        都必须到达改道面（island 反馈气泡），不得静默丢弃。"""
+        mgr, win, bubbles, clock = self._make_mgr(
+            tmp_path, gates={"state": 1.0, "done": 1.0})
+        redirected = []
+        win.isVisible = lambda: False
+        win.hidden_bubble_redirect = lambda text, subtitle="", duration_ms=3200: (
+            redirected.append((text, duration_ms)) or True)
+
+        # 上一轮收尾：idle（挂起 done 检查并触发）
+        mgr._on_agent_state("dsh", "idle")
+        clock[0] += 3.0
+        for timer in list(mgr._done_pending.values()):
+            timer.timeout.emit()
+        # 开新对话：thinking → working → 本轮结束 idle
+        mgr._on_agent_state("dsh", "thinking")
+        clock[0] += 3.0
+        mgr._on_agent_state("dsh", "working")
+        clock[0] += 3.0
+        mgr._on_agent_state("dsh", "idle")
+        clock[0] += 3.0
+        for timer in list(mgr._done_pending.values()):
+            timer.timeout.emit()
+
+        texts = [t for t, _ in redirected]
+        # thinking 文案（内置预设「DSH 正在思考。」）或 start 文案任一出现即算开始反馈
+        assert any("正在思考" in t or "开始干活" in t for t in texts), f"start/thinking 未改道：{texts}"
+        assert any("干完活" in t or "已完成本轮任务" in t or "看一眼" in t for t in texts), f"done 未改道：{texts}"
+        assert bubbles == []
+
+
+    def test_visible_pet_keeps_normal_bubble_path(self, tmp_path):
+        """桌宠可见时不改道（正常气泡路径不受注入影响）。"""
+        mgr, win, bubbles, clock = self._make_mgr(tmp_path)
+        redirected = []
+        win.hidden_bubble_redirect = lambda *a, **k: redirected.append(a) or True
+
+        mgr._show_link_bubble("普通消息", important=False, duration_ms=2600)
+
+        assert redirected == []
+        assert "普通消息" in bubbles
+
+    def test_hidden_pet_without_injection_falls_through(self, tmp_path):
+        """无注入（无岛 / no-chat 变体）时不改道，走原 show_bubble 路径
+        （真窗上等价于隐藏丢弃——由 show_bubble 自身的可见性守卫负责）。"""
+        mgr, win, bubbles, clock = self._make_mgr(tmp_path)
+        win.isVisible = lambda: False
+
+        mgr._show_link_bubble("普通消息", important=True, duration_ms=4500)
+
+        assert bubbles == ["普通消息"]
+
+
 class TestAgentLinkSounds:
     def _make(self, tmp_path, monkeypatch, **sound_cfg):
         class Win:

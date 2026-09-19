@@ -2,7 +2,7 @@
 """边缘探头控制器/几何测试。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QRect
+from PySide6.QtCore import QObject, QPoint, QRect
 from PySide6.QtWidgets import QApplication
 
 from pet.edge_probe import (
@@ -19,6 +19,7 @@ from pet.edge_probe import (
     STRAIGHTENED,
     EdgeProbeController,
     edge_side_at_rest,
+    probe_body_bounds,
     probe_window_x,
 )
 
@@ -317,4 +318,122 @@ def test_collision_throw_settle_off_edge_does_not_start_countdown():
     ctrl.on_throw_settled()
     assert not ctrl._reentry_active
     assert not ctrl.active
+
+
+# ------------------------------------------------------------ 贴边绘制偏移（#137 之后）
+class DeltaWin(FakeWin):
+    """带「稳定身体框 + 贴边绘制偏移」的窗口桩，复现 #137 之后的真实坐标关系。
+
+    - 窗口局部坐标（可见区/身体框）**不含**绘制偏移；
+    - 虚拟位置 = 实际位置 + 绘制偏移；移动时按身体框钳进可用区（同
+      window_placement.move_window_towards 的口径）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._w = 640
+        self._h = 390
+        self._body = QRect(212, 90, 216, 270)   # 画布留白：左 212 / 右 212
+        self._vis = QRect(264, 124, 212, 266)   # 可见像素（窗口局部，不含偏移）
+        self._draw_delta = QPoint(0, 0)
+
+    def _stable_body_local_rect(self):
+        return QRect(self._body)
+
+    def character_local_region(self):
+        return QRect(self._vis)
+
+    def _frame_draw_rect(self):
+        # 与 _vis 同系：不含绘制偏移
+        return QRect(0, 0, self._w, self._h)
+
+    def _virtual_pos(self):
+        return QPoint(self._x + self._draw_delta.x(), self._y + self._draw_delta.y())
+
+    def _move_window_towards(self, x, y, body_bounds=None):
+        avail = self.screen_available().availableGeometry()
+        bounds = avail if body_bounds is None else body_bounds
+        xi = x + self._body.x()
+        xi = min(max(xi, bounds.left()), bounds.right() - self._body.width() + 1) - self._body.x()
+        wx = min(max(xi, avail.left()), avail.right() - self._w + 1)
+        self._draw_delta = QPoint(xi - wx, 0)
+        self.move(wx, y)
+
+
+def _delta_controller():
+    times = [0.0]
+    ctrl = EdgeProbeController(DeltaWin(), clock=lambda: times[0])
+    ctrl.enabled = True
+    return ctrl, times
+
+
+def test_vis_local_is_delta_free_even_right_after_a_big_draw_offset():
+    """入场时可见区必须与「窗口内容坐标」同系：不得再叠加一次绘制偏移。
+
+    回归背景（用户反馈「探头按框的区域来、几乎整只露在屏外」）：入场发生在
+    拖到边缘松手那一刻，此时 _draw_delta 已经变成约 -212，而 _mask_bounds 还是
+    上一个偏移算出的值；旧实现再 translate(delta) 一次，露出量的分母框整体偏了
+    一整个画布留白，探头落点算到屏幕另一侧。
+    """
+    _qapp()
+    ctrl, times = _delta_controller()
+    win = ctrl.win
+    win.move(0, 100)
+    win._draw_delta = QPoint(-212, 0)  # 贴边后的真实偏移
+    ctrl.on_release(was_dragging=True)
+    assert ctrl.side == "left"
+    # 分母框必须等于角色可见区本身（不含偏移），不是可见区再平移 delta
+    assert ctrl._vis_local == win.character_local_region()
+    assert ctrl._vis_local.left() == win.character_local_region().left()
+
+
+def test_probe_body_bounds_allow_the_body_to_leave_the_screen_on_both_sides():
+    """放宽区间的契约：身体框必须能整体推到屏幕外（左右对称都要够）。
+
+    探头要把身体"藏一半出屏"，所以身体钳位区间必须比可用区宽出「一个完整身体」。
+    旧算式两侧只加了一个 sbr.width() 却没有减去 sbr.x()：身体框在画布里右偏
+    （shenshen 局部 x=212）时左向只放宽到 -4px，物理上不允许身体离屏超过 4px
+    ——那不是"藏半边"，是把身体钉在边缘。这里直接断言区间的契约，不编造症状。
+    """
+    _qapp()
+    ctrl, _times = _delta_controller()
+    win = ctrl.win
+    avail = win.screen_available().availableGeometry()
+    sbr = win._stable_body_local_rect()
+    bounds = probe_body_bounds(avail, sbr)
+    # 身体左边界（= bounds.left() + sbr.x()）必须能到 avail.left() - sbr.width()
+    assert bounds.left() + sbr.x() <= avail.left() - sbr.width(), (
+        f"左向放宽不足：身体左边界最远只能到 {bounds.left() + sbr.x()}"
+    )
+    right_edge = bounds.left() + bounds.width() - 1
+    assert right_edge + sbr.x() >= avail.right() + sbr.width(), (
+        f"右向放宽不足：身体右边界最远只能到 {right_edge + sbr.x()}"
+    )
+
+
+def test_peek_divides_by_the_rotated_visible_box_in_the_same_frame():
+    """分母框必须由**不含偏移**的帧矩形算出：含偏移会平白多出一个 delta。
+
+    口径：可见 212×266 的框绕帧矩形中心转 45° 后，投影 bbox 宽 = (212+266)/√2
+    ≈ 339；露出 55% 时虚拟窗口 x ≈ -(339×0.45 + 偏移) ≈ -133。
+    若 pivot 仍带 delta（-212），bbox 左边界被推到屏幕外约 -467，x 只算到 -20
+    ——角色几乎整只留在屏幕内。
+    """
+    _qapp()
+    ctrl, times = _delta_controller()
+    win = ctrl.win
+    win.move(-win._stable_body_local_rect().left(), 100)
+    win._draw_delta = QPoint(-212, 0)
+    ctrl.on_release(was_dragging=True)
+    times[0] += EDGE_ENTER_MS / 1000.0
+    ctrl._on_timer()
+    assert ctrl.mode == PEEKING
+    vx = win._virtual_pos().x()
+    assert vx <= -270, (
+        f"虚拟窗口 x={vx} 偏内（阈值 -270）：分母框仍被绘制偏移污染——"
+        f"旧口径下该值只有 -232，角色几乎整只留在屏幕内"
+    )
+    assert vx >= -420, f"虚拟窗口 x={vx} 偏外：角色会被整只推出屏幕"
+    ctrl.cancel(restore=True)
+
     ctrl.cancel(restore=True)

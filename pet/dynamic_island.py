@@ -119,14 +119,20 @@ def dock_edge_for(
 
 
 def strip_rect_for(rect: QRect, edge: str, available: QRect) -> QRect:
-    """停靠后的细条矩形：上下停靠压扁高度，左右停靠收成短竖条。"""
+    """停靠后的细条矩形：上下停靠压扁高度，左右停靠收成短竖条。
+
+    左右竖条按参考矩形的真实几何中心（top + height//2）纵向居中，不用
+    QRect::center()——它对偶数尺寸向下取整差 1px，与滑出方向（_target_rect
+    的整数居中公式）不对称，滑出/收回每循环细条累计上漂 1px。
+    """
     if edge in ("top", "bottom"):
         y = available.top() if edge == "top" else available.bottom() - _STRIP_THICKNESS + 1
         return QRect(rect.left(), y, rect.width(), _STRIP_THICKNESS)
     if edge in ("left", "right"):
         x = available.left() if edge == "left" else available.right() - _STRIP_THICKNESS + 1
         length = min(_STRIP_SIDE, available.height())
-        y = max(available.top(), min(rect.center().y() - length // 2,
+        center_y = rect.top() + rect.height() // 2
+        y = max(available.top(), min(center_y - length // 2,
                                      available.bottom() - length + 1))
         return QRect(x, y, _STRIP_THICKNESS, length)
     return QRect(rect)
@@ -835,8 +841,14 @@ class DynamicIsland(QWidget):
         edge = self.dock_edge
         screen = self._current_screen()
         if self._mode == "docked" and not self._hover_peek and screen is not None:
-            return strip_rect_for(
-                QRect(self.pos(), size), edge, screen.availableGeometry())
+            # 参考矩形锚定当前窗口的真实几何中心，而不是"细条左上角 +
+            # 胶囊尺寸"：动画收尾（_on_anim_tick 到位后的重算、
+            # _finish_animations、showEvent）调用本函数时窗口已是 64 高
+            # 细条，旧拼法的中心凭空高出 (64-44)/2 = 10px，每次收回/停靠
+            # 动画结束细条就上跳一截，反复悬停累计上窜
+            rect = QRect(self.pos(), size)
+            rect.moveTop(self.y() + self.height() // 2 - size.height() // 2)
+            return strip_rect_for(rect, edge, screen.availableGeometry())
         if edge != "none" and self._mode in ("docked", "expanded") \
                 and screen is not None:
             # 从停靠边向内展开：顶/底锚定该边，左右以细条纵向中心展开

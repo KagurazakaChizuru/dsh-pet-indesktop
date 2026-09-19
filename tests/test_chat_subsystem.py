@@ -1383,6 +1383,143 @@ def test_enter_while_ime_composing_does_not_send():
     app.processEvents()
 
 
+def _settle(app, seconds: float = 0.6) -> None:
+    """泵事件到布局落定（贴底欠账靠 rangeChanged 追平，需要真的走几拍）。"""
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+
+
+def _drain_typewriter(win) -> None:
+    guard = 0
+    while win._pending_output and guard < 20000:
+        win._typewriter_tick()
+        guard += 1
+
+
+def test_sent_message_stays_visible_without_manual_scroll(tmp_path: Path):
+    """用户自己发的那条消息必须入视——回归：_add 只更新高度、从不贴底。
+
+    实机取证（probe-chat-baseline2.py，1180x720、单条超长用户消息）：
+    修复前 value=2433 max=5206 gap=2773 → 整条用户气泡落在视口下方，
+    用户必须先手动滚轮才看得见自己发的内容。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    window = ChatWindow(Config(tmp_path), "shenshen")
+    window.resize(1180, 720)
+    for index in range(12):
+        window._add("assistant", f"历史第 {index} 条。" * 40)
+    window.show()
+    app.processEvents()
+    _settle(app)
+
+    window._add("user", "这是一条非常长的用户输入。" * 120)
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert bar.maximum() > 0, "超长用户消息应让内容溢出（否则本用例失去意义）"
+    assert bar.value() >= bar.maximum() - 24, (
+        f"发出的消息必须可见：value={bar.value()} max={bar.maximum()}"
+    )
+
+    # 流式回复过程中持续贴底，回复完成也不需要再手动上滑
+    window._active_request_id = "sent-msg-req"
+    window._bubble = window._add("assistant", "")
+    window._text = ""
+    reply = "AI 的长回复内容。" * 120
+    for start in range(0, len(reply), 25):
+        window._delta("sent-msg-req", reply[start:start + 25])
+        _drain_typewriter(window)
+        app.processEvents()
+    window._finished("sent-msg-req", reply)
+    _drain_typewriter(window)
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert window._bubble.state == "normal"
+    assert bar.value() >= bar.maximum() - 24, (
+        f"回复完成后必须停在底部：value={bar.value()} max={bar.maximum()}"
+    )
+    window.close()
+    app.processEvents()
+
+
+def test_resize_keeps_following_reader_at_bottom(tmp_path: Path):
+    """改窗口尺寸导致气泡重新折行时，跟随中的读者仍停在最新消息。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    window = ChatWindow(Config(tmp_path), "shenshen")
+    window.resize(1180, 720)
+    for index in range(10):
+        window._add("assistant", f"第 {index} 段：" + "这是一段足够长的回复。" * 18)
+    window.show()
+    app.processEvents()
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert bar.maximum() > 0
+
+    window.resize(900, 620)
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert bar.value() >= bar.maximum() - 24, (
+        f"改尺寸后应仍贴底：value={bar.value()} max={bar.maximum()}"
+    )
+    window.close()
+    app.processEvents()
+
+
+def test_manual_scroll_up_is_not_yanked_back_by_streaming(tmp_path: Path):
+    """用户主动上翻读历史期间，流式输出不得把他拽回底部（跟随=用户意图）。
+
+    「用户自己发消息」是另一条口径（那条消息理应入视，_add(role="user") 会显式
+    恢复跟随）；这里守的是**被动到达**的内容：正在读旧消息时不许被拽走。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    window = ChatWindow(Config(tmp_path), "shenshen")
+    window.resize(1180, 720)
+    for index in range(12):
+        window._add("assistant", f"历史第 {index} 条。" * 40)
+    window.show()
+    app.processEvents()
+    _settle(app)
+
+    bar = window.scroll.verticalScrollBar()
+    # 前置条件：内容溢出（有得滚），且此刻贴在底部（_add 会贴底）
+    assert bar.maximum() > 0
+    assert bar.value() >= bar.maximum() - 24
+    bar.setValue(0)  # 用户上翻到顶部
+    app.processEvents()
+    assert window._stream_follow_output is False
+
+    # 被动的流式输出（另一半在生成）到达：读者必须留在原地
+    reply = "被动到达的流式内容。" * 200
+    for start in range(0, len(reply), 30):
+        window._delta("scroll-up-req", reply[start:start + 30])
+        _drain_typewriter(window)
+        app.processEvents()
+    _settle(app)
+    assert bar.value() == 0, (
+        f"上翻阅读期间不许被拽回底部：value={bar.value()} max={bar.maximum()}"
+    )
+    window.close()
+    app.processEvents()
+
+
 def test_modern_chat_pauses_follow_when_user_scrolls_up(tmp_path: Path):
     """上翻阅读历史时暂停自动滚底；回到顶部/底部时按位置更新跟随状态。"""
     from PySide6.QtWidgets import QApplication

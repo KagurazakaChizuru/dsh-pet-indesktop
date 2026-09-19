@@ -956,7 +956,10 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
         return labels
 
     labels = labels_in(menu)
-    assert "启动 DeepSeek Harness" not in labels
+    # Harness 入口现为子菜单（标题 "DeepSeek Harness"），纯桌宠版整块不显示
+    assert "DeepSeek Harness" not in labels
+    assert "启动并打开页面" not in labels
+    assert "停止服务" not in labels
     assert "打开网页版 DeepSeek" in labels
     menu.close()
     app.processEvents()
@@ -1988,9 +1991,10 @@ def test_legacy_config_value_dispatches_legacy_layout(monkeypatch):
     window_mod._populate_context_menu(menu, Pet())
     labels = [action.text() for action in menu.actions() if not action.isSeparator()]
     # legacy 布局：无图标、无现代专属入口（看看屏幕/更新与帮助/生小肥鱼层级不同）
-    # Pet 无 on_open_chat，属于纯桌宠版：不显示 DeepSeek Harness，保留网页版
+    # Pet 无 on_open_chat，属于纯桌宠版：不显示 DeepSeek Harness 子菜单，保留网页版
     assert labels.index("生小肥鱼") == labels.index("开机自启") + 1
-    assert "启动 DeepSeek Harness" not in labels
+    assert "DeepSeek Harness" not in labels
+    assert "停止服务" not in labels
     assert "打开网页版 DeepSeek" in labels
     assert menu.styleSheet() == ""
     icon_actions = [action.text() for action in menu.actions() if not action.icon().isNull()]

@@ -91,8 +91,15 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 # 身体框）**叠加**后实测 4605——两边各自的预算都低于合并结果，是「红线是组合性质」
 # 的又一实例（docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2）。按文件约定只随实测校准，
 # 不为达标压行/合并语句。
-# 2026-09-19 移动计划挂圈内逐帧位移曲线（'curve' 键 + 注释，+2 行），实测校准到 4607。
-WINDOW_PY_LINE_BUDGET = 4607
+# 2026-09-19 上调到 4616：新增「气泡文字大小」（bubble_text_scale）注入——两处
+# 配置读取（__init__ / _refresh_pet_settings 各 4 行：读配置 + getattr 守卫 +
+# 调 set_text_scale）共 +11。getattr 守卫是必要的：测试替身（_BubbleStub 等）
+# 不实现 set_text_scale，直接调用会把无关用例打红。缩放逻辑本身在
+# pet/speech_bubble.py（该文件无行数预算）。按文件约定只随实测校准。
+# 2026-09-19 合并 fix/move-sync-facing 时按实测校准到 4618：本分支移动计划挂
+# 圈内逐帧位移曲线（'curve' 键 + 注释，+2 行）与上游气泡文字大小（4616）叠加，
+# 组合实测 4618（教训 2 第三次实例）。
+WINDOW_PY_LINE_BUDGET = 4618
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的
@@ -144,7 +151,11 @@ WINDOW_PY_LINE_BUDGET = 4607
 # 只按自己那批校准（2384 / 2380），合起来才是 2393：单个 PR 都不越线、只有两者
 # 同时进才红——又一次「红线是组合性质」的实例（PR-MERGE-LESSONS 第 2 条），
 # 故按文件约定只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2393
+# 2026-09-19 上调到 2401：新增「气泡文字大小」设置行（bubble_text_scale，+8）——
+# 3 行 SettingRow 展开式写法（6 行）+ _write_config 回写 1 行 + 布局编排认领 1 行；
+# 控件本体落在 pet/settings_pet_controls.py（与既有的「配图大小」同处），
+# 缩放实现全在 pet/speech_bubble*.py。按文件约定只随实测校准，不为达标压行。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2401
 def _read(name: str) -> str:
     return (PET_DIR / name).read_text(encoding="utf-8")
 

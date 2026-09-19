@@ -78,6 +78,18 @@ class IslandChatBubble(QuickChatBubble):
         self._set_reply_text(str(text or ""))
         self._render_reply()
 
+    def show_feedback(self, island: QWidget, text: str, *, subtitle: str = "",
+                      duration_ms: int | None = None) -> None:
+        """联动/系统反馈气泡：预览式弹出（不抢焦点），超时自动收回。
+
+        供桌宠隐藏时的气泡改道使用（window_alerts.redirect_hidden_bubble →
+        AppShell 注入调用）；后到的反馈覆盖前一条并重置收回定时器（最新
+        状态优先）。``duration_ms`` 缺省用预览态统一时长。"""
+        self.show_for_island(island, activate=False, reply_text=text)
+        self.hint_label.setText(str(subtitle or ""))
+        if duration_ms:
+            self._auto_collapse.start(int(duration_ms))
+
     def _on_auto_collapse(self) -> None:
         # 用户已点进气泡（窗口激活）＝开始交互，不再自动收回
         if QApplication.activeWindow() is not self:

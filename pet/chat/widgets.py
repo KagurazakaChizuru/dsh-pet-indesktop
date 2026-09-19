@@ -823,6 +823,12 @@ class ChatWindow(QDialog):
         self._pending_output = ""
         self._pending_finish_text: str | None = None
         self._stream_follow_output = True
+        # 贴底欠账：内容高度会在布局落定后才更新（QLabel 换行高度、气泡插入），
+        # 此刻立刻写 scrollbar 只能滚到**旧的** maximum。置位后由 rangeChanged
+        # 补一次，直到真的贴到底才清——取代「猜 singleShot 时机」（切会话事故
+        # 的成因，见 _bottom 注释）。
+        self._scroll_pin = True
+        self._auto_scrolling = False
         self._typewriter_timer = QTimer(self)
         self._typewriter_timer.setInterval(18)
         self._typewriter_timer.timeout.connect(self._typewriter_tick)
@@ -1185,6 +1191,9 @@ class ChatWindow(QDialog):
         self.scroll.setWidget(self.message_view)
         # 用户上翻阅读历史时暂停自动滚底；回到底部或开始新回复时恢复跟随
         self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_value_changed)
+        # 内容高度（maximum）变化时补上未完成的贴底：只在 _scroll_pin 置位且用户
+        # 没有手动上翻时动手，否则会把正在读历史的用户一次次拽回底部。
+        self.scroll.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
         self.scroll.setAutoFillBackground(True)
         self.scroll.viewport().installEventFilter(self)
         self.scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1486,6 +1495,11 @@ class ChatWindow(QDialog):
         self._set_empty_state(False)
         self._update_bubble_widths()
         QTimer.singleShot(0, self, self._update_conversation_height)
+        # 新内容必须入视：旧实现只挂 _update_conversation_height，从不贴底，
+        # 于是「用户自己发的那条消息」整条落在视口下方（实测 gap 2773px，
+        # 单条超长用户消息即可复现），后续流式回复也就跟着停在半路。
+        # _bottom 置的是欠账（_scroll_pin），布局落定后由 rangeChanged 补上。
+        self._bottom(always=role == "user")
         return bubble
 
     def _update_conversation_height(self) -> None:
@@ -2057,20 +2071,53 @@ class ChatWindow(QDialog):
         return bar.value() >= bar.maximum() - threshold
 
     def _on_scroll_value_changed(self, _value: int) -> None:
-        """用户滚动位置决定是否继续跟随输出；上翻阅读时暂停自动滚底。"""
-        self._stream_follow_output = self._is_near_bottom()
+        """用户滚动位置决定是否继续跟随输出；上翻阅读时暂停自动滚底。
 
-    def _bottom(self) -> None:
-        bar = self.scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        程序自己贴底（``_auto_scrolling`` 置位）不改写跟随状态：贴底动作本身
+        也发 valueChanged，若在这里当作用户意图，就会把「跟随」误判成 False。
+        """
+        if self._auto_scrolling:
+            return
+        following = self._is_near_bottom()
+        self._stream_follow_output = following
+        if not following:
+            # 用户主动上翻 = 明确的阅读意图：撤掉未完成的贴底欠账，之后内容再长
+            # 也不把他拽回底部（回到接近底部时由 _bottom/翻页重新置位）。
+            self._scroll_pin = False
+
+    def _on_scroll_range_changed(self, _minimum: int, _maximum: int) -> None:
+        """内容高度变化后补上未完成的贴底（布局晚于写入的最大值在此追平）。"""
+        if self._scroll_pin and self._stream_follow_output:
+            self._apply_bottom()
+
+    def _bottom(self, *, always: bool = False) -> None:
+        """把会话钉到最新内容底部，并在布局随后长高时继续跟到底。
+
+        ``always=True`` 用于「用户自己刚发了一条消息」：他此刻多半就在底部，
+        且刚发的内容理应入视——这里显式恢复跟随，不用旧的跟随状态挡掉。
+        """
+        if always:
+            self._stream_follow_output = True
+        self._scroll_pin = True
+        self._apply_bottom()
         QTimer.singleShot(0, self, self._apply_bottom)
         # 切会话后布局更新可能晚于 singleShot(0)（内容高度尚未重算，
         # maximum 仍为 0）；再加一拍兜底，保证切回长会话时落在底部。
         QTimer.singleShot(80, self, self._apply_bottom)
 
     def _apply_bottom(self) -> None:
+        if self._scroll_pin and not self._stream_follow_output:
+            return
         bar = self.scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._auto_scrolling = True
+        try:
+            bar.setValue(bar.maximum())
+        finally:
+            self._auto_scrolling = False
+        # 真的贴到底了才销账：maximum 还没追上内容高度时留着欠账，等
+        # rangeChanged 再来一次。
+        if bar.value() >= bar.maximum():
+            self._scroll_pin = False
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -2083,6 +2130,11 @@ class ChatWindow(QDialog):
         )
         self._update_bubble_widths()
         QTimer.singleShot(0, self, self._update_conversation_height)
+        # 改尺寸会让所有气泡重新折行（_update_bubble_widths 改的是固定宽度），
+        # 内容高度随之变化；原本贴在底部的读者会被留在半空。仍在跟随就重新贴底
+        # ——显式改尺寸是有意操作，不该因此把最新消息甩出视口。
+        if self._stream_follow_output:
+            self._bottom()
 
     _EDGE_GRIP = 8
 

@@ -457,6 +457,11 @@ class PetInstance:
         win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
         win.on_open_legacy_settings = None
         win.on_open_modern_settings = self._slot_wrap(self.open_modern_settings)
+        # 桌宠隐藏时的气泡改道面（DSH 联动等非交互反馈气泡 → 灵动岛，见
+        # window_alerts.redirect_hidden_bubble）；岛对话不可用时注入方返回 False。
+        win.hidden_bubble_redirect = self.shell._island_feedback_bubble
+        # 反馈面可用性探针：隐藏期联动监视器是否跳过低功耗暂停（mixin 消费）。
+        win.island_feedback_available = self.shell._island_feedback_available
         win.on_spawn_pet = self._slot_wrap(self.shell.spawn_pet)
         # 「退出子肥鱼」只挂给主肥鱼（instance_id 为空）：子肥鱼进程里该入口的
         # pid==os.getpid() 自我保护会跳过子鱼自己、把主鱼当子鱼 taskkill 掉
@@ -2108,6 +2113,36 @@ class AppShell:
         inst = getattr(self, "instance", None)
         if inst is not None and callable(getattr(inst, "open_chat", None)):
             inst.open_chat()
+
+    def _island_feedback_available(self) -> bool:
+        """桌宠隐藏期间灵动岛反馈面是否可用（window 的联动暂停决策探针）。
+
+        可用时隐藏不暂停联动监视器：DSH 事件继续驱动岛反馈气泡；
+        不可用（无聊天模块 / 岛未启用 / hidden_chat 关）时照旧暂停省电。"""
+        return self._island_chat_available()
+
+    def _island_feedback_bubble(self, text: str, subtitle: str = "",
+                                duration_ms: int = 3200) -> bool:
+        """桌宠隐藏时的反馈气泡改道面（window_alerts.redirect_hidden_bubble 注入调用）。
+
+        DSH 联动状态/提醒等非交互气泡在桌宠隐藏期间改弹到岛对话气泡
+        （预览式，不抢焦点，超时自动收回，后到覆盖）。岛对话不可用
+        （无聊天模块 / 岛未启用 / hidden_chat 关 / 桌宠其实可见）时返回
+        False，调用方维持原丢弃行为。"""
+        if self._aggregate_pet_visible() or not self._island_chat_available():
+            return False
+        island = getattr(self, "island", None)
+        if island is None or not shiboken6.isValid(island):
+            return False
+        from .island_chat import IslandChatBubble
+
+        if getattr(self, "island_chat", None) is None:
+            self.island_chat = IslandChatBubble(self.config)
+            self.island_chat.show_pet_requested.connect(self._show_pets_from_island_chat)
+        bubble = self.island_chat
+        bubble.open_chat_callback = self._open_full_chat_from_island_chat
+        bubble.show_feedback(island, text, subtitle=subtitle, duration_ms=duration_ms)
+        return True
 
     def _show_pets_from_island_chat(self) -> None:
         """岛对话气泡里的「显示桌宠」：恢复全部窗并同步岛状态。"""

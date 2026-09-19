@@ -404,3 +404,28 @@ def test_settings_controls_roundtrip(tmp_path):
     fi = cfg2.get("file_interpret")
     assert fi["enabled"] is False
     assert fi["progress_interval_seconds"] == 42.0
+
+
+def test_extract_text_never_reads_whole_file(tmp_path, monkeypatch):
+    """extract_text 必须按预算截断读取，不得整文件读入。
+
+    #150 性能评估反馈：read_text 先把整个文件读进内存再截断，拖几百 MB
+    的日志时 GUI 线程静默卡死且心跳尚未开始。本用例钉住实现契约：
+    Path.read_text 不得被调用（改用有界 read）。
+    """
+    import pathlib
+
+    big = tmp_path / "big.log"
+    big.write_text("x" * 500_000, encoding="utf-8")
+
+    def _boom(self, *args, **kwargs):
+        raise AssertionError("extract_text 不得整文件读入（read_text）")
+
+    monkeypatch.setattr(pathlib.Path, "read_text", _boom)
+
+    content, skipped = extract_text([big], max_chars=2000)
+
+    assert skipped == []
+    assert "x" * 2000 in content
+    assert "x" * 2001 not in content
+    assert "已截断" in content

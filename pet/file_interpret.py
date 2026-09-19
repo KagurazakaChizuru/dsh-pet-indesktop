@@ -96,22 +96,26 @@ def extract_text(paths: list[Path], max_chars: int = _MAX_TEXT_CHARS) -> tuple[s
     """顺序读取文本内容，共享字符预算；超预算截断、零预算整文件跳过。
 
     返回 (拼装内容, 因预算耗尽或读不出被跳过的文件名列表)。读文件失败不中断
-    整批（其余文件照常解读）。
+    整批（其余文件照常解读）。**有界读取**：每个文件只读剩余预算的字符数
+    （``fh.read(remaining)``），绝不整文件读入——拖几百 MB 的日志时
+    ``read_text`` 会把 GUI 线程卡死在解码上（#150 性能评估反馈）。
     """
     remaining = max(0, int(max_chars))
     parts: list[str] = []
     skipped: list[str] = []
     for path in paths:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            skipped.append(path.name)
-            continue
         if remaining <= 0:
             skipped.append(path.name)
             continue
-        if len(text) > remaining:
-            text = text[:remaining] + "\n…（已截断，超出单次解读预算）"
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read(remaining)
+                truncated = bool(fh.read(1))
+        except OSError:
+            skipped.append(path.name)
+            continue
+        if truncated:
+            text += "\n…（已截断，超出单次解读预算）"
             remaining = 0
         else:
             remaining -= len(text)

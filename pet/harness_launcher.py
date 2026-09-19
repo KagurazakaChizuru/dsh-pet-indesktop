@@ -19,12 +19,15 @@ Windows：Explorer / 开机自启的进程环境块是登录时的旧值，除�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
+import struct
 import subprocess
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
 from pathlib import Path
 
 from .node_runtime import augmented_path as _augmented_path
@@ -361,19 +364,392 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tu
     return "started", url
 
 
-def launch_harness_gui(parent=None) -> None:
-    """GUI 菜单入口：探测/启动放到后台线程，失败时在 GUI 线程弹窗提示。
+# ------------------------------------------------------------------ 生命周期
+# 「停止 / 重启」的取证与终止。为什么要按端口反查进程：桌宠既可能自己拉起
+# dsh（子进程脱离父进程存活，见 _spawn 的说明），也可能复用你手动跑着的实例
+# ——两条路径都没有可用的句柄，唯一可靠的共同事实是「谁在监听那个端口」。
+#
+# dsh CLI 自身没有 stop/exit 子命令（lib/bin.js 只有 web / plugin / dump-config），
+# 所以只能由宿主（桌宠）完成收尾；--no-open 让服务静默常驻之后，这是用户
+# 关闭它的唯一入口——以前关掉那个可见控制台窗口就等于关服务，现在窗口不存在了。
+
+# 命令行必须命中的特征：dsh 的包名/可执行名 + web 子命令。这是防「pid 复用
+# 误杀」的身份核验（实机教训见 child_pet_cleanup 里对 pid 复用的核验注释）。
+_HARNESS_CMDLINE_TOKENS = ("dsh", "web")
+
+
+@dataclass(frozen=True)
+class HarnessProcess:
+    """一个正在监听 dsh web 端口的进程（已通过命令行核验身份）。"""
+
+    port: int
+    pid: int
+    command_line: str = ""
+
+
+def _parse_windows_tcp_table(buffer: bytes, offset: int) -> list[tuple[str, int, int]]:
+    """解析 GetExtendedTcpTable 结果 → [(local_addr, local_port, pid), ...]。
+
+    MIB_TCPROW_OWNER_PID 是 6 个 DWORD（state / local addr / local port /
+    remote addr / remote port / pid）。表头是 4 字节的 dwNumEntries，行数据从
+    offset+4 开始；行内的 state 是第一个 DWORD，所以真正要读的
+    local addr / local port / pid 落在 row_start+4/+8/+20。端口与 IPv4 地址按
+    **网络字节序**存放，读出来要自己转回主机序。
+    """
+    if len(buffer) < 4:
+        return []
+    count = struct.unpack_from("<I", buffer, 0)[0]
+    row_size = 24
+    rows: list[tuple[str, int, int]] = []
+    for index in range(count):
+        row_start = offset + 4 + index * row_size
+        if row_start + row_size > len(buffer):
+            break
+        local_addr, local_port = struct.unpack_from("<II", buffer, row_start + 4)
+        pid = struct.unpack_from("<I", buffer, row_start + 20)[0]
+        port = ((local_port & 0xFF) << 8) | ((local_port >> 8) & 0xFF)
+        addr = ".".join(str((local_addr >> shift) & 0xFF) for shift in (0, 8, 16, 24))
+        rows.append((addr, port, pid))
+    return rows
+
+
+def _windows_listener_pids(port: int) -> list[int]:
+    """Windows 按端口反查监听进程（iphlpapi GetExtendedTcpTable，只读）。
+
+    必须显式声明 restype/argtypes：ctypes 默认把返回值当 32 位 int、把指针参数
+    当 c_int，64 位进程里会把缓冲区地址**截断成低 32 位**，函数返回非 0 而表是
+    空的——本地实测就是这样拿到空列表的（探针脚本 probe-listener-pid.py 复现）。
+    """
+    import ctypes
+
+    size = ctypes.c_ulong(0)
+    iphlpapi = ctypes.windll.iphlpapi
+    get_table = iphlpapi.GetExtendedTcpTable
+    get_table.restype = ctypes.c_uint
+    get_table.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    # AF_INET=2, TCP_TABLE_OWNER_PID_LISTENER=3；先问所需缓冲区大小再取表
+    get_table(None, ctypes.byref(size), False, 2, 3, 0)
+    buffer = ctypes.create_string_buffer(size.value or 1)
+    if get_table(buffer, ctypes.byref(size), False, 2, 3, 0) != 0:
+        return []
+    pids: list[int] = []
+    for _addr, row_port, pid in _parse_windows_tcp_table(buffer.raw, 0):
+        if row_port == int(port) and pid > 0 and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def _parse_proc_net_tcp(text: str) -> dict[int, int]:
+    """解析 /proc/net/tcp → {local_port: inode}（POSIX 反查用）。"""
+    ports: dict[int, int] = {}
+    for line in str(text or "").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 10:
+            continue
+        try:
+            local = fields[1]
+            state = fields[3]
+            inode = int(fields[9])
+        except (ValueError, IndexError):
+            continue
+        if state != "0A":  # TCP_LISTEN
+            continue
+        try:
+            port = int(local.rsplit(":", 1)[1], 16)
+        except (ValueError, IndexError):
+            continue
+        ports[port] = inode
+    return ports
+
+
+def _posix_listener_pids(port: int) -> list[int]:
+    """POSIX 监听进程反查：/proc/net/tcp 拿 inode → /proc/*/fd 找属主。
+
+    Linux 上纯 stdlib 可完成；macOS 没有 /proc，这里返回空列表（找不到 =
+    回到 ``not-running`` 的安全分支，绝不猜 PID 去杀）。macOS 上的停止/重启
+    因此不可用，这一点写在 README 里而不是猜一个进程。
+    """
+    try:
+        table = Path("/proc/net/tcp").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    inode = _parse_proc_net_tcp(table).get(int(port))
+    if inode is None:
+        return []
+    wanted = f"socket:[{inode}]"
+    pids: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            for fd in (entry / "fd").iterdir():
+                if os.readlink(fd) == wanted:
+                    pid = int(entry.name)
+                    if pid not in pids:
+                        pids.append(pid)
+                    break
+        except OSError:
+            continue
+    return pids
+
+
+def listener_pids(port: int) -> list[int]:
+    """监听指定 TCP 端口的进程 PID 列表（只读；查询失败返回空列表）。"""
+    try:
+        if os.name == "nt":
+            return _windows_listener_pids(port)
+        return _posix_listener_pids(port)
+    except Exception:
+        logging.debug("按端口反查监听进程失败 port=%s", port, exc_info=True)
+        return []
+
+
+def process_command_line(pid: int) -> str | None:
+    """读取进程命令行（身份核验用）。读不到返回 None（不猜、不杀）。"""
+    if pid <= 0:
+        return None
+    try:
+        if os.name == "nt":
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}')"
+                    ".CommandLine",
+                ],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if result.returncode != 0:
+                return None
+            return (result.stdout or "").strip() or None
+        return Path(f"/proc/{int(pid)}/cmdline").read_bytes().replace(
+            b"\x00", b" "
+        ).decode("utf-8", "replace").strip() or None
+    except Exception:
+        logging.debug("读取进程命令行失败 pid=%s", pid, exc_info=True)
+        return None
+
+
+def _pid_image_path(pid: int) -> str | None:
+    """进程可执行文件路径（第二重身份核验；读不到返回 None）。"""
+    if pid <= 0:
+        return None
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return None
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                    handle, 0, buf, ctypes.byref(size)
+                )
+                return buf.value if ok else None
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        return os.readlink(f"/proc/{int(pid)}/exe")
+    except Exception:
+        return None
+
+
+def _looks_like_harness(pid: int, command_line: str | None) -> bool:
+    """进程是否确为 dsh web（命令行两个特征都命中，且镜像是 node/dsh 一类）。
+
+    宁可放过（返回 False → 用户看到「端口被别的程序占用」）也不误杀：杀错
+    进程的代价远高于多点一次启动。
+    """
+    lowered = str(command_line or "").lower()
+    if not lowered or not all(token in lowered for token in _HARNESS_CMDLINE_TOKENS):
+        return False
+    image = (_pid_image_path(pid) or "").lower()
+    if not image:
+        # 读不到镜像路径（权限/受保护进程）：命令行已带 dsh + web，按可信处理
+        return True
+    return any(hint in image for hint in ("node", "dsh"))
+
+
+def find_harness_process(port: int = DEFAULT_PORT) -> HarnessProcess | None:
+    """找出本机正在运行的 dsh web（配置端口优先，其次官方默认 3080）。"""
+    for candidate in _candidate_ports(port):
+        if not is_running(candidate):
+            continue
+        for pid in listener_pids(candidate):
+            command_line = process_command_line(pid)
+            if _looks_like_harness(pid, command_line):
+                return HarnessProcess(port=candidate, pid=pid, command_line=command_line or "")
+    return None
+
+
+def describe_harness_process(port: int = DEFAULT_PORT) -> HarnessProcess | None:
+    """确认框/诊断用的现状描述（只读）。"""
+    return find_harness_process(port)
+
+
+def _terminate_process_tree(pid: int) -> None:
+    """终止进程及其子进程树（Windows taskkill /T /F；POSIX 先 TERM 后 KILL）。
+
+    与 child_pet_cleanup._terminate_pet_process 同款：Windows 上的 .cmd shim
+    会让 dsh 以「cmd → node」两层形态存在，/T 才能收干净；CREATE_NO_WINDOW
+    防止 GUI 进程里凭空弹一个空白控制台窗口（实机反馈）。
+    """
+    if os.name == "nt":
+        result = subprocess.run(
+            ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if result.returncode != 0:
+            logging.warning(
+                "停止 dsh：taskkill pid=%d 返回码 %s: %s%s",
+                pid, result.returncode,
+                (result.stdout or "").strip(), (result.stderr or "").strip(),
+            )
+        return
+    import signal
+
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and is_running_pid(pid):
+        time.sleep(0.05)
+    if is_running_pid(pid):
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def is_running_pid(pid: int) -> bool:
+    """进程是否仍存活（供停止后确认用）。
+
+    Windows 用 GetExitCodeProcess==STILL_ACTIVE：OpenProcess 能打开并不代表
+    进程活着（父进程持有句柄时，已死的子进程仍可被打开）——这条实机教训写在
+    child_pet_cleanup._pid_alive 的注释里，这里沿用同一判定。
+    """
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            return _windows_pid_alive(pid)
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == 259  # STILL_ACTIVE
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def stop_harness(port: int = DEFAULT_PORT) -> tuple[str, str]:
+    """停止本机运行的 dsh web；返回 (status, info)。
+
+    status：
+    - ``stopped``      已确认终止（端口不再监听，或进程已退出）；
+    - ``not-running``  没有在跑的实例（含端口没监听）；
+    - ``not-ours``     端口被非 dsh 进程占用 —— **不做任何终止**，把 PID 与
+                       命令行原样回报给用户，避免误杀；
+    - ``error``        终止过程异常。
+    """
+    for candidate in _candidate_ports(port):
+        if not is_running(candidate):
+            continue
+        pids = listener_pids(candidate)
+        if not pids:
+            # 端口在监听但反查不到属主：不知道是谁，绝不猜 PID
+            return "error", f"端口 {candidate} 正在监听，但读不到持有它的进程（权限不足？）"
+        # 先把所有持有者核验完再动手：中途返回 not-ours 时不许已经杀了一半
+        targets: list[int] = []
+        for pid in pids:
+            command_line = process_command_line(pid)
+            if not _looks_like_harness(pid, command_line):
+                return "not-ours", (
+                    f"端口 {candidate} 由 PID {pid} 占用，命令行不是 dsh web："
+                    f"{command_line or '（读不到）'}"
+                )
+            targets.append(pid)
+        for pid in targets:
+            try:
+                _terminate_process_tree(pid)
+            except Exception as exc:
+                logging.exception("停止 dsh 失败 pid=%s", pid)
+                return "error", f"终止 PID {pid} 失败：{exc}"
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and is_running(candidate):
+                time.sleep(0.05)
+            if is_running(candidate):
+                return "error", f"已发送终止命令，但端口 {candidate} 仍在监听（PID {pid}）"
+            return "stopped", f"已停止 DeepSeek Harness（PID {pid}，端口 {candidate}）。"
+    return "not-running", "本机没有在运行的 DeepSeek Harness 服务。"
+
+
+def restart_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tuple[str, str]:
+    """重启 dsh web：先停后起。stop 的 ``not-ours`` 会原样上报且**不启动新实例**。"""
+    status, info = stop_harness(port)
+    if status not in ("stopped", "not-running"):
+        return status, info
+    return launch_harness(port, open_browser=open_browser)
+
+
+def launch_harness_gui(parent=None, action: str = "start") -> None:
+    """GUI 菜单入口：探测/启动/停止放到后台线程，失败时在 GUI 线程弹窗提示。
 
     命令解析可能同步执行 `npm root -g`（最长 15 秒），放在 GUI 线程会
     卡住界面；弹窗延迟到菜单关闭后再显示（macOS 原生菜单跟踪会话中
     弹模态框会被 AppKit 抑制，与设置对话框首次点击无反应同源）。
+
+    ``action``：
+    - ``start``   启动/复用本机实例并打开页面（旧行为，唯一不弹确认框的动作）；
+    - ``restart`` 先停止再启动（带确认框，列出将终止的 PID/端口）；
+    - ``stop``    只停止（带确认框）。
+
+    停止/重启为什么必须有确认框：按端口找到的进程可能是用户自己在终端里
+    跑着的 dsh，静默 kill 会打断他手上的会话——这是破坏性动作，必须先讲清楚
+    「要终止谁」再动手。
     """
     from PySide6.QtCore import QObject, QTimer
     from PySide6.QtWidgets import QMessageBox
 
+    if action in ("restart", "stop"):
+        target = describe_harness_process()
+        if not _confirm_harness_stop(parent, target, restart=(action == "restart")):
+            return
+
     result: dict = {}
     # 创建于 GUI 线程，作为 singleShot 的 context：保证回调回到 GUI 线程
     bridge = QObject()
+
+    def _bubble(text: str, duration: int = 6000) -> None:
+        show = getattr(parent, "show_bubble", None)
+        if callable(show):
+            show(text, duration)
 
     def _show() -> None:
         status = result.get("status")
@@ -381,9 +757,20 @@ def launch_harness_gui(parent=None) -> None:
         if status in ("already", "started"):
             if status == "started":
                 # 首次运行 npx 拉包 + dsh 自举可能要几分钟，不给反馈用户会以为没反应
-                bubble = getattr(parent, "show_bubble", None)
-                if callable(bubble):
-                    bubble("正在后台启动 dsh web（首次运行需下载组件，可能要几分钟），就绪后会自动打开浏览器……", 6000)
+                _bubble("正在后台启动 dsh web（首次运行需下载组件，可能要几分钟），就绪后会自动打开浏览器……")
+            return
+        if status == "stopped":
+            _bubble(info or "已停止 DeepSeek Harness 服务。")
+            return
+        if status == "not-running":
+            _bubble("本机没有在运行的 DeepSeek Harness 服务。")
+            return
+        if status == "not-ours":
+            QMessageBox.warning(
+                parent,
+                "停止 DeepSeek Harness",
+                "端口被一个不是 dsh 的进程占用，为避免误杀已放弃操作。\n\n" + info,
+            )
             return
         if status == "not-found":
             QMessageBox.warning(
@@ -394,14 +781,52 @@ def launch_harness_gui(parent=None) -> None:
                 "或直接使用：npx @deepseek-ai/dsh web",
             )
         elif status == "error":
-            QMessageBox.critical(parent, "启动 DeepSeek Harness", f"启动失败：{info}")
+            QMessageBox.critical(parent, "DeepSeek Harness", f"操作失败：{info}")
 
     def worker() -> None:
         try:
-            status, info = launch_harness()
+            if action == "stop":
+                status, info = stop_harness()
+            elif action == "restart":
+                status, info = stop_harness()
+                if status in ("stopped", "not-running"):
+                    status, info = launch_harness()
+                elif status == "not-ours":
+                    pass  # 端口被别人占着：不启动第二个实例，把原因报给用户
+            else:
+                status, info = launch_harness()
         except Exception as exc:  # 线程内任何异常都要反馈，不能静默
             status, info = "error", str(exc)
         result["status"], result["info"] = status, info
         QTimer.singleShot(0, bridge, _show)
 
     threading.Thread(target=worker, daemon=True, name="pet-harness-launch").start()
+
+
+def _confirm_harness_stop(parent, target: "HarnessProcess | None", *, restart: bool) -> bool:
+    from PySide6.QtWidgets import QMessageBox
+
+    verb = "重启" if restart else "停止"
+    if target is None:
+        body = "当前没有检测到正在运行的 DeepSeek Harness 服务。"
+        if restart:
+            body += "\n仍要继续吗？将继续直接启动一个新的服务。"
+        else:
+            body += "\n无需停止。"
+    else:
+        body = (
+            f"将要终止 dsh web 服务：\n"
+            f"  端口 {target.port}　进程 PID {target.pid}\n"
+            f"  {target.command_line or '（读不到命令行，已按端口与进程核验）'}\n\n"
+            "若这是你自己在终端里跑着的实例，也会一并结束。"
+        )
+    box = QMessageBox(parent)
+    box.setWindowTitle(f"{verb} DeepSeek Harness")
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText(f"确认{verb} DeepSeek Harness 服务？")
+    box.setInformativeText(body)
+    confirm = box.addButton(f"确认{verb}", QMessageBox.ButtonRole.AcceptRole)
+    box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(confirm)
+    box.exec()
+    return box.clickedButton() is confirm

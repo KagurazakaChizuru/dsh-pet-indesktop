@@ -12,7 +12,10 @@ from PySide6.QtCore import QObject, QRect, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
+from collections import deque
+
 from pet import catalog
+from pet.window_alerts import show_alert
 from pet.config import Config
 from pet.window import PetWindow
 
@@ -344,3 +347,56 @@ def test_resume_activity_restores_sticky_alert_buttons(win, app):
     assert shown["sticky"] is True
     assert shown["buttons"] is not None, "恢复显示时 sticky 气泡必须带回按钮"
     assert [b[0] for b in shown["buttons"]] == ["同意", "拒绝"]
+
+
+# ------------------------------------------------------ 隐藏期气泡改道（岛反馈面）
+
+
+class _HiddenRedirectHost:
+    """isVisible=False 的最小宿主：只实现 show_alert 的消费面。"""
+
+    def __init__(self, *, suppressed: bool = False, hook=None):
+        self._bubble_suppressed = suppressed
+        self._alert_current = None
+        self._alert_queue = deque()
+        self._sticky_bubble_active = False
+        self._speech_bubble = None
+        if hook is not None:
+            self.hidden_bubble_redirect = hook
+
+    def isVisible(self):
+        return False
+
+
+def test_hidden_host_redirects_noninteractive_alert():
+    """桌宠隐藏：无按钮提醒改道灵动岛反馈面，不入队不丢弃。"""
+    redirected = []
+
+    def hook(text, subtitle="", duration_ms=3200):
+        redirected.append((text, subtitle, duration_ms))
+        return True
+
+    host = _HiddenRedirectHost(hook=hook)
+    show_alert(host, "可能卡住了，去看一眼吧", duration_ms=8000, sticky=False,
+               alert_type="watchdog")
+
+    assert redirected == [("可能卡住了，去看一眼吧", "", 8000)]
+    assert host._alert_queue == deque() and host._alert_current is None
+
+
+def test_hidden_host_interactive_alert_not_redirected():
+    """带按钮的交互气泡（审批/问题）不改道：岛气泡暂不支持按钮，维持丢弃。"""
+    redirected = []
+    host = _HiddenRedirectHost(hook=lambda *a, **k: redirected.append(a) or True)
+    show_alert(host, "审批等待", sticky=True,
+               buttons=[("同意", lambda: None)], alert_type="approval")
+
+    assert redirected == []
+
+
+def test_hidden_host_without_hook_keeps_dropping():
+    """无注入（no-chat / 岛不可用）时维持原丢弃行为，不崩。"""
+    host = _HiddenRedirectHost()
+    show_alert(host, "随便一条提醒", duration_ms=6000, sticky=False)
+
+    assert host._alert_queue == deque()

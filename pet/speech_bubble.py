@@ -44,9 +44,14 @@ from PySide6.QtWidgets import (
 
 # 批6-2 拆分后纯函数区 re-export（维持既有 import 兼容；外部调用点本批不改）
 from .speech_bubble_text import (
+    BUBBLE_BODY_FONT_PX,
+    BUBBLE_SUBTITLE_FONT_PX,
     BUBBLE_TEXT_COLUMN,
     BUBBLE_TEXT_COLUMN_MAX,
+    BUBBLE_TEXT_SCALE_MAX,
+    BUBBLE_TEXT_SCALE_MIN,
     BUBBLE_TEXT_SLACK,
+    BUBBLE_TITLE_FONT_PX,
     PAGE_DWELL_MAX_MS,
     PAGE_DWELL_MIN_MS,
     PAGE_FADE_IN_MS,
@@ -60,6 +65,7 @@ from .speech_bubble_text import (
     bubble_max_lines,
     bubble_rect_for_anchor,
     bubble_wrap_width,
+    clamp_bubble_text_scale,
     elide_bubble_text,
     list_self_talk_images,
     normalize_bubble_text,
@@ -67,12 +73,16 @@ from .speech_bubble_text import (
     page_dwell_ms,
     page_dwells_ms,
     paginate_bubble_text,
+    scale_bubble_font_px,
     truncate_bubble_text,
 )
 
 __all__ = [
+    "BUBBLE_BODY_FONT_PX",
     "BUBBLE_TEXT_COLUMN",
     "BUBBLE_TEXT_COLUMN_MAX",
+    "BUBBLE_TEXT_SCALE_MAX",
+    "BUBBLE_TEXT_SCALE_MIN",
     "BUBBLE_TEXT_SLACK",
     "PAGE_DWELL_MAX_MS",
     "PAGE_DWELL_MIN_MS",
@@ -86,6 +96,7 @@ __all__ = [
     "bubble_max_lines",
     "bubble_rect_for_anchor",
     "bubble_wrap_width",
+    "clamp_bubble_text_scale",
     "elide_bubble_text",
     "list_self_talk_images",
     "normalize_bubble_text",
@@ -93,6 +104,7 @@ __all__ = [
     "page_dwell_ms",
     "page_dwells_ms",
     "paginate_bubble_text",
+    "scale_bubble_font_px",
     "truncate_bubble_text",
     "PetSpeechBubble",
 ]
@@ -367,6 +379,7 @@ class PetSpeechBubble(QFrame):
         self._source_pixmap = QPixmap()
         self._pet_scale: float | None = None
         self._image_scale: float = 1.0
+        self._text_scale: float = 1.0
         self.set_style(style_id)
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
@@ -375,6 +388,27 @@ class PetSpeechBubble(QFrame):
     @property
     def style_id(self) -> str:
         return self._style_id
+
+    @property
+    def text_scale(self) -> float:
+        """当前文字缩放系数（1.0 = 默认，与旧版逐像素一致）。"""
+        return self._text_scale
+
+    def set_text_scale(self, scale: float) -> None:
+        """设置气泡文字缩放系数（配置键 bubble_text_scale，百分比/100）。
+
+        与 ``set_style`` 同类的注入 seam：气泡自己持有系数，所有 ``show_text``
+        调用点无需改签名。作用面是**文字气泡**（标准 + 呼吸形态）：列宽、换行
+        预算、label 尺寸与字号用同一个系数，整体等比放大——只放字号会让长行
+        超出列宽被 label 右边界切掉。配图气泡的尺寸另有 ``image_scale``。
+        """
+        value = clamp_bubble_text_scale(scale)
+        if value == self._text_scale:
+            return
+        self._text_scale = value
+        # 字号写在样式表里，必须重挂一次才会进 label.font()；懒重挂 ——
+        # 样式表没变时 setStyleSheet 会短路，这里显式重挂保证换系数立即生效。
+        self.set_style(self._style_id)
 
     def set_style(self, style_id: str) -> None:
         self._style_id = style_id if style_id in BUBBLE_STYLE_PRESETS else "classic_top"
@@ -398,15 +432,18 @@ class PetSpeechBubble(QFrame):
             self._shadow_alpha = 18
         self.label.setStyleSheet(
             "QLabel#pet-speech-label { background: transparent; border: none; padding: 0; "
-            f"color: {self._preset['foreground']}; font-size: 13px; }}"
+            f"color: {self._preset['foreground']}; "
+            f"font-size: {scale_bubble_font_px(BUBBLE_BODY_FONT_PX, self._text_scale)}px; }}"
         )
         self._subtitle_label.setStyleSheet(
             "QLabel#pet-speech-subtitle { background: transparent; border: none; padding: 0; "
-            f"color: {self._preset['foreground']}; font-size: 10px; }}"
+            f"color: {self._preset['foreground']}; "
+            f"font-size: {scale_bubble_font_px(BUBBLE_SUBTITLE_FONT_PX, self._text_scale)}px; }}"
         )
         self._page_indicator.setStyleSheet(
             "QLabel#pet-page-indicator { background: transparent; border: none; padding: 0; "
-            f"color: {self._preset['foreground']}; font-size: 10px; }}"
+            f"color: {self._preset['foreground']}; "
+            f"font-size: {scale_bubble_font_px(BUBBLE_SUBTITLE_FONT_PX, self._text_scale)}px; }}"
         )
         self.update()
 
@@ -420,11 +457,14 @@ class PetSpeechBubble(QFrame):
             if pet_scale is not None
             else breath_bubble_size_for_anchor(anchor_rect)
         )
-        # 配图内容吃用户可调的 image_scale（文字气泡尺寸不变）
-        if self._content_kind == "image" and self._image_scale != 1.0:
+        # 内容缩放系数按形态选：配图吃「配图大小」，文字吃「气泡文字大小」。
+        content_scale = (
+            self._image_scale if self._content_kind == "image" else self._text_scale
+        )
+        if content_scale != 1.0:
             base_size = QSize(
-                int(base_size.width() * self._image_scale),
-                int(base_size.height() * self._image_scale),
+                int(base_size.width() * content_scale),
+                int(base_size.height() * content_scale),
             )
         bubble_size = self._breath_size_for_content(base_size)
         self._breath_scale = bubble_size.width() / 240.0
@@ -469,7 +509,12 @@ class PetSpeechBubble(QFrame):
             ))
 
     def _breath_size_for_content(self, base_size: QSize) -> QSize:
-        """Grow the reference canvas when content needs more safe-area space."""
+        """Grow the reference canvas when content needs more safe-area space.
+
+        ``base_size`` 已含用户内容缩放系数，本方法按同一系数推算内容安全区
+        （配图 150×122 目标框、文字加宽步进、320px 参考画布上限都乘系数），
+        否则放大后的内容会顶出呼吸气泡的安全区被裁。
+        """
         width = base_size.width()
         if self._content_kind == "image" and not self._source_pixmap.isNull():
             target = self._source_pixmap.size()
@@ -484,7 +529,10 @@ class PetSpeechBubble(QFrame):
             length = len(normalize_bubble_text(self._raw_text))
             if length > 24:
                 width += min(104, ceil((length - 24) / 8) * 14)
-        width = max(base_size.width(), min(320, width))
+        content_scale = (
+            self._image_scale if self._content_kind == "image" else self._text_scale
+        )
+        width = max(base_size.width(), min(int(round(320 * content_scale)), width))
         return QSize(width, int(width * 195 / 240 + 0.5))
 
     def set_interactive(self, on: bool) -> None:
@@ -591,13 +639,17 @@ class PetSpeechBubble(QFrame):
             self._subtitle_label.show()
             if self._title_first:
                 # 标题态：标题在上、字号 11px（比歌词略小，但仍是一行主角）。
+                # 两者都按「气泡文字大小」系数缩放（度量从 label.font() 读回，
+                # 与绘制同源，放大后不会切字）。
                 self.label.setStyleSheet(
                     "QLabel#pet-speech-label { background: transparent; border: none; "
-                    f"padding: 0; color: {self._preset['foreground']}; font-size: 13px; }}"
+                    f"padding: 0; color: {self._preset['foreground']}; "
+                    f"font-size: {scale_bubble_font_px(BUBBLE_BODY_FONT_PX, self._text_scale)}px; }}"
                 )
                 self._subtitle_label.setStyleSheet(
                     "QLabel#pet-speech-subtitle { background: transparent; border: none; "
-                    f"padding: 0; color: {self._preset['foreground']}; font-size: 11px; }}"
+                    f"padding: 0; color: {self._preset['foreground']}; "
+                    f"font-size: {scale_bubble_font_px(BUBBLE_TITLE_FONT_PX, self._text_scale)}px; }}"
                 )
                 # 短标题不换行：气泡宽度会被歌词带窄，若标题跟着折行就会断成
                 # 两行、很难看。先按实际字体量宽度——放得下就关掉换行（宁可让
@@ -605,10 +657,9 @@ class PetSpeechBubble(QFrame):
                 self._subtitle_label.ensurePolished()
                 title_metrics = QFontMetrics(self._subtitle_label.font())
                 width = title_metrics.horizontalAdvance(subtitle)
-                # 留出左右内边距（13px×2）的余量再判断。
-                self._subtitle_label.setWordWrap(
-                    width > bubble_wrap_width() - 26
-                )
+                # 留出左右内边距（13px×2，随文字系数缩放）的余量再判断。
+                fit_width = bubble_column_for_text(subtitle, self._text_scale) - 26
+                self._subtitle_label.setWordWrap(width > fit_width)
                 self._layout.removeWidget(self._subtitle_label)
                 self._layout.insertWidget(0, self._subtitle_label)
             else:
@@ -634,8 +685,9 @@ class PetSpeechBubble(QFrame):
             self._configure_breath_content(anchor_rect, pet_scale)
         else:
             # 自适应列宽：短文案维持 248px，长文案逐步放宽到 360px 上限
-            # （bubble_column_for_text）。审批/提问气泡有自己的布局（按钮行 +
-            # 强制单页展示），保持既有列宽，不受本项影响。
+            # （bubble_column_for_text），整体再乘「气泡文字大小」系数——审批/
+            # 提问气泡有自己的布局（按钮行 + 强制单页展示），保持既有列宽不动。
+            text_slack = max(1, int(round(BUBBLE_TEXT_SLACK * self._text_scale)))
             column = (
                 BUBBLE_TEXT_COLUMN
                 if interactive or sticky
@@ -649,7 +701,8 @@ class PetSpeechBubble(QFrame):
                     # 标题/正文取较长者只是兜底——首帧恰好已带歌词行时才用到。
                     basis = text if len(text) >= len(subtitle) else subtitle
                     self._locked_column = max(
-                        self._column_for_text(basis, anchor_rect), TITLE_FIRST_COLUMN
+                        self._column_for_text(basis, anchor_rect),
+                        int(round(TITLE_FIRST_COLUMN * self._text_scale)),
                     )
                     # 重锁宽（新歌）时锁高一起作废，从新首句重新累计。
                     self._locked_lines = None
@@ -657,10 +710,13 @@ class PetSpeechBubble(QFrame):
             # 长文本分页：每页不超过 bubble_max_lines 行，自动翻页直到全文展示完，
             # 底部显示圆点页码（● ○ ○）。每页停留按该页字数自适应，
             # 末页多压一拍回首页停顿，总时长相应扩展。
+            # 换行预算必须与下面 bubble_label_size 用**同一个**列宽/余量：
+            # 两者一旦分叉（如放大后一处用旧列宽），label 会比真实行窄、行尾
+            # 那个字被切在边界上——看起来就像被气泡挡掉了。
             pages = paginate_bubble_text(
                 metrics,
                 text,
-                bubble_wrap_width(column),
+                bubble_wrap_width(column, text_slack),
                 bubble_max_lines(text, keep_breaks=self._multi_line),
                 keep_breaks=self._multi_line,
             )
@@ -694,13 +750,15 @@ class PetSpeechBubble(QFrame):
                     self._locked_lines = line_count
                 self.label.setFixedSize(
                     bubble_label_size(
-                        metrics, pages, column,
-                        min_width=TITLE_FIRST_COLUMN,
+                        metrics, pages, column, text_slack,
+                        min_width=int(round(TITLE_FIRST_COLUMN * self._text_scale)),
                         min_height=self._locked_lines * metrics.lineSpacing() + 2,
                     )
                 )
             else:
-                self.label.setFixedSize(bubble_label_size(metrics, pages, column))
+                self.label.setFixedSize(
+                    bubble_label_size(metrics, pages, column, text_slack)
+                )
         self.adjustSize()
         self._place(anchor_rect)
         self.show()
@@ -971,19 +1029,26 @@ class PetSpeechBubble(QFrame):
         return screen.availableGeometry()
 
     def _column_for_text(self, text: str, anchor_rect: QRect) -> int:
-        """文案自适应列宽，再按可用区宽度收敛。
+        """文案自适应列宽（含「气泡文字大小」系数），再按可用区宽度收敛。
 
-        更宽的气泡（列宽上限 360px）在窄屏 / 直播捕获子模式（可用区=主窗矩形，
-        可能只有 320px 宽）下会越出可用区被裁；这里把「列宽 + 左右内边距」
-        收进可用区，宁可列窄一点也不越界（不会低于基础列宽 248px）。
+        返回值必须同时是**分页换行预算**与**label 尺寸上限**的来源：`bubble_label_size`
+        会把 label 宽度夹到 ``min(column, 最长行 + slack)``，所以只要这里的 column
+        比可用区能装下的还宽、而最长行又真的很长，label 就会被同一次夹取压到可用区宽度
+        ——换行却按更宽的 column 做过，行尾那个字随即被切掉（真机 300% 实测复现：
+        column 744 / label 246 / 行尾截断）。
+
+        因此上限取 ``min(缩放后的列宽, 可用区能装下的宽度)``：宁可列窄一点也不越界，
+        更不制造「换行口径 ≠ label 口径」的错位。基础列宽 248px 在缩放后**不设下限**
+        （可用区装不下时以可用区为准；那时字号依旧按用户设定放大，只是每行少几个字）。
         """
-        column = bubble_column_for_text(text)
+        column = bubble_column_for_text(text, self._text_scale)
         avail = self._available_geometry(anchor_rect)
         if avail is None:
             return column
         margins = self._layout.contentsMargins()
         chrome = margins.left() + margins.right()
-        return max(BUBBLE_TEXT_COLUMN, min(column, avail.width() - chrome - 8))
+        feasible = avail.width() - chrome - 8
+        return max(1, min(column, feasible))
 
     def _place(self, anchor_rect: QRect, *, animate: bool = True) -> None:
         host = self._capture_host if self._capture_compat else None
@@ -995,6 +1060,11 @@ class PetSpeechBubble(QFrame):
         # contains layout margins; position the real fixed-size window instead.
         size = self.size()
         rect = bubble_rect_for_anchor(anchor_rect, size, avail, self._preset["placement"])
+        if rect.height() > avail.height():
+            # 文字放大到足以让气泡高过整块可用区时，bubble_rect_for_anchor 的
+            # 夹取会退化成把窗口推出屏幕上沿（上下界交叉）。宁可顶边贴住可用区
+            # 上沿，也不让内容被屏幕下边界切掉——超高部分由分页/列宽收敛承担。
+            rect.moveTop(avail.top())
         if self._preset.get("shape") == "breath_bubble" and rect.bottom() < anchor_rect.top():
             # The reference canvas deliberately leaves transparent space below
             # the smallest detached bubble.  Position by the painted contour,

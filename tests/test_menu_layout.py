@@ -529,7 +529,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     tools = next(action.menu() for action in menu.actions() if action.text() == "工具与帮助")
     expected_tools = [
         "DeepSeek 余额",
-        "启动 DeepSeek Harness",
+        "DeepSeek Harness",
         "打开网页版 DeepSeek",
         "检查更新",
         "GitHub 项目页",
@@ -537,6 +537,18 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     if sys.platform == "win32":
         expected_tools.append("夸克网盘下载")
     assert [action.text() for action in tools.actions() if not action.isSeparator()] == expected_tools
+    # Harness 现在是子菜单（挂在既有 harness id 上，用户老布局无需迁移）：
+    # 启动 / 重启 / 停止三件套必须齐全——「停止」是用户关掉静默常驻服务的唯一入口。
+    harness_action = next(
+        action for action in tools.actions() if action.text() == "DeepSeek Harness"
+    )
+    harness_menu = harness_action.menu()
+    assert harness_menu is not None
+    assert [action.text() for action in harness_menu.actions()] == [
+        "启动并打开页面",
+        "重启服务",
+        "停止服务",
+    ]
     menu.close()
     app.processEvents()
 
