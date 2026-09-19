@@ -103,7 +103,9 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 #（+5：分支+注释）、gap 池转向改走 _play_roll 朝向闸门（+3：注释）、模块头
 # 移动机制描述同步为帧驱动（+0：等行改写）。组合实测 4626。按文件约定只随
 # 实测校准。
-WINDOW_PY_LINE_BUDGET = 4626
+# 2026-09-20 上调到 4629：gap 池过滤双分类移动素材（+3：注释），修复
+# _play_roll 移动分支被 gap 步触发的意外位移。实测 4629。
+WINDOW_PY_LINE_BUDGET = 4629
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的

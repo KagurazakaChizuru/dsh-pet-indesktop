@@ -2691,7 +2691,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._play_animation_gap_step()
 
     def _play_animation_gap_step(self) -> None:
-        pool = self.idles + self.turns
+        # 同名素材可同时进 idle/turn 与 move 池（catalog 支持的双分类包）：
+        # gap 是待机氛围步，移动素材滤出池——否则 _play_roll 走移动分支，
+        # gap 步带来意外窗口位移（acts 为空时甚至动画链停摆）。
+        pool = [n for n in self.idles + self.turns if n not in self.moves]
         if pool:
             # 走 _play_roll 的朝向闸门：掷中转向但无需纠正时降级待机，
             # 朝向绝不由随机数翻转（与动画链一致）。

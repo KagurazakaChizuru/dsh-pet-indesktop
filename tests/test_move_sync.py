@@ -534,3 +534,22 @@ def test_animation_gap_turn_respects_facing_gate(app, tmp_path, monkeypatch):
         assert win.facing == 'left'
     finally:
         _close(win, app)
+
+
+def test_animation_gap_pool_excludes_dual_category_moves(app, tmp_path, monkeypatch):
+    # 同名素材可同时进 idle/turn 与 move 池（catalog 支持的双分类包）：
+    # gap 是待机氛围步，必须把移动素材滤出池——否则 _play_roll 走移动分支，
+    # gap 步带来意外窗口位移（acts 为空时甚至动画链停摆）
+    lib = FakeLibrary()
+    win = _make_win(tmp_path, monkeypatch, lib, vx=960)
+    try:
+        win.idles = [catalog.IDLE, MOVE]  # 双分类：MOVE 同时在 idle 池
+        win.turns = []  # 钉死掷中 MOVE：pool=[IDLE, MOVE]，choice → seq[-1]
+        win.facing = 'left'
+        _pin_rng(monkeypatch)
+        win._play_animation_gap_step()
+        assert win.anim == catalog.IDLE
+        assert win._move_plan is None
+        assert win.facing == 'left'
+    finally:
+        _close(win, app)
