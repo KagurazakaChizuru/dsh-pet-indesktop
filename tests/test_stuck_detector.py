@@ -324,3 +324,22 @@ class TestStuckDetectorPrune:
         det._prune()
         assert det.get_score("dsh") == 0
         assert resolved == ["dsh"]
+
+
+def test_prune_recompute_does_not_emit_intervention_without_new_events():
+    """定时剪枝路径的重算只负责刷新分数/恢复信号：干预推荐仍只在喂入新
+    事件时发射——否则长窗口配置下（如 window_seconds=3600）零新事件也会
+    按冷却周期反复重发 intervention_recommended（未声明的行为变更）。"""
+    det, clock = _make_detector(window_seconds=3600, cooldown_seconds=300)
+    events: list[dict] = []
+    det.intervention_recommended.connect(lambda k, p: events.append(p))
+    for _ in range(3):
+        det.feed_record("dsh", _result("pip", False, error_code="ETIMEDOUT",
+                                       error_text="timed out", timeout=True))
+    recommends = [e for e in events if e.get("severity") == StuckSeverity.RECOMMEND]
+    assert len(recommends) == 1, "喂事件时发射一次"
+    clock.advance(301)  # 冷却已过、事件未过期、零新事件
+    det._prune()
+    recommends = [e for e in events if e.get("severity") == StuckSeverity.RECOMMEND]
+    assert len(recommends) == 1, "定时剪枝不得重发干预推荐"
+    assert det.get_score("dsh") >= DEFAULT_INTERVENE_THRESHOLD, "分数仍按剩余事件重算"

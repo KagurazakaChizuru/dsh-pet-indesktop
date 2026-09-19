@@ -334,8 +334,13 @@ class StuckDetector(QObject):
 
     # ------------------------------------------------------------ 评分引擎
 
-    def _recompute(self, agent_key: str) -> None:
-        """重新计算指定 Agent 的卡住评分并发射信号。"""
+    def _recompute(self, agent_key: str, *, allow_intervention: bool = True) -> None:
+        """重新计算指定 Agent 的卡住评分并发射信号。
+
+        allow_intervention=False（定时剪枝路径）：只刷新分数与恢复信号，
+        干预推荐仍只在喂入新事件时发射——否则长窗口配置下零新事件也会
+        按冷却周期反复重发 intervention_recommended。
+        """
         window = self._windows.get(agent_key, [])
         now = self._clock()
 
@@ -432,8 +437,8 @@ class StuckDetector(QObject):
         self._scores[agent_key] = score
 
         # ---- 步骤 4：阈值判断 ----
-        # 检查是否达到干预推荐阈值
-        if score >= self._intervene_threshold:
+        # 检查是否达到干预推荐阈值（定时剪枝路径不重发，见 docstring）
+        if allow_intervention and score >= self._intervene_threshold:
             # 冷却检查
             last_time = self._last_intervene.get(agent_key, 0.0)
             last_score = self._last_intervene_score.get(agent_key, 0)
@@ -511,8 +516,8 @@ class StuckDetector(QObject):
             else:
                 # 事件部分过期后窗口非空：分数必须按剩余事件重算（否则
                 # get_score 返回剪枝前陈旧分）；降分穿过阈值由 _recompute
-                # 自己发射 stuck_resolved。
-                self._recompute(agent_key)
+                # 自己发射 stuck_resolved。干预推荐不在定时路径重发。
+                self._recompute(agent_key, allow_intervention=False)
 
     @staticmethod
     def _pick_primary_reason(reasons: list[str], score: int) -> str:
