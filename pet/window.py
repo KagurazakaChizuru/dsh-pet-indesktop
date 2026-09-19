@@ -7,8 +7,9 @@
   - 每个动画一次性播放，播完按概率选下一个：30% 待机 / 10% 转向 / 40% 动作 / 20% 移动；
   - 转向（东张西望）播完翻转朝向；facing=right 时水平镜像；
   - 点击回应 / 拖拽动画播完先回待机缓冲，待机播完再进随机链；
-  - 移动：动画只提供"走路姿态"（3 选 1），位置由 QTimer 驱动，
-    开头/结尾各 2s 不动，中间按播放进度插值；
+  - 移动：动画只提供"走路姿态"（3 选 1），位置由解码帧号驱动
+    （move_position_at_frame，支持角色包 move_strides.json 逐帧位移曲线），
+    位移按步态整圈量化、与动画步态同速不打滑；QTimer 仅作异常清场守卫；
   - 透明区域鼠标穿透：非 Windows 每帧按当前帧 alpha 生成窗口 mask；Windows 改走逐像素 WS_EX_TRANSPARENT（platform_win），mask 只用于算 _mask_bounds。
 """
 
@@ -2692,7 +2693,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     def _play_animation_gap_step(self) -> None:
         pool = self.idles + self.turns
         if pool:
-            self._switch(self._pick(pool, exclude=self.anim))
+            # 走 _play_roll 的朝向闸门：掷中转向但无需纠正时降级待机，
+            # 朝向绝不由随机数翻转（与动画链一致）。
+            self._play_roll(self._pick(pool, exclude=self.anim))
 
     def _on_animation_gap_timeout(self) -> None:
         # 超时只结束 gap 状态：正在播的 gap step（待机/转向）让其自然播完，
@@ -2844,8 +2847,13 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             # 窗口位移三者不一致。
             return False
         # 目标先于朝向：移动动画确认开播后才提交朝向，避免切换被拒时
-        # 朝向凭空翻转（朝向只跟随实际发生的移动）。
-        self.facing = 'right' if dir_sign > 0 else 'left'
+        # 朝向凭空翻转（朝向只跟随实际发生的移动）。朝向翻转时立即按新
+        # 朝向重建首帧——_switch 内已按旧朝向预渲染，不重建则首帧镜像
+        # 错误要挂到 frameChanged(0) 异步纠正（复审 P1-1）。
+        new_facing = 'right' if dir_sign > 0 else 'left'
+        if new_facing != self.facing:
+            self.facing = new_facing
+            self._rebuild_frame()
         self._move_plan = {
             'anim': move_name,
             'start_x': sp.vp.x(),

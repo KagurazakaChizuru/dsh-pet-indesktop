@@ -75,16 +75,18 @@ def choose_move_direction(
 
 def inward_facing(
     cx: float,
-    avail_left: float,
-    avail_right: float,
+    left_bound: float,
+    right_bound: float,
     ratio: float = 0.07,
 ) -> str | None:
     """偏离中线超过滞回带时返回应朝的内侧方向，带内返回 None。
 
-    滞回带 = 可用区间宽 × ratio，用于避免角色在中线附近反复翻转朝向。
+    left_bound/right_bound 是 body_reach 算出的身体可达界（含 margin 与
+    身体半宽），不是屏幕可用区边缘。滞回带 = 可达界宽 × ratio，用于避免
+    角色在中线附近反复翻转朝向。
     """
-    center = (avail_left + avail_right) / 2
-    band = (avail_right - avail_left) * ratio
+    center = (left_bound + right_bound) / 2
+    band = (right_bound - left_bound) * ratio
     if cx < center - band:
         return "right"
     if cx > center + band:
@@ -116,7 +118,8 @@ def quantize_move(
 def move_position_at_frame(plan: dict, frames_elapsed: float) -> tuple[float, float]:
     """按帧进度插值窗口位置，与墙钟/播放速度解耦。
 
-    无 curve：progress = frames_elapsed/total_frames 线性插值，夹到 [0,1]。
+    无 curve：progress = frames_elapsed/total_frames 线性插值，夹到 [0,1]；
+    末拍（frames_elapsed ≥ total-1，帧号 0-based）强制 progress=1 提交终点。
     有 curve（圈内逐帧位移曲线，curve[i] = 源帧 i 的圈内累计进度 0..1）：
     progress = (已完成圈数 + curve[当前帧]) / 总圈数——动画静帧段曲线走平，
     窗口原地停住；动帧段匀速推进。动帧才动、静帧不动，且位置只跟解码帧号
@@ -139,7 +142,12 @@ def move_position_at_frame(plan: dict, frames_elapsed: float) -> tuple[float, fl
         progress = (loop_idx + intra_progress) / loops
     else:
         total = max(1, int(plan['total_frames']))
-        progress = min(1.0, max(0.0, frames_elapsed / total))
+        # 帧号是 0-based：末拍 frames_elapsed == total-1，到位必须提交终点，
+        # 否则窗口停在离目标 ~stride/frames 处（无 curve 角色）。
+        if frames_elapsed >= total - 1:
+            progress = 1.0
+        else:
+            progress = min(1.0, max(0.0, frames_elapsed / total))
     x = plan['start_x'] + (plan['target_x'] - plan['start_x']) * progress
     y = plan['start_y'] + (plan['target_y'] - plan['start_y']) * progress
     return x, y

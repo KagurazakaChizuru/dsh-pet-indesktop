@@ -475,3 +475,62 @@ def test_prewarm_skipped_on_intermediate_loops_only(app, tmp_path, monkeypatch):
         assert len(fake.calls) == 1
     finally:
         _close(win, app)
+
+
+# ============================================================================
+# 复审回归（REVIEW_GLM_BRANCH_2026-09-20）：朝向提交时机 / 末帧到位 /
+# gap 池转向闸门
+# ============================================================================
+
+
+def test_position_linear_reaches_target_on_last_frame():
+    # 帧号 0-based：末拍 frames_elapsed == total_frames-1，到位必须提交终点
+    # （无 curve 角色此前停在离目标 ~stride/frames 处）
+    assert move_position_at_frame(PLAN, PLAN['total_frames'] - 1) == (300.0, 160.0)
+
+
+def test_try_move_rebuilds_first_frame_with_new_facing(app, tmp_path, monkeypatch):
+    # 朝向翻转的移动：_switch 预渲染首帧后必须立即按新朝向重建，
+    # 否则首帧镜像错误要挂到 frameChanged(0) 异步纠正
+    lib = FakeLibrary(move_frames=10)
+    win = _make_win(tmp_path, monkeypatch, lib)
+    try:
+        win.facing = 'left'
+        seen = []
+        monkeypatch.setattr(win, '_rebuild_frame', lambda: seen.append(win.facing))
+        _pin_rng(monkeypatch, distance=150)
+        assert win._try_move(MOVE) is True
+        assert seen, '_switch 必须至少预渲染一次首帧'
+        assert seen[-1] == 'right'
+    finally:
+        _close(win, app)
+
+
+def test_try_move_switch_failure_keeps_facing(app, tmp_path, monkeypatch):
+    # 切换被拒：朝向不翻转、不建移动计划（朝向只跟随实际发生的移动）
+    lib = FakeLibrary(move_frames=10)
+    win = _make_win(tmp_path, monkeypatch, lib)
+    try:
+        win.facing = 'left'
+        monkeypatch.setattr(lib.movie(MOVE), 'start', lambda: False)
+        _pin_rng(monkeypatch, distance=150)
+        assert win._try_move(MOVE) is False
+        assert win.facing == 'left'
+        assert win._move_plan is None
+    finally:
+        _close(win, app)
+
+
+def test_animation_gap_turn_respects_facing_gate(app, tmp_path, monkeypatch):
+    # gap 池掷中转向同样走朝向闸门：无需纠正（中线滞回带内）降级为待机，
+    # 朝向绝不由随机数翻转
+    lib = FakeLibrary()
+    win = _make_win(tmp_path, monkeypatch, lib, vx=960)  # 中线：inward_facing → None
+    try:
+        win.facing = 'left'
+        _pin_rng(monkeypatch)  # random.choice → seq[-1]：pool=[IDLE, TURN] 掷中 TURN
+        win._play_animation_gap_step()
+        assert win.anim == catalog.IDLE
+        assert win.facing == 'left'
+    finally:
+        _close(win, app)
