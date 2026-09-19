@@ -819,3 +819,54 @@ def test_service_bubbles_install_hint_when_edge_tts_import_fails(tmp_path, monke
 
     assert app.win.bubbles, "缺 edge-tts 时必须给用户可见提示（不能静默）"
     assert "pip install edge-tts" in app.win.bubbles[-1][0]
+
+
+def test_fire_blocked_by_busy_queues_and_plays_after_synthesis_completes(tmp_path, monkeypatch):
+    """到点回退即时合成不得被 busy 门挡死：预合成在飞时 _fire 必须排队，
+    合成完成后自动补播——此前直接丢弃且 _last_slot 已盖戳，到点静默丢报时。"""
+    import time as _time
+    from datetime import datetime as _dt
+
+    service, app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    # 预合成在飞（_maybe_precache 置 busy，角色 precache）
+    service._busy = True
+    service._busy_since = _time.monotonic()
+    service._synthesis_role = "precache"
+    played: list = []
+    service._play_and_bubble = lambda path, text, bubble_text=None: played.append(text)
+    workers_before = len(_WorkerSpy.instances)
+
+    service._fire("现在时刻，上午十点整", _dt.now(), "10:00")
+    assert played == [], "合成在飞时不得立即播放"
+    assert len(_WorkerSpy.instances) == workers_before, "合成在飞时不得再起一路合成"
+
+    # 预合成完成：排队的报时必须补播（缓存未落盘则新起一路即时合成）
+    service._on_synthesized(str(service._cache_dir / "p.mp3"), "现在时刻，上午十点整", "")
+    assert played or len(_WorkerSpy.instances) > workers_before, \
+        "合成完成后，被 busy 门拦下的报时必须补播"
+    if not played:
+        _WorkerSpy.instances[-1].finish(path=str(service._cache_dir / "x.mp3"))
+    assert played, "补播链路必须到达播放"
+
+
+def test_queued_fire_discarded_after_stop(tmp_path, monkeypatch):
+    """stop()（关闭开关/退出）后，排队的待补播报一并作废，不得再出声。"""
+    import time as _time
+    from datetime import datetime as _dt
+
+    service, app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service._busy = True
+    service._busy_since = _time.monotonic()
+    service._synthesis_role = "precache"
+    played: list = []
+    service._play_and_bubble = lambda path, text, bubble_text=None: played.append(text)
+    workers_before = len(_WorkerSpy.instances)
+
+    service._fire("现在时刻，上午十点整", _dt.now(), "10:00")
+    service.stop()
+    service._on_synthesized(str(service._cache_dir / "p.mp3"), "现在时刻，上午十点整", "")
+
+    assert played == []
+    assert len(_WorkerSpy.instances) == workers_before, "stop 后不得补播排队项"
