@@ -272,7 +272,10 @@ class MovieLibrary(QObject):
         names = list(self._manifest)
         cats = catalog.build_categories(
             names,
-            None,
+            # 与运行分类（window.py 建 cats）同一 manifest 口径：外部角色包
+            # 以 manifest 声明分类时，预热若按无 manifest 分叉，点击/转向动画
+            # 进不了 pinned 高优，首次交互同步 ffmpeg 解码卡顿。
+            self.manifest,
             self.folder_map,
             self.folder_files,
         )
