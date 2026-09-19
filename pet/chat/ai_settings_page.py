@@ -31,6 +31,7 @@ from ..settings_widgets import (
     SettingRow,
     SettingsCard,
 )
+from .utils import _safe_emit
 
 
 class _AiSettingsPage(QWidget):
@@ -475,7 +476,10 @@ class _AiSettingsPage(QWidget):
         self._test_thread.start()
 
     def _run_test_worker(self, provider) -> None:
-        self.test_done.emit(*self._test_connection(provider, timeout=10.0))
+        result = self._test_connection(provider, timeout=10.0)
+        # 对话框可能在测试在飞时被关闭销毁（WA_DeleteOnClose）：直接
+        # self.test_done.emit 会对已删 C++ 对象 RuntimeError。
+        _safe_emit(self, "test_done", *result)
 
     def _on_test_done(self, ok: bool, message: str) -> None:
         self.test_button.setEnabled(True)

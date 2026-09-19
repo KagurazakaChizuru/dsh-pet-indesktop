@@ -9,6 +9,24 @@ from __future__ import annotations
 from datetime import datetime
 
 
+def _safe_emit(obj, signal_name: str, *args) -> None:
+    """从 worker 线程向 Qt 对象发射信号的安全闸。
+
+    连接测试 worker（最长 10s）在飞时，对话框可能已被关闭销毁
+    （WA_DeleteOnClose）：对已删 C++ 对象访问信号属性或 emit 都是
+    RuntimeError（异常崩在 worker 线程里）。isValid 判断覆盖「已删」，
+    try/except 覆盖「判断后、emit 前被删」的竞态。信号名以字符串传入——
+    已删对象上连 ``obj.sig`` 的属性访问都会炸，必须在 try 块内 getattr。
+    """
+    try:
+        import shiboken6
+
+        if shiboken6.isValid(obj):
+            getattr(obj, signal_name).emit(*args)
+    except RuntimeError:
+        pass
+
+
 def _short_title(session, *, localize_time: bool = True) -> str:
     """返回会话的显示标题。
 
