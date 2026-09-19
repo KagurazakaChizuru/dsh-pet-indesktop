@@ -369,6 +369,17 @@ class _CollisionWorker(QObject):
         """放弃无控制消息的客户端会话，端点清理由持锁选举路径决定。"""
         if self._stopping or self.socket is None or not self._had_client_connection:
             return
+        # 与 _client_lost 同款定时器清理：否则旧 _client_watchdog 以 500ms
+        # 周期读「当前」连接状态，新连接建立后 1.5s 内可误杀新连接；旧定时器
+        # 也会挂在 worker 父对象上泄漏到下一轮 _client_connected 覆写为止。
+        if self._welcome_timer:
+            self._welcome_timer.stop()
+            self._welcome_timer.deleteLater()
+            self._welcome_timer = None
+        if self._client_watchdog:
+            self._client_watchdog.stop()
+            self._client_watchdog.deleteLater()
+            self._client_watchdog = None
         socket = self.socket
         self.socket = None
         self._had_client_connection = False

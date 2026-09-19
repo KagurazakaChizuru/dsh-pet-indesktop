@@ -1265,3 +1265,42 @@ def test_set_policy_partial_update_on_disabled_keeps_history():
     # 真变更仍然生效
     worker.set_policy({"collision_enabled": True})
     assert worker.overlap_history == {}
+
+
+def test_welcome_timed_out_cleans_up_timers(monkeypatch):
+    """_welcome_timed_out 必须像 _client_lost 一样停掉并清空 _welcome_timer /
+    _client_watchdog：否则旧 watchdog 以 500ms 周期读「当前」连接状态，
+    新连接建立后 1.5s 内可误杀新连接（且旧定时器泄漏到 worker 生命周期）。"""
+    class FakeTimer:
+        def __init__(self):
+            self.stopped = False
+            self.deleted = False
+
+        def stop(self):
+            self.stopped = True
+
+        def deleteLater(self):
+            self.deleted = True
+
+    class TimedOutSocket:
+        def abort(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    worker = _CollisionWorker(_server_name("welcome-cleanup"), "client", "", {})
+    monkeypatch.setattr(worker, "_schedule_election", lambda: None)
+    welcome = FakeTimer()
+    watchdog = FakeTimer()
+    worker._welcome_timer = welcome
+    worker._client_watchdog = watchdog
+    worker.socket = TimedOutSocket()
+    worker._had_client_connection = True
+
+    worker._welcome_timed_out()
+
+    assert welcome.stopped and welcome.deleted
+    assert watchdog.stopped and watchdog.deleted
+    assert worker._welcome_timer is None
+    assert worker._client_watchdog is None
