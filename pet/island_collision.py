@@ -37,6 +37,11 @@ log = logging.getLogger(__name__)
 _TICK_MS = 33               # 30Hz 本地检测（空闲时几何未变整体跳过，近零开销）
 _APPROACH_MIN_SPEED = 20.0  # 相对接近速度低于此视为轻贴：只做分离不弹飞
 _HIT_COOLDOWN_S = 0.15      # 每只桌宠的命中冷却（防一帧多弹）
+# 已在区内允许再弹的最小相对速度（px/s）：低于它只分离、绝不弹。
+# 30Hz 判定下"区内被判定反弹 → 反弹速度不足以离区 → 下一帧再判定"的鬼畜
+# 抽搐就断在这里——低速在区内漂移的桌宠永远只会被温和推出；拖岛拍鱼这类
+# 岛高速横扫（相对速度通常上千）仍照常弹飞。
+_IN_ZONE_REBOUND_FLOOR = 150.0
 _CAPSULE_HEIGHT = 44        # 胶囊视觉高度（与 dynamic_island._CAPSULE_HEIGHT 同步）
 _MAX_ISLAND_SPEED = 1500.0  # 岛速估计上限（px/s）：异常大的估计不进拍鱼结算
 
@@ -452,6 +457,7 @@ class IslandCollisionBody(QObject):
         entry = (prev[0] + (center[0] - prev[0]) * toi,
                  prev[1] + (center[1] - prev[1]) * toi)
         currently_overlapping = self._overlaps_stadium(center, rx, ry, stadium)
+        was_inside = self._overlaps_stadium(prev, rx, ry, stadium)
         vrel = (measured_vx - self._vx, measured_vy - self._vy)
         ref = center if currently_overlapping else entry
         nx, ny, is_fallback = self._normal(stadium, ref, vrel)
@@ -462,6 +468,15 @@ class IslandCollisionBody(QObject):
         if vn >= -approach_floor:
             if currently_overlapping:
                 # 贴着重叠但不接近：只把桌宠推出岛体（防嵌入累积）
+                self._separate_from_stadium(win, center, rx, ry, stadium,
+                                            island_rect, now, key)
+            return
+        # entry-based 反弹：命中只绑定"真正的边界穿越"（上一帧在区外，本帧
+        # 经扫掠穿入）。上一帧已在区内且相对速度不高（非拖岛拍鱼的高速横扫）
+        # → 只分离、绝不弹——30Hz 下"区内反复命中、反弹又不足以离场"的鬼畜
+        # 抽搐从机制上断开（在区内的桌宠只会被温和推出，真撞上照常弹飞）。
+        if was_inside and math.hypot(*vrel) < _IN_ZONE_REBOUND_FLOOR:
+            if currently_overlapping:
                 self._separate_from_stadium(win, center, rx, ry, stadium,
                                             island_rect, now, key)
             return

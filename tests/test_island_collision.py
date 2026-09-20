@@ -335,6 +335,34 @@ def test_dragging_island_slaps_stationary_pet(tmp_path):
         island.deleteLater()
 
 
+def test_in_zone_slow_drift_never_rebounces(tmp_path):
+    """已在岛区内低速漂移的桌宠只被推出、绝不二次弹飞（entry-based 反弹回归）。
+
+    30Hz 判定下"区内被判定反弹 → 反弹速度不足以离区 → 下一帧再判定"的鬼畜
+    抽搐根因：上一帧已在区内（was_inside）、相对速度 120px/s（超 20 接近阈值、
+    低于拖岛拍鱼的 150 横扫阈值）——旧实现会再命中（THROWN+响），新实现只分离。
+    """
+    _qapp()
+    win = FakeWin(x=443.0, y=290.0)  # 中心 (503, 350)，位于岛轴 [422,634] 内
+    island, body = _make_body(tmp_path, pets=[win])
+    try:
+        island.show()
+        body._running = True
+        now = time.monotonic()
+        # 上一帧中心 (497,350) 已在区内；本帧 (503,350) → 6px/0.05s=120px/s 向内漂
+        body._pet_prev[id(win)] = (497.0, 350.0)
+        body._pet_prev_ts[id(win)] = now - 0.05
+        old_y = win._y
+        body._tick()
+        assert win._interaction_state == "IDLE"  # 未重进 throw
+        assert win.entered_modes == []
+        assert win.sounds == 0
+        assert win._y != old_y  # 但被推出重叠区（只挡不弹）
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
 def test_island_velocity_estimate_zero_when_still(tmp_path):
     """岛不动时速度估计为 0（静止噪声不拍鱼）。"""
     _qapp()
