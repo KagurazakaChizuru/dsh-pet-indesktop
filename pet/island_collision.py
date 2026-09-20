@@ -367,7 +367,15 @@ class IslandCollisionBody(QObject):
                 phys[:] = [float(nx_pos), float(ny_pos)]
             return nx_pos, ny_pos
         if not hit or not cooldown_ok:
-            return nx_pos, ny_pos  # 轻贴/冷却内：只推出不撞
+            # 轻贴/冷却内：只推出不撞。先取消自主移动计划（与旧 _separate
+            # 同口径）——否则漫游的帧驱动位移会原地踏步顶墙，直到计划走完。
+            cancel_move = getattr(host, "_cancel_move", None)
+            if callable(cancel_move):
+                cancel_move()
+            cancel_gap = getattr(host, "_cancel_animation_gap", None)
+            if callable(cancel_gap):
+                cancel_gap()
+            return nx_pos, ny_pos
         # 非抛掷真撞：冲量 + 进抛掷物理 + 全量反馈（原有业务，撞岛像撞弹床）
         self._hit_cooldown[key] = now
         dv = -(1.0 + collision.STATIC_RESTITUTION) * vn

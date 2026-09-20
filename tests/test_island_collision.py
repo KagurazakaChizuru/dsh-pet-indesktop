@@ -510,6 +510,28 @@ def test_submit_flings_pet_when_island_swept_onto_it(tmp_path):
         island.deleteLater()
 
 
+def test_light_contact_cancels_pet_move_plan(tmp_path):
+    """轻贴推出取消桌宠自主移动计划（与旧分离同口径）——避免漫游原地踏步顶墙。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        win = WallWin(ax0 - 140.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
+        cancels = {"move": 0, "gap": 0}
+        win._cancel_move = lambda: cancels.__setitem__("move", cancels["move"] + 1)
+        win._cancel_animation_gap = lambda: cancels.__setitem__("gap", cancels["gap"] + 1)
+        win._move_window_towards(win._virtual_pos().x(), win._virtual_pos().y())
+        assert cancels["move"] >= 1 and cancels["gap"] >= 1
+        _assert_body_out_of_stadium(win, body, "轻贴取消移动计划")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
 def test_submit_pushes_out_resting_pet_when_island_moved_onto_it(tmp_path):
     """岛被拖到静止桌宠身上：submit 事件驱动把桌宠推出（岛动桌宠没动也挡）。"""
     _qapp()
