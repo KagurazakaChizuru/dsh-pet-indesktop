@@ -330,9 +330,13 @@ def _close(win, app):
 
 
 def _pin_rng(monkeypatch, distance=150):
-    # 方向与纵向目标都用 random 模块：钉死后计划完全确定（恒向右）
-    monkeypatch.setattr('random.randint', lambda a, b: distance)
-    monkeypatch.setattr('random.choice', lambda seq: seq[-1])
+    # 方向与纵向目标都用 random 模块：钉死后计划完全确定（恒向右）。
+    # 显式写 pet.movement.random 路径：movement.py 必须保持模块级 import
+    # （from-import 会让这里的注入静默失效，测试仍绿但确定性丢失）。
+    import pet.movement as movement_mod
+
+    monkeypatch.setattr(movement_mod.random, "randint", lambda a, b: distance)
+    monkeypatch.setattr(movement_mod.random, "choice", lambda seq: seq[-1])
 
 
 def test_try_move_quantizes_distance_and_writes_plan_keys(app, tmp_path, monkeypatch):

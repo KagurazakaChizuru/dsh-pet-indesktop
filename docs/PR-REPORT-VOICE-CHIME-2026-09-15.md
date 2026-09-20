@@ -9,6 +9,8 @@ AIGC:
     ReservedCode2: CXrnJC/Hv3pYYlmqS7kjBCjK8dL+jzCvm8BADuBPTlSTofzAnk6SasOgQUQgEFuHqHDDhSrdC+xX5zBVlYTNetcmAO70eN0bTXGEvv/USDcvwwG4SNxfuTd8H2p/DU4Zza39I6zf7Bu+5Qe6TEkfOuIggEinQQ6O8MS2YWsdBd8Adjw6SdGewk+qE3U=
 ---
 
+> 时效说明（2026-09-19 起）：语音报时的「立即报时」「启用/关闭语音报时」两项**默认隐藏、不出现在右键菜单**（菜单模板 `visible: false`）；设置页的试听入口不受影响，需要菜单入口时可在菜单编辑器里加回。下文关于右键菜单的表述描述的是当时状态。
+
 
 
 

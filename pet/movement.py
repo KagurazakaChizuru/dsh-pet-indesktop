@@ -9,6 +9,11 @@
 
 from __future__ import annotations
 
+# 模块级 import（禁止改成 from random import ...）：随机源经模块属性读取，
+# 单测按 `monkeypatch.setattr('pet.movement.random', ...)` /
+# `monkeypatch.setattr(pet.movement.random, ...)` 注入确定性实现
+# （见 tests/test_move_sync.py 的 _pin_rng）。改成 from-import 会让这些注入
+# 静默失效——测试仍绿但确定性丢失。
 import random
 
 __all__ = ["body_reach", "choose_move_direction", "inward_facing",

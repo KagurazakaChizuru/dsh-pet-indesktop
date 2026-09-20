@@ -187,8 +187,10 @@ class MovieLibrary(QObject):
         self.low_warm_batch_finished.connect(self._on_low_warm_batch_finished)
         self.media_type: str = 'webm'
         self.no_mirror: set[str] = self._load_no_mirror()
-        self.move_strides: dict[str, float] = self._load_move_strides()
-        self.move_curves: dict[str, list[float]] = self._load_move_curves()
+        # move_strides.json 一次读取、一次遍历 → (步幅, 曲线) 两份结果：
+        # 此前两个加载器各读一遍文件、各遍历一遍 dict（重复 IO，且两套口径
+        # 有分叉风险）。加载器方法保留为公开接口（单测按口径直调）。
+        self.move_strides, self.move_curves = self._load_move_sidecar()
 
         self._load_all()
 
@@ -203,6 +205,61 @@ class MovieLibrary(QObject):
         names = data.get('no_mirror', [])
         return {str(n) for n in names} if isinstance(names, list) else set()
 
+    def _load_move_sidecar(self) -> tuple[dict[str, float], dict[str, list[float]]]:
+        '''加载 move_strides.json：一次读取、一次遍历 → (步幅, 曲线)。
+
+        缺文件/解析失败 → ({}, {})，绝不抛异常；「_comment」等备注字段与其余
+        项静默忽略。两份结果共用同一份源数据，保证口径一致（此前两套读取器
+        各读一遍文件、各遍历一遍 dict）。
+        '''
+        data = self._read_move_strides_json()
+        strides: dict[str, float] = {}
+        curves: dict[str, list[float]] = {}
+        for k, v in data.items():
+            name = str(k)
+            stride = self._move_stride_of(v)
+            if stride is not None:
+                strides[name] = stride
+            curve = self._move_curve_of(v)
+            if curve is not None:
+                curves[name] = curve
+        return strides, curves
+
+    @staticmethod
+    def _move_stride_of(v) -> float | None:
+        '''单项步幅解析：数值项或 {'stride': 数值} 对象项，其余（含 bool）返回 None。'''
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, dict) and isinstance(v.get('stride'), (int, float)) \
+                and not isinstance(v.get('stride'), bool):
+            return float(v['stride'])
+        return None
+
+    @staticmethod
+    def _move_curve_of(v) -> list[float] | None:
+        '''单项曲线解析：校验不过（非列表/太短/越界/回退/首尾不符）返回 None。
+
+        curve[i] = 播到源帧 i 时圈内累计进度（0..1，单调不减，首 0 尾 1）。
+        动画静帧段曲线走平 → 窗口停住；动帧段匀速 → 动帧才动、静帧不动。
+        '''
+        if not isinstance(v, dict):
+            return None
+        curve = v.get('curve')
+        if not isinstance(curve, list) or len(curve) < 2:
+            return None
+        if any(isinstance(c, bool) or not isinstance(c, (int, float)) for c in curve):
+            return None
+        vals = [float(c) for c in curve]
+        if vals[0] != 0.0 or vals[-1] != 1.0:
+            return None
+        if any(c < 0.0 or c > 1.0 for c in vals):
+            return None
+        if any(b < a for a, b in zip(vals, vals[1:])):
+            return None
+        return vals
+
     def _load_move_strides(self) -> dict[str, float]:
         '''加载 move_strides.json：移动动画每圈（scale=1.0）地面位移像素数。
 
@@ -210,44 +267,14 @@ class MovieLibrary(QObject):
         绝不抛异常。只收数值项与 {'stride': 数值} 对象项："_comment" 等备注
         字段与其余项静默忽略。
         '''
-        data = self._read_move_strides_json()
-        out: dict[str, float] = {}
-        for k, v in data.items():
-            if isinstance(v, bool):
-                continue
-            if isinstance(v, (int, float)):
-                out[str(k)] = float(v)
-            elif isinstance(v, dict) and isinstance(v.get('stride'), (int, float)) \
-                    and not isinstance(v.get('stride'), bool):
-                out[str(k)] = float(v['stride'])
-        return out
+        return self._load_move_sidecar()[0]
 
     def _load_move_curves(self) -> dict[str, list[float]]:
         '''加载 move_strides.json 对象项里的 curve：圈内逐帧位移曲线。
 
-        curve[i] = 播到源帧 i 时圈内累计进度（0..1，单调不减，首 0 尾 1）。
-        动画静帧段曲线走平 → 窗口停住；动帧段匀速 → 动帧才动、静帧不动。
         校验不过（非列表/太短/越界/回退/首尾不符）静默跳过，绝不抛异常。
         '''
-        data = self._read_move_strides_json()
-        out: dict[str, list[float]] = {}
-        for k, v in data.items():
-            if not isinstance(v, dict):
-                continue
-            curve = v.get('curve')
-            if not isinstance(curve, list) or len(curve) < 2:
-                continue
-            if any(isinstance(c, bool) or not isinstance(c, (int, float)) for c in curve):
-                continue
-            vals = [float(c) for c in curve]
-            if vals[0] != 0.0 or vals[-1] != 1.0:
-                continue
-            if any(c < 0.0 or c > 1.0 for c in vals):
-                continue
-            if any(b < a for a, b in zip(vals, vals[1:])):
-                continue
-            out[str(k)] = vals
-        return out
+        return self._load_move_sidecar()[1]
 
     def _read_move_strides_json(self) -> dict:
         import json
