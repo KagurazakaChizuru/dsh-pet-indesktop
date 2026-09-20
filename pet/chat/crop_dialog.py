@@ -122,11 +122,15 @@ class CropCanvas(QWidget):
 
 
 class CropDialog(QDialog):
-    """背景裁切对话框。initial_box 为 None 时给居中默认选区。"""
+    """背景裁切对话框。initial_box 为 None 时给居中默认选区。
 
-    def __init__(self, pixmap: QPixmap, initial_box, parent=None):
+    style_name 是当前编辑的对话窗口风格展示名（如「肥鱼牌小手机」），只有标题
+    用它区分裁的是哪套风格的背景；缺省时空标题不带风格名。
+    """
+
+    def __init__(self, pixmap: QPixmap, initial_box, parent=None, style_name: str = ''):
         super().__init__(parent)
-        self.setWindowTitle('裁切聊天背景')
+        self.setWindowTitle(f'裁切聊天背景（{style_name}）' if style_name else '裁切聊天背景')
         if initial_box is None:
             ar = pixmap.width() / pixmap.height()
             # 默认选区：尽量大的竖向取景（满高优先）

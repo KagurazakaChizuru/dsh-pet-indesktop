@@ -33,6 +33,10 @@ from ..settings_widgets import (
 )
 from .utils import _safe_emit
 
+# 对话窗口风格标识 → 展示名：裁切行标签与编辑器标题必须和当前风格对齐，
+# 否则用户分不清裁的到底是哪套风格的背景。
+_CHAT_UI_STYLE_LABELS = {"modern": "肥鱼版 DeepSeek", "classic": "肥鱼牌小手机"}
+
 
 class _AiSettingsPage(QWidget):
     test_done = Signal(bool, str)
@@ -155,6 +159,8 @@ class _AiSettingsPage(QWidget):
         self.background_picker.edit.textChanged.connect(self._update_background_visibility)
         self.background_opacity.valueChanged.connect(self._on_background_edited)
         self.background_fill.currentIndexChanged.connect(self._on_background_edited)
+        # 填充方式改动要重估裁切行可见性：contain/stretch 下取景框不生效（themes.py 的 fill 语义）
+        self.background_fill.currentIndexChanged.connect(self._update_background_visibility)
         self.test_button = QPushButton("测试连接")
         self.test_button.clicked.connect(self._run_test)
         self.test_result = QLabel("验证当前 Provider、API 地址和凭据是否可用。")
@@ -231,7 +237,7 @@ class _AiSettingsPage(QWidget):
             ),
             SettingRow("chat_background_file", "自定义背景图片", "支持常见图片格式，使用绝对路径。", self.background_picker),
             SettingRow("chat_background_opacity", "图片不透明度", "调节背景图可见强度；消息卡片会独立保证正文可读。", self.background_opacity),
-            SettingRow("chat_background_fill", "填充方式", "选择裁剪铺满、完整显示或拉伸铺满窗口。", self.background_fill),
+            SettingRow("chat_background_fill", "填充方式", "选择裁剪铺满、完整显示或拉伸铺满窗口；仅「填充裁剪」支持自定义取景。", self.background_fill),
             SettingRow("chat_bg_crops", "裁切取景", "拖拽移动 + 滚轮缩放选区，决定背景取哪一块；不裁则按主题默认主体取景。", self.background_crop_btn),
             SettingRow(
                 "modern_chat_card_opacity", "消息卡片不透明度",
@@ -241,6 +247,7 @@ class _AiSettingsPage(QWidget):
         ]
         self._background_file_row = rows[-5]
         self._background_detail_rows = rows[-4:-1]
+        self._background_crop_row = self._background_detail_rows[-1]
         self._message_card_opacity_row = rows[-1]
         self.background_select.currentIndexChanged.connect(self._update_background_visibility)
         self._update_background_visibility()
@@ -304,19 +311,36 @@ class _AiSettingsPage(QWidget):
         if isinstance(card, SettingsCard):
             card.refresh_separators()
 
+    def _background_style_label(self) -> str:
+        """当前对话窗口风格的展示名（裁切行标签、编辑器标题共用）。"""
+        return _CHAT_UI_STYLE_LABELS.get(self._background_style, self._background_style)
+
+    def _background_fill_mode(self) -> str:
+        return str(self.background_fill.currentData() or "cover")
+
     def _update_background_visibility(self, _index: int = -1) -> None:
+        crop_row = getattr(self, "_background_crop_row", None)
         row = getattr(self, "_background_file_row", None)
         if row is not None:
             row.setVisible(self.background_select.currentData() == "custom")
             has_image = bool(self.background_select.currentData())
             for detail_row in getattr(self, "_background_detail_rows", []):
                 detail_row.setVisible(has_image)
+            # contain/stretch 下取景框被渲染路径整体忽略（见 themes.py 的 fill 语义），
+            # 裁切入口一并隐藏，免得用户存下一个不生效的框。
+            if crop_row is not None:
+                crop_row.setVisible(has_image and self._background_fill_mode() == "cover")
             card = row.parentWidget()
             if isinstance(card, SettingsCard):
                 card.refresh_separators()
         card_opacity_row = getattr(self, "_message_card_opacity_row", None)
         if card_opacity_row is not None:
             card_opacity_row.setVisible(self._background_style == "modern")
+        if crop_row is not None:
+            title = f"裁切取景（{self._background_style_label()}）"
+            if crop_row.label.text() != title:
+                crop_row.label.setText(title)
+                crop_row.control.setAccessibleName(title)
         if getattr(self, "background_crop_btn", None) is not None:
             self.background_crop_btn.setText("裁切取景…")
             self.background_crop_btn.setEnabled(True)
@@ -341,7 +365,7 @@ class _AiSettingsPage(QWidget):
         if initial is None and value.startswith("builtin:"):
             theme = get_theme(value[8:])
             initial = tuple(theme["focus"]) if theme else None
-        dlg = CropDialog(pix, initial, self)
+        dlg = CropDialog(pix, initial, self, self._background_style_label())
         accepted = dlg.exec()
         reset, box = dlg.result_box() if accepted else (False, None)
         dlg.deleteLater()  # 延迟析构：对话框持有整张背景 QPixmap，不随使用次数累积

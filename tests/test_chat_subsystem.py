@@ -2481,6 +2481,47 @@ def test_chat_settings_dialog_persists_system_notification_toggle(tmp_path):
         _app.processEvents()
 
 
+def test_chat_settings_dialog_crop_entry_labels_classic_style(tmp_path):
+    """老聊天设置即存对话框只服务经典风格：裁切入口带风格名「肥鱼牌小手机」。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.settings_dialog import ChatSettingsDialog
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.save()
+    dlg = ChatSettingsDialog(Config(tmp_path))
+    try:
+        assert "肥鱼牌小手机" in dlg.crop_btn.text()
+        assert dlg.crop_btn.isHidden() is False
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_chat_settings_dialog_crop_entry_hidden_when_fill_not_cover(tmp_path):
+    """经典风格 fill=contain/stretch 时取景框被忽略，裁切入口隐藏；cover 时可见。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.settings_dialog import ChatSettingsDialog
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    for fill, hidden in (("contain", True), ("stretch", True), ("cover", False)):
+        cfg = Config(tmp_path)
+        cfg.set("chat_background", "builtin:whale")
+        cfg.set("chat_background_fill", fill)
+        cfg.save()
+        dlg = ChatSettingsDialog(Config(tmp_path))
+        try:
+            assert dlg.crop_btn.isHidden() is hidden, f"fill={fill}"
+        finally:
+            dlg.close()
+            app.processEvents()
+
+
 def test_delete_current_session_during_streaming_resets_typewriter(tmp_path: Path, monkeypatch):
     """审查 DS-M6 回归（modern）：删除当前会话时停打字机并丢弃未排空输出，
     防幻影消息写入新加载的会话。"""
@@ -2633,7 +2674,7 @@ def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             assert pix is not None
             self.initial = initial
 
@@ -2667,7 +2708,7 @@ def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             # 已有自定义裁切时编辑器初始框应带上它
             assert list(initial) == [0.1, 0.2, 0.5, 0.6]
 
@@ -2701,7 +2742,7 @@ def test_crop_entry_initial_box_falls_back_to_theme_focus(tmp_path, monkeypatch)
     seen = {}
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             seen["initial"] = initial
 
         def exec(self):
@@ -2742,6 +2783,91 @@ def test_crop_row_visibility_follows_background(tmp_path, monkeypatch):
     app.processEvents()
 
 
+def test_crop_row_label_refreshes_with_style(tmp_path, monkeypatch):
+    """裁切行标签随对话窗口风格刷新，填充方式提示说明只有填充裁剪支持取景。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_crop_row
+    assert row.label.text() == "裁切取景（肥鱼版 DeepSeek）"
+    assert "仅「填充裁剪」支持自定义取景" in page._background_detail_rows[1].hint_label.text()
+    page.chat_ui_style.setCurrentData("classic")  # 风格切换即刷新，不用重开窗口
+    assert row.label.text() == "裁切取景（肥鱼牌小手机）"
+    page.chat_ui_style.setCurrentData("modern")
+    assert row.label.text() == "裁切取景（肥鱼版 DeepSeek）"
+    assert row is rows[-2]  # 裁切取景是细节行组最后一行
+    page.close()
+    app.processEvents()
+
+
+def test_crop_row_hidden_when_fill_not_cover(tmp_path, monkeypatch):
+    """fill=contain/stretch 时取景框被渲染路径忽略，裁切行隐藏；切回 cover 重现。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_crop_row
+    assert not row.isHidden()
+    page.background_fill.setCurrentData("contain")  # 走真实信号链路评估可见性
+    assert row.isHidden()
+    page.background_fill.setCurrentData("stretch")
+    assert row.isHidden()
+    assert not page._background_detail_rows[0].isHidden(), "只隐藏裁切行，其余细节行仍在"
+    page.background_fill.setCurrentData("cover")
+    assert not row.isHidden()
+    assert row is rows[-2]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_editor_receives_current_style_name(tmp_path, monkeypatch):
+    """打开编辑器时把当前风格名传给 CropDialog（窗口标题据此区分风格）。"""
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("modern_chat_background", "builtin:whale")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    import pet.chat.crop_dialog as crop_mod
+
+    seen = {}
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name=''):
+            seen["style"] = style_name
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert seen["style"] == "肥鱼版 DeepSeek"
+    page.chat_ui_style.setCurrentData("classic")
+    page._crop_background()
+    assert seen["style"] == "肥鱼牌小手机"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_dialog_title_carries_style_name():
+    """编辑器窗口标题带调用方传入的风格名。"""
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.crop_dialog import CropDialog
+
+    app = QApplication.instance() or QApplication([])
+    dlg = CropDialog(QPixmap(40, 60), None, None, "肥鱼牌小手机")
+    try:
+        assert "肥鱼牌小手机" in dlg.windowTitle()
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
+
+
 def test_crop_entry_preserves_external_edits_when_untouched(tmp_path, monkeypatch):
     """用户没动裁切编辑器时，save() 不得把构造期快照写回覆盖外部改动。
 
@@ -2769,7 +2895,7 @@ def test_crop_dialog_released_after_use(tmp_path, monkeypatch):
     released = []
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             pass
 
         def exec(self):
@@ -2791,7 +2917,7 @@ def test_crop_persists_through_disk_roundtrip(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             pass
 
         def exec(self):
@@ -2832,7 +2958,7 @@ def test_crop_save_merges_only_edited_keys(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             pass
 
         def exec(self):
@@ -2872,7 +2998,7 @@ def test_crop_editor_reads_fresh_crops_at_open(tmp_path, monkeypatch):
     seen = {}
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             seen["initial"] = initial
 
         def exec(self):
@@ -2904,7 +3030,7 @@ def test_crop_merge_uses_disk_latest_via_host_reload(tmp_path, monkeypatch):
     page = dialog.ai_page
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent):
+        def __init__(self, pix, initial, parent, style_name=''):
             pass
 
         def exec(self):
