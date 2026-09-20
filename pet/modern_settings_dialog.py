@@ -1796,7 +1796,7 @@ class ModernSettingsDialog(QDialog):
         if self.ai_page is not None:
             balance_rows = claim_prefix("balance_")
             appearance_rows = claim(
-                "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "modern_chat_card_opacity"
+                "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "chat_bg_crops", "modern_chat_card_opacity"
             )
             ai_sections = page_content(
                 [

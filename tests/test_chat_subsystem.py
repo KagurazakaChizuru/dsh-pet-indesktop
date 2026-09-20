@@ -2612,3 +2612,114 @@ def test_send_message_resyncs_stale_session_from_disk(tmp_path: Path, monkeypatc
     assert "本窗发送" in texts
     window.close()
     app.processEvents()
+
+
+def _make_ai_page(tmp_path, monkeypatch, *, modern_bg="builtin:whale"):
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    if modern_bg is not None:
+        cfg.set("modern_chat_background", modern_bg)
+    page = _AiSettingsPage(cfg)
+    return app, cfg, page
+
+
+def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
+    """主设置窗的裁切取景：编辑器结果进缓冲，保存时才写 config（取消不落地）。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            assert pix is not None
+            self.initial = initial
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.1, 0.2, 0.5, 0.6)
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert page._bg_crops["builtin:whale"] == [0.1, 0.2, 0.5, 0.6]
+    # 未保存前不落盘
+    from pet.config import Config
+    assert Config(tmp_path).get("chat_bg_crops", {}) == {}
+    page.save()
+    assert cfg.get("chat_bg_crops", {})["builtin:whale"] == [0.1, 0.2, 0.5, 0.6]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    page._bg_crops["builtin:whale"] = [0.1, 0.2, 0.5, 0.6]
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            # 已有自定义裁切时编辑器初始框应带上它
+            assert list(initial) == [0.1, 0.2, 0.5, 0.6]
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return True, None
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert "builtin:whale" not in page._bg_crops
+    page.close()
+    app.processEvents()
+
+
+def test_crop_entry_initial_box_falls_back_to_theme_focus(tmp_path, monkeypatch):
+    """无自定义裁切时，编辑器初始框 = 主题默认 focus。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+    from pet.chat.themes import get_theme
+
+    seen = {}
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            seen["initial"] = initial
+
+        def exec(self):
+            return False
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert tuple(seen["initial"]) == tuple(get_theme("whale")["focus"])
+    page.close()
+    app.processEvents()
+
+
+def test_crop_entry_needs_a_background(tmp_path, monkeypatch):
+    """纯色（无背景）时不得打开编辑器。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch, modern_bg="")
+    import pet.chat.crop_dialog as crop_mod
+    opened = []
+    monkeypatch.setattr(crop_mod, "CropDialog", lambda *a: opened.append(1))
+    page._crop_background()
+    assert opened == []
+    page.close()
+    app.processEvents()
+
+
+def test_crop_row_visibility_follows_background(tmp_path, monkeypatch):
+    """裁切取景行：选了背景才可见，纯色隐藏。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_crop_row
+    page.background_select.setCurrentData("builtin:whale")
+    assert row.isVisibleTo(page) or not row.isHidden()
+    page.background_select.setCurrentData("")
+    assert row.isHidden()
+    page.close()
+    app.processEvents()
