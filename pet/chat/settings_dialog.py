@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 from .models import ChatSettings, ProviderConfig, SecretStore
 from .providers import test_connection
-from .themes import CHAT_UI_STYLE_LABELS, theme_names
+from .themes import CHAT_UI_STYLE_LABELS, CHAT_UI_VIEW_ASPECT, theme_names
 from .utils import _safe_emit
 
 # 本对话框只读写经典风格的 chat_background 键（肥鱼版 DeepSeek 走主设置窗的
@@ -324,7 +324,7 @@ class ChatSettingsDialog(QDialog):
         if initial is None and value.startswith('builtin:'):
             t = get_theme(value[8:])
             initial = tuple(t['focus']) if t else None
-        dlg = CropDialog(pix, initial, self, _CLASSIC_STYLE_LABEL)
+        dlg = CropDialog(pix, initial, self, _CLASSIC_STYLE_LABEL, CHAT_UI_VIEW_ASPECT['classic'])
         accepted = dlg.exec()
         reset, box = dlg.result_box() if accepted else (False, None)
         dlg.deleteLater()  # exec 后即释放：对话框持有整张背景 QPixmap，不随使用次数累积

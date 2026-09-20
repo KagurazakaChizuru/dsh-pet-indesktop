@@ -31,7 +31,7 @@ from ..settings_widgets import (
     SettingRow,
     SettingsCard,
 )
-from .themes import CHAT_UI_STYLE_LABELS, theme_names
+from .themes import CHAT_UI_STYLE_LABELS, CHAT_UI_VIEW_ASPECT, theme_names
 from .utils import _safe_emit
 
 
@@ -362,7 +362,8 @@ class _AiSettingsPage(QWidget):
         if initial is None and value.startswith("builtin:"):
             theme = get_theme(value[8:])
             initial = tuple(theme["focus"]) if theme else None
-        dlg = CropDialog(pix, initial, self, self._background_style_label())
+        aspect = CHAT_UI_VIEW_ASPECT.get(self._background_style, CHAT_UI_VIEW_ASPECT["classic"])
+        dlg = CropDialog(pix, initial, self, self._background_style_label(), aspect)
         accepted = dlg.exec()
         reset, box = dlg.result_box() if accepted else (False, None)
         dlg.deleteLater()  # 延迟析构：对话框持有整张背景 QPixmap，不随使用次数累积
