@@ -130,6 +130,10 @@ class _AiSettingsPage(QWidget):
         self.background_fill.addItem("填充裁剪", "cover")
         self.background_fill.addItem("完整适应", "contain")
         self.background_fill.addItem("拉伸铺满", "stretch")
+        # 裁切取景：编辑器结果进缓冲，save() 才落盘（取消设置不带走裁切改动）
+        self._bg_crops: dict = dict(config.get('chat_bg_crops', {}) or {})
+        self.background_crop_btn = QPushButton("裁切取景…", self)
+        self.background_crop_btn.clicked.connect(self._crop_background)
         self._populate_background_options(self._background_style)
         self.chat_ui_style.currentIndexChanged.connect(self._on_chat_ui_style_changed)
         self.test_button = QPushButton("测试连接")
@@ -207,14 +211,16 @@ class _AiSettingsPage(QWidget):
             SettingRow("chat_background_file", "自定义背景图片", "支持常见图片格式，使用绝对路径。", self.background_picker),
             SettingRow("chat_background_opacity", "图片不透明度", "调节背景图可见强度；消息卡片会独立保证正文可读。", self.background_opacity),
             SettingRow("chat_background_fill", "填充方式", "选择裁剪铺满、完整显示或拉伸铺满窗口。", self.background_fill),
+            SettingRow("chat_bg_crops", "裁切取景", "拖拽移动 + 滚轮缩放选区，决定背景取哪一块；不裁则按主题默认主体取景。", self.background_crop_btn),
             SettingRow(
                 "modern_chat_card_opacity", "消息卡片不透明度",
                 "调节肥鱼版 DeepSeek 消息卡片透出背景的程度。",
                 self.message_card_opacity,
             ),
         ]
-        self._background_file_row = rows[-4]
-        self._background_detail_rows = rows[-3:-1]
+        self._background_file_row = rows[-5]
+        self._background_detail_rows = rows[-4:-1]
+        self._background_crop_row = rows[-2]
         self._message_card_opacity_row = rows[-1]
         self.background_select.currentIndexChanged.connect(self._update_background_visibility)
         self._update_background_visibility()
@@ -278,6 +284,31 @@ class _AiSettingsPage(QWidget):
         card_opacity_row = getattr(self, "_message_card_opacity_row", None)
         if card_opacity_row is not None:
             card_opacity_row.setVisible(self._background_style == "modern")
+        if getattr(self, "background_crop_btn", None) is not None:
+            self.background_crop_btn.setText("裁切取景…")
+
+    def _crop_background(self) -> None:
+        """打开裁切取景编辑器：结果进 _bg_crops 缓冲，save() 时才写 config。"""
+        from .crop_dialog import CropDialog
+        from .themes import get_theme
+        from .widgets import resolve_bg_pixmap
+
+        value = self._current_background_value()
+        pix = resolve_bg_pixmap(value) if value else None
+        if pix is None:
+            self.background_crop_btn.setText("无可裁背景")
+            return
+        initial = self._bg_crops.get(value)
+        if initial is None and value.startswith("builtin:"):
+            theme = get_theme(value[8:])
+            initial = tuple(theme["focus"]) if theme else None
+        dlg = CropDialog(pix, initial, self)
+        if dlg.exec():
+            reset, box = dlg.result_box()
+            if reset:
+                self._bg_crops.pop(value, None)
+            else:
+                self._bg_crops[value] = [round(float(v), 4) for v in box]
 
     # ------------------------------------------------------------ API 列表管理
     @staticmethod
@@ -517,6 +548,7 @@ class _AiSettingsPage(QWidget):
         self.config.set("chat_background_fill", self._background_display["classic"]["fill"])
         self.config.set("modern_chat_background_opacity", self._background_display["modern"]["opacity"])
         self.config.set("modern_chat_background_fill", self._background_display["modern"]["fill"])
+        self.config.set("chat_bg_crops", self._bg_crops)
         self.config.set("modern_chat_card_opacity", self.message_card_opacity.value())
         self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
         self.config.set_chat_settings(self.settings)
