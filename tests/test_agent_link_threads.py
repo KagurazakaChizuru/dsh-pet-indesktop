@@ -219,8 +219,8 @@ class TestWorkerLifecycle:
         polled = []
         orig_poll = mon._poll
         mon._poll = lambda gen=None: (polled.append(1), orig_poll(gen=gen))
+        t0 = time.monotonic()  # 含 start 内部开销：时间窗下界覆盖启动全程
         mon.start()
-        t0 = time.monotonic()
         assert wait_until(lambda: polled), "首轮轮询最终必须发生（worker 活着）"
         assert time.monotonic() - t0 >= mon._POLL_INTERVAL_S * 0.8,             "首轮轮询必须先等一个周期（启动瞬间不抢读）"
         mon.stop()

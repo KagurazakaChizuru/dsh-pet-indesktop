@@ -63,8 +63,15 @@ print(f"WORKER1:{{slot}}", flush=True)
 # 持锁直到主进程落放行标记（最多 60s）——固定 sleep(4) 在慢 CI 上 python
 # 启动即可达秒级，p1 提前释放后 pfail 拿到 slot-0 → 整条竞争序列假红
 deadline = time.monotonic() + 60
-while not Path({repr(str(release_flag))}).exists() and time.monotonic() < deadline:
+timed_out = True
+while time.monotonic() < deadline:
+    if Path({repr(str(release_flag))}).exists():
+        timed_out = False
+        break
     time.sleep(0.05)
+if timed_out:
+    # 兜底自释放必须响亮：静默超时会伪装成产品故障（与产品缺陷不可区分）
+    print("HOLDER_TIMEOUT", flush=True)
 """
     p1 = _run_slot_worker_code(config_dir, worker1_code)
     line1 = p1.stdout.readline().strip()
@@ -78,8 +85,15 @@ import time
 slot, handle = acquire_pet_slot({repr(str(config_dir))})
 print(f"WORKER2:{{slot}}", flush=True)
 deadline = time.monotonic() + 60
-while not Path({repr(str(release_flag))}).exists() and time.monotonic() < deadline:
+timed_out = True
+while time.monotonic() < deadline:
+    if Path({repr(str(release_flag))}).exists():
+        timed_out = False
+        break
     time.sleep(0.05)
+if timed_out:
+    # 兜底自释放必须响亮：静默超时会伪装成产品故障（与产品缺陷不可区分）
+    print("HOLDER_TIMEOUT", flush=True)
 """
     p2 = _run_slot_worker_code(config_dir, worker2_code)
     line2 = p2.stdout.readline().strip()
@@ -114,6 +128,8 @@ print(f"WORKER3:{{slot}}", flush=True)
     release_flag.touch()
     p1.wait(timeout=30)
     p2.wait(timeout=30)
+    assert "HOLDER_TIMEOUT" not in p1.stdout.read(), "p1 必须是放行退出而非超时兜底"
+    assert "HOLDER_TIMEOUT" not in p2.stdout.read(), "p2 必须是放行退出而非超时兜底"
     time.sleep(0.1)
 
     # 确认锁文件残留但之后仍可成功复用 slot-0，且大小固定为 16 字节，PID 在头部

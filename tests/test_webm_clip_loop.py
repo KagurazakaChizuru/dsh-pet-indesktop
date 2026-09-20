@@ -939,9 +939,9 @@ def test_recycle_disabled_never_triggers(app, monkeypatch, tmp_path):
         assert clip.start() is True
         assert clip._reader_ready.wait(5.0)
         proc, gen = spawns[0][0], spawns[0][1]
-        # 恒正但极老的出生时刻：任何机器上「年龄」都足够大（fresh CI 的
-        # monotonic 可能只有几百秒，-3000s 回拨会算出非正值，触发
-        # _recycle_due() 的 born_at<=0 防御守卫 → 本测试恒绿虚过）。
+        # born_at 在本测试不参与判定（recycle_seconds=0 在 _recycle_due 第
+        # 一道守卫就短路，走不到 born_at 守卫）；此处仅与兄弟测试保持
+        # 「恒正出生时刻」的写法一致，不依赖 monotonic 绝对值。
         clip._reader_born_at = 1.0
         for _ in range(3):
             gen.release()
@@ -1005,7 +1005,7 @@ def test_recycle_skipped_when_rearm_pending(app, tmp_path):
     clip._recycle_seconds = 0.001  # 若评估回收必命中
     # 盲审 P1-1：回收判定还要求 _reader_born_at 已记录，缺这行则
     # _recycle_due 恒 False、本测试对回收维度空转（守卫失效）。
-    clip._reader_born_at = time.monotonic() - 10.0
+    clip._reader_born_at = 1.0  # 与兄弟测试同写法：不依赖 monotonic 绝对值
     clip._rearm_pending = True
     clip._loop_gate.set()  # 模拟 re-arm 已置位
     q = queue.Queue(maxsize=8)
