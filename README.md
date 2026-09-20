@@ -1324,7 +1324,7 @@ python scripts/cleanup_mei_cache.py --delete
 - **自定义点击音效支持 MP3/OGG/FLAC/M4A**：音效播放器重构——WAV 继续走轻量 winsound（Windows），非 WAV 统一走 QtMultimedia（QMediaPlayer，自带 FFmpeg 后端），不可用时 macOS/Linux 回退系统播放器（afplay/paplay/aplay）；修复自定义 MP3 在 Windows 上被 winsound 用系统提示音"播放"的问题（winsound 只支持 WAV，传入 MP3 会响系统默认音）。Linux/macOS 构建同步补打包 PySide6.QtMultimedia。
 - **动画边缘毛边/暗边修复**：帧渲染改为**预乘 alpha 缩放**（直通 alpha 缩放会让透明像素的 RGB 渗入半透明边缘，产生暗边/彩边）；Windows 上点击命中测试由 setMask 的 1-bit 裁剪改为**逐像素命中测试**（WM_NCHITTEST + HTTRANSPARENT，透明区域鼠标穿透、可见区域可点击），不再破坏 `WA_TranslucentBackground` 的逐像素半透明边缘。
 - **Harness 启动兼容旧版 dsh**：启动前探测 `web --help` 是否支持 `--no-open`（按命令缓存）——旧版 dsh（如 0.1.0-rc.3）没有该选项，强行传参会启动失败；不支持时不传，由 dsh 自己打开浏览器，桌宠不重复打开。
-- **动画帧率精度**：视频帧时长按 24fps 精确值（40ms → 42ms = 1000/24）修正，动画播放定时器改用精确定时器（PreciseTimer），消除粗略定时器漂移导致的节奏/移动插值偏差。
+- **动画帧率精度**：视频帧时长按 24fps 精确值（40ms → 42ms = 1000/24）修正，动画播放定时器改用精确定时器（PreciseTimer），消除粗略定时器漂移导致的节奏偏差（当时位移仍走定时插值；后续已改为解码帧驱动，见「屏幕漫游」）。
 - **右键菜单启动提速与避让**：动画分类子菜单**首次展开才填充**动作（根菜单构建不再遍历 106 个动画，首次右键不再卡顿数秒）；菜单弹出位置智能选择——优先角色右侧（子菜单向右展开）、屏幕不够时放左侧并让子菜单向左展开（RTL）、再不行放屏幕远角，根菜单与子菜单都不再遮挡角色；快捷启动应用图标按 (类型, 路径) 缓存（QFileIconProvider 首次取图标慢）。
 - **设置窗口打开期间暂停气泡**：新版设置/聊天设置任一打开时，桌宠气泡暂停显示（关闭后恢复），不再盖住设置界面。
 - **macOS/Linux 打包补 integrations 资源（PR #22）**：onedir 构建显式打包 `integrations/`（含 DSH 桥接插件），修复 macOS/Linux 上「启动 DeepSeek Harness → 一键安装桥接插件」因资源缺失而失败的问题；构建后增加断言检查，漏打包直接报错。
