@@ -379,8 +379,3 @@ def build_persona_template(config: dict[str, Any] | None, agent_keys=None) -> di
     if agents is not None:
         document["agents"] = agents
     return {"_说明": EXPORT_GUIDE, **document}
-
-
-def template_json(config: dict[str, Any] | None) -> str:
-    import json
-    return json.dumps(build_persona_template(config), ensure_ascii=False, indent=2) + "\n"

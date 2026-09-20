@@ -63,9 +63,6 @@ QMenu::scroller {{ height: 20px; background: {background}; }}
 """
 
 
-MODERN_MENU_STYLESHEET = modern_menu_stylesheet()
-
-
 def apply_modern_menu_style(menu: QMenu, appearance: dict | None = None) -> None:
     appearance = dict(appearance or {})
     if not appearance and menu.parentWidget() is not None:

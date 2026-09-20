@@ -171,9 +171,6 @@ class _SignalPet(window_mod.PetWindow):
     def _apply_opacity(self):
         pass
 
-    def _restore_dock_icon_preference(self):
-        pass
-
     def _schedule_position_sync(self):
         pass
 

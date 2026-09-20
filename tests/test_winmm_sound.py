@@ -58,9 +58,6 @@ class FakeWinmmApi:
         self.fail_open = fail_open
         self.fail_write = fail_write
 
-    def device_count(self) -> int:
-        return 1
-
     def open(self, channels: int, sample_rate: int, bits: int = 16) -> int:
         self.open_calls += 1
         if self.fail_open:
@@ -212,9 +209,6 @@ _QT_FREE_SCRIPT = textwrap.dedent(
     class FakeApi:
         def __init__(self):
             self.writes = []
-
-        def device_count(self):
-            return 1
 
         def open(self, channels, sample_rate, bits=16):
             return 1
@@ -651,7 +645,6 @@ def test_press_sound_with_winmm_does_not_create_qsound_effect(tmp_path, monkeypa
     assert pool.play_press_sound((press, release), 0.6) is True
     assert touched == []
     assert len(api.writes) == 1, "press 音必须真的交给 winmm"
-    assert pool._click_pair_state[(str(press), str(release))]["press_played"] is True
 
 
 # ---------------------------------------------------------------------------

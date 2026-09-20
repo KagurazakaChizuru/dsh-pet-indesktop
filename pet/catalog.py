@@ -126,9 +126,6 @@ ANIM_FILES: dict[str, str] = {
     '堆雪人': '堆雪人.webm',
 }
 
-# 兼容旧字段名：webm 文件名映射
-WEBM_FILES: dict[str, str] = ANIM_FILES
-
 # 动画分组（语义与 client.js 一致）
 IDLE = '待机呼吸休闲'
 TURN = '东张西望'

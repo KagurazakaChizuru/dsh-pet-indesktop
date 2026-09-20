@@ -471,7 +471,6 @@ def test_self_talk_image_scale_config_and_bubble_size(tmp_path):
 
 def test_self_talk_scheduling_and_random_talk_dispatch(tmp_path, monkeypatch):
     """自言自语调度间隔与随机图片/文本派发（原 test_self_talk_images... 的后半段）。"""
-    import random  # noqa: F401
     from pathlib import Path  # noqa: F401
 
     from PySide6.QtCore import QRect

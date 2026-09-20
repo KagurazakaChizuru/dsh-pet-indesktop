@@ -39,10 +39,9 @@ def test_slingshot_trajectory_anchor_starts_at_character_edge():
 
 
 def test_slingshot_trajectory_preview_preserves_arc_scale_and_allows_clipping():
-    bounds = QRect(0, 0, 120, 108)
     anchor = QPointF(110, 108)
     trajectory = [(0.0, 0.0), (90.0, -30.0), (180.0, 90.0)]
-    preview = PetWindow._slingshot_trajectory_preview(trajectory, anchor, bounds, 1.0)
+    preview = PetWindow._slingshot_trajectory_preview(trajectory, anchor)
     assert len(preview) == len(trajectory)
     assert preview[0] == (110.0, 108.0)
     assert preview[1] == (200.0, 78.0)

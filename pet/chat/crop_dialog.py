@@ -7,7 +7,7 @@ paintEvent 渲染时自定义选区优先于主题默认 focus（同一套 cover
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
@@ -31,8 +31,6 @@ def clamp_box(x: float, y: float, w: float, art_ratio: float) -> tuple[float, fl
 
 class CropCanvas(QWidget):
     """画布： contain 展示原图，选区外压暗，拖拽移动选区，滚轮缩放。"""
-
-    box_changed = Signal(tuple)
 
     def __init__(self, pixmap: QPixmap, box: tuple[float, float, float, float], parent=None):
         super().__init__(parent)
@@ -61,7 +59,6 @@ class CropCanvas(QWidget):
                       w * d.width(), h * d.height())
 
     def _emit(self) -> None:
-        self.box_changed.emit(self._box)
         self.update()
 
     # ---- 交互 ----

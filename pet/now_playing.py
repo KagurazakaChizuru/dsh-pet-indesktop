@@ -94,13 +94,6 @@ def player_process_running(exe_name: str) -> bool:
     return False
 
 
-def available() -> bool:
-    """SMTC 是否可用（winrt 是否装得上）。供设置页决定是否禁用开关。"""
-    if sys.platform != "win32":
-        return False
-    return _import_winrt() is not None
-
-
 async def _pick_playing_session(manager):
     """选出应跟踪的会话：优先正在播放的，其次第一个。
 
@@ -257,23 +250,6 @@ def toggle_play_pause() -> bool:
         return False
     try:
         return asyncio.run(_play_pause_async())
-    except Exception:
-        return False
-
-
-async def _resume_async() -> bool:
-    session = await _pick_playback_session()
-    if session is None:
-        return False
-    return bool(await session.try_play_async())
-
-
-def resume_playback() -> bool:
-    """让当前会话开始播放（用于"打开播放器并自动播放"）。"""
-    if sys.platform != "win32":
-        return False
-    try:
-        return asyncio.run(_resume_async())
     except Exception:
         return False
 

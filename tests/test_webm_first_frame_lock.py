@@ -457,7 +457,7 @@ def test_cancel_timeout_skip_registers_unconfirmed_and_sweep_kills(app, monkeypa
     assert proc in [e[0] for e in clip._unconfirmed_procs], "登记必须携带进程句柄"
 
     # owner 释放锁后：sweep 补杀确认
-    webm_clip_mod._reap_orphaned_clips()
+    webm_clip_mod._ORPHAN_REGISTRY.reap()
     assert proc.terminated or proc.killed, "sweep 必须补杀未确认退出的进程"
     assert proc.poll() is not None, "补杀必须确认进程退出"
     assert clip._unconfirmed_procs == [], "确认后登记列表必须清空"
@@ -578,7 +578,7 @@ def test_sweep_unconfirmed_keeps_tracking_when_proc_unkillable(app, monkeypatch)
     webm_clip_mod._register_orphan(clip)
     monkeypatch.setattr(webm_clip_mod, "_PROC_LOCK_ACQUIRE_TIMEOUT", 0.05)
 
-    webm_clip_mod._reap_orphaned_clips()
+    webm_clip_mod._ORPHAN_REGISTRY.reap()
 
     entries = list(clip._unconfirmed_procs)
     assert len(entries) == 1, "补杀失败必须保留条目（不得移出追踪）"
@@ -589,7 +589,7 @@ def test_sweep_unconfirmed_keeps_tracking_when_proc_unkillable(app, monkeypatch)
     assert proc.poll() is None, "进程仍存活（未被误判为已退出）"
 
     # 第二次 sweep 仍可再次补杀（追踪不丢）
-    webm_clip_mod._reap_orphaned_clips()
+    webm_clip_mod._ORPHAN_REGISTRY.reap()
     entries = list(clip._unconfirmed_procs)
     assert entries[0][1] == 2
 
@@ -609,7 +609,7 @@ def test_sweep_unconfirmed_keeps_tracking_when_poll_raises(app, monkeypatch):
     webm_clip_mod._register_orphan(clip)
     monkeypatch.setattr(webm_clip_mod, "_PROC_LOCK_ACQUIRE_TIMEOUT", 0.05)
 
-    webm_clip_mod._reap_orphaned_clips()
+    webm_clip_mod._ORPHAN_REGISTRY.reap()
 
     entries = list(clip._unconfirmed_procs)
     assert len(entries) == 1, "poll 异常：必须保留条目"
@@ -635,7 +635,7 @@ def test_sweep_unconfirmed_abandons_after_retry_limit(app, monkeypatch):
 
     limit = webm_clip_mod._UNCONFIRMED_KILL_MAX
     for _ in range(limit):
-        webm_clip_mod._reap_orphaned_clips()
+        webm_clip_mod._ORPHAN_REGISTRY.reap()
 
     entries = list(clip._unconfirmed_procs)
     assert len(entries) == 1, "标注放弃后条目仍保留在追踪中"
@@ -644,7 +644,7 @@ def test_sweep_unconfirmed_abandons_after_retry_limit(app, monkeypatch):
     assert proc.poll() is None, "病态进程仍未退出"
 
     # 标注放弃后：后续 sweep 不再重试（attempts 不再递增）
-    webm_clip_mod._reap_orphaned_clips()
+    webm_clip_mod._ORPHAN_REGISTRY.reap()
     entries = list(clip._unconfirmed_procs)
     assert entries[0][1] == limit, "标注放弃后不得再重试"
 

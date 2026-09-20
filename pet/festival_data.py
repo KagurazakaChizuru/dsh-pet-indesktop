@@ -35,12 +35,6 @@ CATEGORY_CN = "cn"
 CATEGORY_SOLAR_TERM = "solar_term"
 CATEGORY_WEST = "west"
 
-CATEGORY_LABELS: dict[str, str] = {
-    CATEGORY_CN: "中国节日",
-    CATEGORY_SOLAR_TERM: "24 节气",
-    CATEGORY_WEST: "西方节日",
-}
-
 # 展示与匹配的顺序：先中国节日，再节气，最后西方节日。
 CATEGORY_ORDER: tuple[str, ...] = (CATEGORY_CN, CATEGORY_SOLAR_TERM, CATEGORY_WEST)
 

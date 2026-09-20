@@ -438,9 +438,6 @@ def test_field_default_factory_and_individual_memory(tmp_path):
 def test_spawn_reuse_keeps_existing_slot_config(tmp_path, monkeypatch):
     """「生小肥鱼」复用已有存档的 slot 时不再顶掉原槽设置（回归：旧版
     DSH_PET_SPAWN_FRESH 强制重播种会把 slot-N 个体配置覆盖成主配置）。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
     master = Config(base=tmp_path)
     master.set("character", "shenshen")
     master.set("playback_speed", 2.0)
@@ -463,9 +460,6 @@ def test_spawn_reuse_keeps_existing_slot_config(tmp_path, monkeypatch):
 
 def test_normal_reopen_keeps_existing_slot_config(tmp_path, monkeypatch):
     """普通重启/复用 slot 时，已有个体配置不被主配置覆盖。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
     master = Config(base=tmp_path)
     master.set("character", "shenshen")
     master.save()

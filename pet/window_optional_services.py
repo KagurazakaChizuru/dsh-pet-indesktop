@@ -363,7 +363,3 @@ class WindowFeatureGateMixin:
         self._install_effect_services()
         self._edge_probe.set_enabled(bool(self.cfg.get("edge_probe_enabled", False)))
         self.sync_music_lyric()
-
-    def set_broker_facade(self, broker_facade: Any) -> None:
-        """替换窗口持有的 broker facade（app 层经公开 seam 注入，不碰私有面）。"""
-        self._broker_facade = broker_facade

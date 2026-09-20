@@ -218,16 +218,6 @@ class DshStateTracker(QObject):
         self._probe_generation += 1
         self._probe_inflight = False
 
-    def pause(self) -> None:
-        """桌宠隐藏时可暂停（低功耗）：事件与在线探测都停。"""
-        self._online_timer.stop()
-        self._event_timer.stop()
-
-    def resume(self) -> None:
-        if self._started:
-            self._online_timer.start()
-            self._event_timer.start()
-
     # ------------------------------------------------------------ 状态推进
     def _transition(self, to_state: DshState) -> None:
         """edge-trigger 状态切换：同状态去重，真正变化才 emit + 写日志。"""

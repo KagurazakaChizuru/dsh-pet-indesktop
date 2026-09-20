@@ -40,7 +40,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from . import agent_cost as agent_cost_mod
 from .click_sound import play_sound, resolve_builtin_sound
-from .report_gates import should_report, should_report_event
+from .report_gates import should_report_event
 from .agent_event_protocol import parse_agent_event
 from .agent_event_normalizer import normalize_event
 from .model_access_tracker import ModelAccessTracker
@@ -2258,21 +2258,6 @@ def other_instances_use_agent(config, agent_key: str) -> bool:
         if isinstance(data, dict) and bool((data.get("agent_link") or {}).get(agent_key, False)):
             return True
     return False
-
-
-# ----------------------------------------------------------------------
-# 汇报抽稀
-# ----------------------------------------------------------------------
-
-def should_report_activity(probability: float, roll: float) -> bool:
-    """事件汇报概率门判决：``roll`` ∈ [0, 1) 小于通过概率则放行。
-
-    量纲已随概率门统一为 0.0–1.0（旧版是 0-100 百分比）：0 永不汇报、1 全报；
-    边界取「小于」，故 0.6 时 roll=0.6 不汇报。只用于**出气泡的汇报路径**：
-    原始记录（raw_record → 卡住检测 / 行为识别 / 探索看门狗 / 对话记忆）
-    不经过这里。
-    """
-    return should_report(probability, roll)
 
 
 # ----------------------------------------------------------------------

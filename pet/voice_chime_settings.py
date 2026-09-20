@@ -13,7 +13,7 @@
 数字展示（如“现在下午 15:45”），语音口播仍为中文数字。
 
 风格对齐 pet/exploration_watchdog_settings.py：自含 QWidget 页，
-提供 apply_to_config / refresh_from_config 与 settings_saved 信号，
+提供 apply_to_config，
 由 modern_settings_dialog.py 注册为侧边栏「语音」总域下的「语音报时」分组并参与
 _write_config 保存。
 """
@@ -67,7 +67,6 @@ class VoiceChimeSettingsPage(QWidget):
 
     # 用户点击「试听」时发出（payload: 当前试听文案，空串表示按当前时间组装）
     preview_requested = Signal(str)
-    settings_saved = Signal()
 
     def __init__(self, config, parent: QWidget | None = None):
         super().__init__(parent)
@@ -233,19 +232,3 @@ class VoiceChimeSettingsPage(QWidget):
         self.config.set("voice_chime_show_quote", self.quote_check.isChecked())
         self.config.set("voice_chime_custom_quotes_zh", self.custom_zh_edit.toPlainText().strip())
         self.config.set("voice_chime_custom_quotes_en", self.custom_en_edit.toPlainText().strip())
-        self.settings_saved.emit()
-
-    def refresh_from_config(self) -> None:
-        """用当前配置刷新控件（外部取消保存后回滚用）。"""
-        self.enabled_check.setChecked(bool(self.config.get("voice_chime_enabled", False)))
-        self.schedule_select.setCurrentData(clean_schedule(self.config.get("voice_chime_schedule", "hourly")))
-        self.custom_edit.setText(str(self.config.get("voice_chime_custom_times", "") or ""))
-        _sync_voice_select(self.voice_select, self.config)
-        self.rate_spin.setValue(clean_rate(self.config.get("voice_chime_rate", DEFAULT_RATE)))
-        self.pitch_spin.setValue(clean_pitch(self.config.get("voice_chime_pitch", DEFAULT_PITCH)))
-        self.volume_spin.setValue(clean_volume(self.config.get("voice_chime_volume", DEFAULT_VOLUME)))
-        self.bubble_check.setChecked(bool(self.config.get("voice_chime_show_bubble", DEFAULT_SHOW_BUBBLE)))
-        self.quote_check.setChecked(bool(self.config.get("voice_chime_show_quote", DEFAULT_SHOW_QUOTE)))
-        self.custom_zh_edit.setPlainText(str(self.config.get("voice_chime_custom_quotes_zh", "") or ""))
-        self.custom_en_edit.setPlainText(str(self.config.get("voice_chime_custom_quotes_en", "") or ""))
-        self._refresh_custom_enabled()

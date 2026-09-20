@@ -321,15 +321,6 @@ PUBLIC_DIALOGUE_EVENTS: frozenset[str] = frozenset({
 })
 
 
-def agent_scoped_event_keys(keys=None):
-    """某 Agent 专属文案层可定制的事件 = 给定事件减去 Pet/桥接级公共事件。
-
-    keys 缺省取全部预设事件；只用于设置页编辑层的事件范围（运行时不受影响）。
-    """
-    base = phrase_keys() if keys is None else list(keys)
-    return [key for key in base if key not in PUBLIC_DIALOGUE_EVENTS]
-
-
 def default_phrases() -> dict[str, str]:
     """每个事件的默认模板文案（取内置预设首个非空变体；legacy 优先、whale_maid 兜底）。"""
     result: dict[str, str] = {}

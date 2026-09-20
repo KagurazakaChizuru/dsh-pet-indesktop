@@ -12,9 +12,7 @@ import re
 from pathlib import Path
 
 from pet.persona_phrases import (
-    PUBLIC_DIALOGUE_EVENTS,
     PhrasePicker,
-    agent_scoped_event_keys,
     builtin_phrases,
     load_builtin_presets,
     phrase_keys,
@@ -133,22 +131,6 @@ def test_preset_placeholders_stay_within_the_rendering_contract():
             }
             allowed = set(PARAMETERS.get(key, ()))
             assert used <= allowed, (mode, key, sorted(used - allowed))
-
-
-def test_public_events_excluded_from_agent_scoped_editor():
-    """公共事件（Pet/桥接级）不进入 Agent 专属文案层；DSH 写回失败归 Agent 层。
-
-    设置页 agent 专属层的编辑范围 = 全部事件 - PUBLIC_DIALOGUE_EVENTS；
-    dsh.writeback.failed 属 Agent 操作回写（运行时按 agent 路由），必须在列表内。
-    """
-    keys = set(phrase_keys())
-    assert PUBLIC_DIALOGUE_EVENTS <= keys
-    assert "dsh.writeback.failed" not in PUBLIC_DIALOGUE_EVENTS
-    scoped = agent_scoped_event_keys()
-    assert set(scoped) == keys - PUBLIC_DIALOGUE_EVENTS
-    assert "dsh.writeback.failed" in scoped
-    assert "balance.result" not in scoped
-    assert "thinking" in scoped
 
 
 def test_event_descriptions_cover_all_keys():

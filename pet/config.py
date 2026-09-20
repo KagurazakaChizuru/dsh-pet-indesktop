@@ -34,7 +34,6 @@ DEFAULT_SELF_TALK_TEXTS = [
     "\u518d\u966a\u4f60\u4e00\u4f1a\u513f\u3002",
 ]
 DEFAULT_SELF_TALK_BUBBLE_STYLE = "classic_top"
-DIALOGUE_MODES = {"legacy", "whale_maid", "custom"}
 DEFAULT_DIALOGUE_PHRASES = {}
 DEFAULT_COLLISION_SETTINGS = {
     "collision_enabled": True,

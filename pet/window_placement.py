@@ -205,7 +205,6 @@ def remove_runtime_marker(host: Any) -> None:
     slot_manager_mod.delete_runtime_marker(
         host.cfg.dir,
         host.cfg.instance_id,
-        versioned=runtime_marker_versioned(host),
     )
 
 
@@ -280,10 +279,6 @@ def ensure_visible_after_restore(host) -> None:
     if not host.isVisible():
         host.show()
 
-
-def on_screen_added_restore(host, screen) -> None:
-    """兼容入口：新屏幕上线 → 立即触发一次检查。"""
-    host._screen_retry_tick()
 
 # ================================================================ 尺寸
 

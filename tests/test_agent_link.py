@@ -863,7 +863,6 @@ class TestMultiInstanceGlobalState:
 
         cfg = Config(base=tmp_path)
         mgr = AgentLinkManager(None, cfg)
-        mgr.set_enabled("claude", False) if False else None  # noqa
 
         # 直接置配置为开启（模拟另一个实例正在用）
         cfg.set("agent_link", {"claude": True})

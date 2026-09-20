@@ -141,12 +141,12 @@ def test_restore_defers_until_saved_screen_comes_online():
     assert pet._awaiting_saved_screen == "secondary"
 
     # 无关屏幕上线：不触发
-    PetWindow._on_screen_added_restore(pet, _Screen("other", QRect(0, 0, 800, 600)))
+    PetWindow._screen_retry_tick(pet)
     assert pet._awaiting_saved_screen == "secondary"
 
     # 副屏上线：自动恢复到副屏坐标，且撤防
     screens.append(secondary)
-    PetWindow._on_screen_added_restore(pet, secondary)
+    PetWindow._screen_retry_tick(pet)
     assert pet._awaiting_saved_screen is None
     assert pet.position == (2770, 410)
 
@@ -171,7 +171,7 @@ def test_disarmed_restore_does_not_move_on_late_screen():
     pet = FakePet()
     pet.position = (100, 100)
     # 撤防后目标屏上线：不应触发任何移动
-    PetWindow._on_screen_added_restore(pet, secondary)
+    PetWindow._screen_retry_tick(pet)
     assert pet.position == (100, 100)
 
 

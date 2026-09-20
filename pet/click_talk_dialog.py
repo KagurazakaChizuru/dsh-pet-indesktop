@@ -48,7 +48,6 @@ class ClickTalkBindingsDialog(QDialog):
             str(action_id): list(texts)
             for action_id, texts in config.click_talk_bindings(self.character_id).items()
         }
-        self._dirty = False
 
         self.setWindowTitle("点击动画台词绑定")
         self.resize(560, 420)
@@ -106,8 +105,4 @@ class ClickTalkBindingsDialog(QDialog):
             else:
                 self.bindings.pop(action_id, None)
         self.config.set_click_talk_bindings(self.character_id, self.bindings)
-        self._dirty = True
         self.accept()
-
-    def bindings_dict(self) -> dict:
-        return self.bindings
