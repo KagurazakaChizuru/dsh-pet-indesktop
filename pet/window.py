@@ -1912,14 +1912,34 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if is_last and not self._ended_fired:
             self._end_move_or_anim(name)
 
+    def _restart_current_clip(self, name: str) -> bool:
+        """当前 clip 原地续播的唯一出口：清驻留态 + 回首帧 + 复位末帧标志 + 起播。
+
+        拖拽续播 / 弹射飞行续播 / 多圈移动中间圈续圈三处共用。此前各处各抄一份，
+        P0-1 正是「三份拷贝漏了一份」：漏复位 `_ended_fired` 会让续圈后的末帧收口
+        被永久挡住。返回 False = `start()` 被拒，调用方按各自场景降级。
+        """
+        movie = self.movie
+        movie._soft_parked = False  # 清圈末软停驻留，保证 start() 走 fresh start
+        self._push_recycle(movie)   # 批11-B1 P2-2：不经 _switch 的重启要补推回收阈值
+        movie.jumpToFrame(0)
+        self._ended_fired = False   # 末帧收口已置位；不复位则下一圈末帧被挡住
+        if movie.start() is False:
+            return False
+        if self._pending_switch == name:  # 只清「正是本动画」的待重试（B7 R2）
+            self._pending_switch = None
+            self._pending_switch_link = False
+            self._switch_retry_count = 0
+            self._switch_retry_timer.stop()
+        return True
+
     def _end_move_or_anim(self, name: str) -> None:
         """末帧收口：多圈移动中间圈续圈（不推链），末圈/非移动走正常播完。"""
         plan = self._move_plan
         if plan is not None and name == plan.get('anim') and 'loops' in plan:
             if plan['loops_done'] + 1 < plan['loops']:
-                plan['loops_done'] += 1
-                self.movie.jumpToFrame(0)  # 圈末软停驻留 → start() 续圈重进帧 0
-                if self.movie.start() is not False:
+                if self._restart_current_clip(name):
+                    plan['loops_done'] += 1
                     return  # 续圈成功：链推进留给末圈（start 被拒则落播完降级）
             self._cancel_move()  # 末圈播完：progress 已到 1，清计划走播完链
         self._ended_fired = True
@@ -2537,23 +2557,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 return
             self._music_sing_active = False
         if name == self.drag and self._dragging:
-            self._push_recycle(self.movie)  # 批11-B1 P2-2：拖拽重启不经 _switch，补推送
-            self.movie.jumpToFrame(0)
-            self._ended_fired = False
-            if self.movie.start() is False:
+            if not self._restart_current_clip(name):
                 # 拖拽动画也被拒（退役池卡死）：回退可播放动画并安排重试，
                 # 不让拖拽状态停在"无动画在播"（B7 审查 P1-1）
                 self._fallback_playable_idle(name)
                 self._schedule_switch_retry(name)
-                return
-            # 拖拽动画直接重启成功：仅当待重试的正是本动画时清除待重试
-            # （与 _switch 同一身份绑定语义，B7 复审 R2——无关动画的
-            # 成功启动不得吞掉其他动画的待重试）。
-            if self._pending_switch == name:
-                self._pending_switch = None
-                self._pending_switch_link = False
-                self._switch_retry_count = 0
-                self._switch_retry_timer.stop()
             return
         # 弹射飞行途中不推进随机动画链（实测定案：弹射切换是事件驱动，
         # 预测式预热覆盖不到——拖拽打断早已作废预测代次，松手/半空的现场
@@ -2577,18 +2585,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             if flight is not None and name != flight:
                 self._switch(flight)
                 return
-            self._push_recycle(self.movie)  # 同拖拽重启：不经 _switch，补推送
-            self.movie.jumpToFrame(0)
-            self._ended_fired = False
-            if self.movie.start() is False:
+            # 飞行途中原地循环当前 clip（同拖拽：不经 _switch，出口补推回收阈值）
+            if not self._restart_current_clip(name):
                 self._fallback_playable_idle(name)
                 self._schedule_switch_retry(name)
-                return
-            if self._pending_switch == name:
-                self._pending_switch = None
-                self._pending_switch_link = False
-                self._switch_retry_count = 0
-                self._switch_retry_timer.stop()
             return
         # Agent 联动：待播动作优先接上（平滑衔接，不打断刚播完的动作）
         if self._pending_link_anim:

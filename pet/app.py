@@ -2891,11 +2891,20 @@ class AppShell:
         service = self._ensure_chime_service()
         service.say_now(text=text)
 
+    def _toggle_flag(self, key: str, sync) -> None:
+        """布尔开关的统一实现：翻转配置 → 落盘 → 同步服务启停。
+
+        语音报时/节日提醒两个开关此前逐字同构（读旧值取反、save、调各自的
+        `_sync_*_service`），这里收成一处；读旧值的口径（`bool(get(...))`
+        后取反）与落盘时机逐点不变。
+        """
+        self.config.set(key, not bool(self.config.get(key, False)))
+        self.config.save()
+        sync()
+
     def toggle_voice_chime(self) -> None:
         """菜单「启用语音报时」开关（默认隐藏）：翻转配置并同步服务启停。"""
-        self.config.set("voice_chime_enabled", not bool(self.config.get("voice_chime_enabled", False)))
-        self.config.save()
-        self._sync_chime_service()
+        self._toggle_flag("voice_chime_enabled", self._sync_chime_service)
 
     def trigger_festival_now(self) -> None:
         """手动提醒「今日节日」：菜单入口（默认隐藏，菜单编辑器可加回）。
@@ -2908,12 +2917,7 @@ class AppShell:
 
     def toggle_festival_reminder(self) -> None:
         """菜单「启用节日提醒」开关（默认隐藏）：翻转配置并同步服务启停。"""
-        self.config.set(
-            "festival_reminder_enabled",
-            not bool(self.config.get("festival_reminder_enabled", False)),
-        )
-        self.config.save()
-        self._sync_festival_service()
+        self._toggle_flag("festival_reminder_enabled", self._sync_festival_service)
 
     def system_notify(self, title: str, message: str, *, on_click=None, duration_ms: int = 5000) -> None:
         """Show a bottom-right desktop notification (self-drawn, tray-independent)."""
