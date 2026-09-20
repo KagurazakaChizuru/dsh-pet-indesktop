@@ -67,9 +67,9 @@ D:\dsh-pet\
 ├── dsh-pet-standalone-webm-chat.spec   # PyInstaller 规格（onedir）
 ├── pet\                          # 应用源码（112 个 .py，含子包）
 │   ├── __main__.py               # 入口：python -m pet
-│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（2652 行）
-│   ├── window.py                 # 桌宠主窗口（组合根，4598 行，预算 4632）
-│   ├── config.py                 # 配置读取/清洗/迁移/持久化（1390 行）
+│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3258 行）
+│   ├── window.py                 # 桌宠主窗口（组合根，4599 行，预算 4632）
+│   ├── config.py                 # 配置读取/清洗/迁移/持久化（1555 行）
 │   ├── config_domains.py         # 配置域 facade（chat/agent_link/proactive/collision/menu）
 │   ├── modern_settings_dialog.py # 现代设置主对话框（2390 行，预算 2401）
 │   ├── settings_widgets.py       # 设置控件库（ToggleSwitch / SettingRow / ModernSelect …）
@@ -189,7 +189,7 @@ modern_settings_dialog.py
 
 | 文件 | 预算常量 | 当前预算 | 当前实测 |
 |---|---|---|---|
-| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4632** | 4598 |
+| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4632** | 4599 |
 | `pet/modern_settings_dialog.py` | `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` | **2401** | 2390 |
 
 **触发预算时的正确动作（优先级从高到低）**：
@@ -520,7 +520,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 3. **设置页控件必须包 `SettingRow`**：普通布局里的按钮在打包版**不可见**；且 `SettingRow` 的键在 `objectName`（`settingRow_<key>`），校验收集性要用 `objectName().startswith("settingRow_")`，不要按属性 `key` 查。
 4. **`modern_settings_dialog.py` 顶层禁止 import `pet.chat`**：no-chat 变体会 exclude `pet.chat`，顶层 import 会让设置界面整体打不开。
 5. **菜单动作四件套同步**：registry + 模板 JSON + 两处测试断言，缺一即红。
-6. **`window.py`「只许瘦不许胖」**：当前 4598 行（预算 4632）。增量按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器；超预算只随实测校准（写日期+理由）。
+6. **`window.py`「只许瘦不许胖」**：当前 4599 行（预算 4632）。增量按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器；超预算只随实测校准（写日期+理由）。
 7. **纯逻辑层禁 Qt / 禁 edge_tts**：`voice_chime.py`、`voice_chime_quotes.py` 不得 import Qt 与 edge_tts；`edge-tts` 只在服务层惰性导入（缺失即降级为纯气泡）。
 8. **跨线程纪律**：`_TTSWorker` 中禁止触碰 QWidget/QMediaPlayer；一律经 `_AudioBridge` queued 信号回 GUI 线程。
 9. **预合成状态的清理时机**：`_consume_precache` 会清空整组状态，气泡文本必须先取后用（历史缺陷点）。
@@ -538,7 +538,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 
 | 优先级 | 事项 | 说明 / 切入点 |
 |---|---|---|
-| 高 | `window.py` 增量拆分 | 4598/4632；按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器 |
+| 高 | `window.py` 增量拆分 | 4599/4632；按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器 |
 | 高 | `modern_settings_dialog.py` 再拆分 | 余量仅 11 行（2390/2401）；新设置页应先拆到独立 `*_settings.py` |
 | 中 | 离线音色兜底（候选：Windows SAPI / pyttsx3） | 当前 edge-tts 不可用时仅气泡；可评估本地离线音色作为第二合成后端 |
 | 中 | 任务栏隐藏模式下的报时行为验证 | 隐藏/自动隐藏场景下气泡与播放位置的体验待专项验证 |

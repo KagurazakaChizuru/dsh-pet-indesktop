@@ -2660,7 +2660,10 @@ def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
 
 def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
-    cfg.set("chat_bg_crops", {"builtin:whale": [0.1, 0.2, 0.5, 0.6]})  # 已有自定义裁切（编辑器打开时读最新配置）
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:whale": [0.1, 0.2, 0.5, 0.6], "builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    other.save()  # 磁盘上的已有自定义裁切（编辑器打开时 reload 读磁盘最新）
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
@@ -2680,6 +2683,11 @@ def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
     monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
     page._crop_background()
     assert page._bg_crop_edits["builtin:whale"] is None  # None = 重置删除标记
+    page.save()
+    cfg.save()
+    crops = Config(tmp_path).get("chat_bg_crops", {})
+    assert "builtin:whale" not in crops, "重置必须从落盘结果里删除该键"
+    assert crops["builtin:furina"] == [0.9, 0.0, 0.1, 1.0], "外部其他键必须保留"
     page.close()
     app.processEvents()
 
@@ -2741,9 +2749,14 @@ def test_crop_entry_preserves_external_edits_when_untouched(tmp_path, monkeypatc
     主设置窗保存时若无条件回写构造期快照，外部改动被静默回滚。
     """
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
-    cfg.set("chat_bg_crops", {"builtin:whale": [0.9, 0.0, 0.1, 1.0]})  # 外部即存改动
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:whale": [0.9, 0.0, 0.1, 1.0]})
+    other.save()  # 外部即存改动（磁盘；对本窗口内存不可见）
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 save（Config.save 整体写内存视图）
     page.save()
-    assert cfg.get("chat_bg_crops") == {"builtin:whale": [0.9, 0.0, 0.1, 1.0]}
+    cfg.save()
+    assert Config(tmp_path).get("chat_bg_crops") == {"builtin:whale": [0.9, 0.0, 0.1, 1.0]}
     page.close()
     app.processEvents()
 
@@ -2834,7 +2847,11 @@ def test_crop_save_merges_only_edited_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
     page._crop_background()  # 编辑了 builtin:whale
     # 外部（老聊天设置，即存）在主设置窗打开期间改了另一个背景的裁切
-    cfg.set("chat_bg_crops", {"builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    other.save()
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 ai_page.save()
     page.save()
     crops = cfg.get("chat_bg_crops", {})
     assert crops["builtin:furina"] == [0.9, 0.0, 0.1, 1.0], "外部对其他背景的改动必须保留"
@@ -2844,10 +2861,13 @@ def test_crop_save_merges_only_edited_keys(tmp_path, monkeypatch):
 
 
 def test_crop_editor_reads_fresh_crops_at_open(tmp_path, monkeypatch):
-    """编辑器初始框读打开时的最新配置，不是构造期快照。"""
+    """编辑器初始框读打开时的磁盘最新配置，不是构造期/内存快照。"""
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
     import pet.chat.crop_dialog as crop_mod
-    cfg.set("chat_bg_crops", {"builtin:whale": [0.7, 0.0, 0.3, 1.0]})  # 构造后外部写入
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:whale": [0.7, 0.0, 0.3, 1.0]})
+    other.save()  # 构造后外部写入磁盘——只有 reload 才看得见
 
     seen = {}
 
@@ -2864,5 +2884,99 @@ def test_crop_editor_reads_fresh_crops_at_open(tmp_path, monkeypatch):
     monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
     page._crop_background()
     assert list(seen["initial"]) == [0.7, 0.0, 0.3, 1.0]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_merge_uses_disk_latest_via_host_reload(tmp_path, monkeypatch):
+    """走宿主 _write_config 的真实时序（reload → 各页写键 → ai_page.save()）：
+    对话框打开期间外部即存的其他背景裁切必须保留。宿主若丢掉 reload 时序，
+    合并读不到磁盘最新，本用例即红。"""
+    from PySide6.QtWidgets import QApplication
+    import pet.modern_settings_dialog as settings_mod
+    import pet.chat.crop_dialog as crop_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("modern_chat_background", "builtin:whale")
+    dialog = settings_mod.ModernSettingsDialog(cfg, include_ai=True)
+    page = dialog.ai_page
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            pass
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.1, 0.1, 0.5, 0.5)
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()  # 本窗口编辑 whale 的裁切
+    # 外部（老聊天设置，即存）在对话框打开期间改了另一个背景的裁切
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    other.save()
+    assert dialog._write_config() is True
+    crops = Config(tmp_path).get("chat_bg_crops", {})
+    assert crops["builtin:furina"] == [0.9, 0.0, 0.1, 1.0], "外部对其他背景的改动必须保留"
+    assert crops["builtin:whale"] == [0.1, 0.1, 0.5, 0.5], "本窗口编辑的键必须生效"
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_background_keys_merge_by_edited_style(tmp_path, monkeypatch):
+    """两种对话风格的背景键按脏标记落盘：没编辑过的风格不得回写构造期快照。
+
+    老聊天设置对话框即存：主设置窗打开期间它改了另一风格的背景，
+    主设置窗保存时若整体回写快照，外部改动被静默回滚。
+    """
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("modern_chat_background", "builtin:furina")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    # 外部（老聊天设置，即存）在主设置窗打开期间改了 classic 风格背景
+    other = Config(tmp_path)
+    other.set("chat_background", "builtin:external")
+    other.save()
+    # 本窗口只编辑 modern 风格的不透明度
+    page.background_opacity.setValue(42)
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 save（Config.save 整体写内存视图）
+    page.save()
+    cfg.save()
+    disk = Config(tmp_path)
+    assert disk.get("chat_background") == "builtin:external", "未编辑的风格不得回写构造期快照"
+    assert disk.get("modern_chat_background_opacity") == 42, "编辑过的风格键必须生效"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_button_reenabled_after_background_fixed(tmp_path, monkeypatch):
+    """禁用态的裁切按钮：用户修好背景选择/路径后必须恢复可点（不用切走再切回）。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch, modern_bg="")
+    page._crop_background()  # 纯色 → 禁用
+    assert page.background_crop_btn.isEnabled() is False
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    page.background_select.setCurrentData("builtin:whale")
+    assert page.background_crop_btn.isEnabled() is True
+    # 自定义图片：路径为空禁用，用户手填路径后恢复可点
+    page.background_select.setCurrentData("custom")
+    page.background_picker.setText("")
+    page._crop_background()
+    assert page.background_crop_btn.isEnabled() is False
+    page.background_picker.edit.setText("C:/some/image.png")
+    assert page.background_crop_btn.isEnabled() is True
     page.close()
     app.processEvents()
