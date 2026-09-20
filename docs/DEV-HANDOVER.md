@@ -285,7 +285,7 @@ modern_settings_dialog.py
 |---|---|---|---|
 | `pet/voice_chime.py` | 459 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、edge 参数与缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
 | `pet/voice_chime_service.py` | 479 | 服务 | 20s tick、预合成、`edge-tts` 后台合成、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪、降级 |
-| `pet/voice_chime_settings.py` | 245 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config` / `refresh_from_config` |
+| `pet/voice_chime_settings.py` | 245 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config` |
 | `pet/voice_chime_quotes.py` | 96 | 数据 | 中英台词/歌词库各 40 条（`CHINESE_QUOTES` / `ENGLISH_QUOTES`），纯数据零依赖 |
 
 ### 5.1 六种调度与「槽位幂等」

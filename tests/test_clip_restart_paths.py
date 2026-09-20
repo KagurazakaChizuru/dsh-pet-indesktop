@@ -499,3 +499,48 @@ def test_restart_helper_pushes_recycle_threshold(app, tmp_path):
     finally:
         win.close()
         app.processEvents()
+
+
+def test_move_middle_loop_restart_position_never_regresses_on_sync_emit(app, tmp_path, monkeypatch):
+    """GifClip 语义：`jumpToFrame(0)` 同步发 frameChanged(0)。
+
+    续圈时 `loops_done` 若在回首帧之后才递增，同步回调会按旧圈数定位——
+    圈边界位置瞬态回退约一个步幅再前进（GLM 终审 F-2）。递增必须先于
+    `jumpToFrame(0)`；WebMClip 消费定时器异步发帧不受影响，但顺序契约
+    对两条媒体路径都必须成立。
+    """
+    import pet.window as window_mod
+
+    lib = FakeLibrary()
+    win = _make_win(tmp_path, lib)
+    try:
+        clip = lib.movie(catalog.MOVES[0])
+        orig_jump = clip.jumpToFrame
+
+        def sync_emit_jump(i):  # GifClip(QMovie) 契约：跳帧成功同步发 frameChanged
+            result = orig_jump(i)
+            clip.frameChanged.emit(0)
+            return result
+
+        clip.jumpToFrame = sync_emit_jump
+
+        indices: list = []
+        orig_mpaf = window_mod.move_position_at_frame
+
+        def spy_mpaf(plan, idx):
+            indices.append(idx)
+            return orig_mpaf(plan, idx)
+
+        monkeypatch.setattr(window_mod, "move_position_at_frame", spy_mpaf)
+        plan, _clip = _start_weighted_move(win, monkeypatch, 216)  # 3 圈
+        assert plan["loops"] == 3
+
+        indices.clear()
+        win._on_frame(catalog.MOVES[0], 9)  # 第一圈末帧 → 中间圈续圈
+
+        # 末帧定位 idx=9 之后，续圈同步回调必须按新圈数定位（idx=10），
+        # 不得回落到旧圈起点（idx=0）。
+        assert indices == [9, 10], f"圈边界定位序列回退: {indices}"
+    finally:
+        win.close()
+        app.processEvents()
