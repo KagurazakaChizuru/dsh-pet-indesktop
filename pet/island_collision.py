@@ -139,6 +139,19 @@ def _ellipse_radial(rx: float, ry: float, nx: float, ny: float) -> float:
     return rx if u <= 1e-12 else 1.0 / math.sqrt(u)
 
 
+def _rect_radial(rx: float, ry: float, nx: float, ny: float) -> float:
+    """身体矩形在半轴 (rx, ry) 下沿单位法线 (nx, ny) 的径向半径。
+
+    矩形边界到中心的距离比内切椭圆大（椭圆只相切于四条边中点）；同步硬墙
+    钳制用矩形口径，保证身体框整体不进入岛碰撞区。
+    """
+    if abs(nx) <= 1e-9:
+        return ry / max(abs(ny), 1e-9)
+    if abs(ny) <= 1e-9:
+        return rx / max(abs(nx), 1e-9)
+    return min(rx / abs(nx), ry / abs(ny))
+
+
 def _segment_rect_entry(p0: tuple[float, float], p1: tuple[float, float],
                         left: float, top: float, right: float, bottom: float) -> float | None:
     """线段进入轴对齐矩形的最早时刻 t∈[0,1]（slab 法）；起点在内返回 0。"""
@@ -189,18 +202,44 @@ class IslandCollisionBody(QObject):
         self._timer.timeout.connect(self._tick)
 
     # ------------------------------------------------------------ 生命周期
+    def _register_clamp_hooks(self) -> None:
+        """给全部桌宠窗口挂同步硬墙 hook（move_window_towards 里按需调用）。
+
+        30Hz 判定有采样间隙：桌宠可能帧间钻进岛区、被弹、分离只离区 1px、
+        又钻回去（`_separate_from_stadium` 还会重置 _pet_prev，下一帧 1~2px
+        回渗又被当"新鲜进入"再弹）——velocity 反弹在 30Hz 下修不干净。同步
+        钳制在统一位置出口里按"身体框不得进入岛区"逐次落窗，像屏幕边界一样
+        从根本上杜绝穿透与抽搐。
+        """
+        try:
+            for win in self._pets_provider():
+                if win is not None:
+                    win._island_clamp_body = self._clamp_body
+        except RuntimeError:
+            pass  # 窗口已销毁
+
+    def _clear_clamp_hooks(self) -> None:
+        try:
+            for win in self._pets_provider():
+                if win is not None:
+                    win._island_clamp_body = None
+        except RuntimeError:
+            pass
+
     def start(self) -> None:
         if self._running:
             return
         self._running = True
+        self._register_clamp_hooks()
         self._timer.start()
-        log.info("灵动岛碰撞体已启动（本进程直连）")
+        log.info("灵动岛碰撞体已启动（本进程直连 + 同步硬墙）")
 
     def stop(self) -> None:
         if not self._running:
             return
         self._running = False
         self._timer.stop()
+        self._clear_clamp_hooks()
         self._pet_prev.clear()
         self._pet_prev_ts.clear()
         self._pet_cooldown.clear()
@@ -304,6 +343,46 @@ class IslandCollisionBody(QObject):
         ax0, ax1, ay, _radius, _h = stadium
         return (min(max(px, ax0), ax1), ay)
 
+    def _clamp_body(self, host, xi: float, yi: float, sbr) -> tuple[float, float]:
+        """同步硬墙：把窗口虚拟左上 (xi, yi) 钳出岛碰撞区（供 move_window_towards 调用）。
+
+        身体框屏幕位置 = 虚拟左上 + 身体框局部偏移；中心沿"轴最近点→中心"
+        方向推出到 (身体矩形径向半径 + 岛半径 + 1)。岛隐藏/停靠细条/未运行
+        时不设墙（与 _tick 同口径）。轻量桩宿主没有本方法被 getattr 兜底。
+        """
+        if not self._running or not self._island.isVisible():
+            return xi, yi
+        if getattr(self._island, "_mode", "") == "docked" \
+                and not getattr(self._island, "_hover_peek", False):
+            return xi, yi  # 细条态不设墙（与 _tick 同口径）
+        try:
+            stadium = self._island_stadium()
+        except Exception:
+            return xi, yi
+        ax0, ax1, ay, rr, _h = stadium
+        body_left = xi + sbr.x()
+        body_top = yi + sbr.y()
+        cx = body_left + sbr.width() / 2.0
+        cy = body_top + sbr.height() / 2.0
+        rx = sbr.width() / 2.0
+        ry = sbr.height() / 2.0
+        closest_x = min(max(cx, ax0), ax1)
+        dx, dy = cx - closest_x, cy - ay
+        dist = math.hypot(dx, dy)
+        if dist <= 1e-9:
+            # 中心恰在轴上：沿 -y 推出（向上）
+            nx, ny, radial = 0.0, -1.0, ry
+        else:
+            nx, ny = dx / dist, dy / dist
+            radial = _rect_radial(rx, ry, nx, ny)
+        if dist >= radial + rr:
+            return xi, yi
+        gap = radial + rr + 1.0
+        target_cx = closest_x + nx * gap
+        target_cy = ay + ny * gap
+        return (target_cx - sbr.width() / 2.0 - sbr.x(),
+                target_cy - sbr.height() / 2.0 - sbr.y())
+
     def _stadium_entry(self, p0: tuple[float, float], p1: tuple[float, float],
                        stadium, rx: float, ry: float) -> float | None:
         """桌宠中心从 p0 扫到 p1 进入体育场形（外扩桌宠椭圆）的最早 TOI。
@@ -382,6 +461,8 @@ class IslandCollisionBody(QObject):
             return
         key = id(win)
         alive_keys.add(key)
+        # 同步硬墙 hook 懒挂：start 之后新建的桌宠在这里补上
+        win._island_clamp_body = self._clamp_body
         if not win.isVisible() or getattr(win, "_hidden_paused", False):
             self._pet_prev.pop(key, None)
             self._pet_cooldown.pop(key, None)

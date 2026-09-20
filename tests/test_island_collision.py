@@ -11,6 +11,7 @@ from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QApplication
 
 from pet import collision
+from pet import window_placement
 from pet.collision_ipc import _KNOWN_FLAGS_MASK
 from pet.config import Config
 from pet.dynamic_island import DynamicIsland
@@ -625,3 +626,140 @@ def test_hit_geometry_independent_of_screen_size(tmp_path):
         finally:
             island.hide()
             island.deleteLater()
+
+
+# ------------------------------------------------------------ 同步硬墙（屏幕边界式位置钳制）
+class _ClampScreen:
+    def name(self):
+        return "big"
+
+    def availableGeometry(self):
+        return QRect(0, 0, 3840, 2160)
+
+    def devicePixelRatio(self):
+        return 1.0
+
+
+class ClampWin:
+    """统一位置出口（move_window_towards）的窗口桩：全窗口即身体（无 body_box）。"""
+
+    def __init__(self, x: float, y: float, w: int, h: int):
+        self._x, self._y = x, y
+        self._w, self._h = w, h
+        self.scale = 1.0
+        self._capture_headroom = 0
+        self._draw_delta = QPoint(0, 0)
+        self._collision_local_bounds = None
+        self.cfg = SimpleNamespace(get=lambda k, d=None: d)
+        self._screen = _ClampScreen()
+
+    def _screen_available(self, *_a, **_k):
+        return self._screen
+
+    def pos(self):
+        return QPoint(self._x, self._y)
+
+    def move(self, x, y):
+        self._x, self._y = int(x), int(y)
+
+    def x(self):
+        return self._x
+
+    def y(self):
+        return self._y
+
+    def _sync_mask(self):
+        pass
+
+    def update(self):
+        pass
+
+    def _schedule_position_sync(self):
+        pass
+
+    def _submit_collision_state(self, *_a, **_k):
+        pass
+
+
+def _assert_body_out_of_stadium(win, body, msg=""):
+    """断言身体框（全窗口）中心到岛轴的距离 >= 矩形径向半径 + 岛半径 + 1。"""
+    stadium = body._island_stadium()
+    ax0, ax1, ay, rr, _h = stadium
+    center_x = win.x() + win._draw_delta.x() + win._w / 2.0
+    center_y = win.y() + win._draw_delta.y() + win._h / 2.0
+    closest_x = min(max(center_x, ax0), ax1)
+    dx, dy = center_x - closest_x, center_y - ay
+    dist = math.hypot(dx, dy)
+    assert dist > 1e-9, f"身体中心不应恰好落在岛轴上：{msg}"
+    nx, ny = dx / dist, dy / dist
+    radial = min((win._w / 2) / max(abs(nx), 1e-9),
+                 (win._h / 2) / max(abs(ny), 1e-9))
+    assert dist >= radial + rr + 1.0 - 1e-6, (
+        f"身体框未被钳出岛区：中心距轴 {dist:.1f} < 径向 {radial:.1f} + 岛半径 {rr} + 1（{msg}）"
+    )
+
+
+def test_synchronous_clamp_keeps_body_out_of_island(tmp_path):
+    """同步硬墙：统一位置出口在每次落窗前把身体框钳出岛碰撞区（像屏幕边界墙）。
+
+    30Hz 判定有采样间隙（帧间可钻进区→被弹→速度不足离区→再判定→抽搐）；
+    同步钳制在 move_window_towards 里逐次落窗，身体框根本不进入岛区，从源头
+    杜绝穿透与抽搐。这里目标位置让身体中心落在岛轴上，应被钳到岛外。
+    """
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        win = ClampWin(1000, 1000, 200, 100)
+        win._island_clamp_body = body._clamp_body
+        stadium = body._island_stadium()
+        ax0, ax1, ay, rr, _h = stadium
+        target_cx = (ax0 + ax1) / 2.0
+        window_placement.move_window_towards(
+            win, target_cx - win._w / 2.0, ay - win._h / 2.0)
+        _assert_body_out_of_stadium(win, body, "落点恰在岛轴")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_no_island_clamp_without_hook(tmp_path):
+    """无 hook（岛碰撞关闭）时 move_window_towards 不钳制——行为与改造前一致。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        win = ClampWin(1000, 1000, 200, 100)
+        stadium = body._island_stadium()
+        ax0, ax1, ay, _rr, _h = stadium
+        target_cx = (ax0 + ax1) / 2.0
+        window_placement.move_window_towards(
+            win, target_cx - win._w / 2.0, ay - win._h / 2.0)
+        center_x = win.x() + win._draw_delta.x() + win._w / 2.0
+        center_y = win.y() + win._draw_delta.y() + win._h / 2.0
+        # 统一出口对坐标取整（int(round)），容差放 1px
+        assert abs(center_x - target_cx) < 1.0
+        assert abs(center_y - ay) < 1.0
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_clamp_hook_registered_and_cleared_by_lifecycle(tmp_path):
+    """start 给桌宠挂同步硬墙 hook，stop 清除（岛碰撞关闭后不设墙）。"""
+    _qapp()
+    win = ClampWin(1000, 1000, 200, 100)
+    island, body = _make_body(tmp_path, pets=[win])
+    try:
+        island.show()
+        assert getattr(win, "_island_clamp_body", None) is None
+        body.start()
+        # 绑定方法每次访问是新对象，比 __func__
+        assert win._island_clamp_body.__func__ is body._clamp_body.__func__
+        body.stop()
+        assert win._island_clamp_body is None
+    finally:
+        island.hide()
+        island.deleteLater()
