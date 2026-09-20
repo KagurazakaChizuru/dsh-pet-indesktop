@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,11 +87,19 @@ class _ClampScreen:
         return 1.0
 
 
+class FakePhysicsTimer:
+    def __init__(self):
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+
 class WallWin:
     """同步墙的窗口桩：全窗口即身体（无 body_box），带虚拟坐标/物理状态。
 
     _move_window_towwards 走真实统一出口（window_placement.move_window_towards），
-    供"落窗即钳制 / 抛掷反射 / submit 推挤"端到端断言使用。
+    供"落窗即钳制 / 抛掷反射 / submit 推挤 / 撞岛业务链"端到端断言使用。
     """
 
     def __init__(self, x: float, y: float, w: int, h: int, *,
@@ -110,6 +119,16 @@ class WallWin:
         self._phys_pos = [float(x), float(y)]
         self._hidden_paused = False
         self._interaction_state = "IDLE"
+        self._throw_speed_cap = 4800.0
+        self._throw_egg = None
+        self._edge_probe = None
+        self._squash_active = False
+        self._just_dragged = False
+        self._last_physics_tick_time = None
+        self._physics_timer = FakePhysicsTimer()
+        self.sounds = 0
+        self.squashes = 0
+        self.entered_modes = []
 
     def _screen_available(self, *_a, **_k):
         return self._screen
@@ -138,6 +157,22 @@ class WallWin:
 
     def _move_window_towards(self, x, y, body_bounds=None):
         window_placement.move_window_towards(self, x, y, body_bounds=body_bounds)
+
+    def _cancel_move(self):
+        pass
+
+    def _cancel_animation_gap(self):
+        pass
+
+    def _play_collision_sound(self):
+        self.sounds += 1
+
+    def _enter_physics_mode(self, mode):
+        self._physics_mode = mode
+        self.entered_modes.append(mode)
+
+    def _start_squash(self):
+        self.squashes += 1
 
     def _sync_mask(self):
         pass
@@ -342,13 +377,15 @@ def test_throw_mode_pet_reflects_off_island_wall(tmp_path):
     """抛掷中撞岛：速度沿墙法线反射（e=RESTITUTION）+ 物理位置钉在钳制点。
 
     像撞屏幕边缘一样弹开；纯钳制只挡位置会让物理空间穿过岛、视觉被钉在墙上
-    直到落体结束——反射后物理/视觉一致。
+    直到落体结束——反射后物理/视觉一致。真撞附带命中反馈（音效/挤压/岛弹跳）。
     """
     _qapp()
     island, body = _make_body(tmp_path)
     try:
         island.show()
         body._running = True
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
         # 岛左端帽 (ax0, ay)；身体 120×120 中心放 ax0-80（距轴 80 < 60+22），
         # 向右 600px/s 高速接近 → 应反射成 -600*RESTITUTION 向左弹开
         stadium = body._island_stadium()
@@ -365,6 +402,109 @@ def test_throw_mode_pet_reflects_off_island_wall(tmp_path):
         assert abs(win._phys_pos[0] - vp.x()) < 1e-6
         assert abs(win._phys_pos[1] - vp.y()) < 1e-6
         _assert_body_out_of_stadium(win, body, "抛掷反射")
+        # 命中反馈：音效/挤压/岛弹跳（不重进 throw——已处于抛掷中）
+        assert win.sounds == 1
+        assert win.squashes == 1
+        assert len(bumps) == 1
+        assert win._physics_mode == "throw"
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_fast_roaming_pet_flings_off_island_with_feedback(tmp_path):
+    """漫游高速撞岛（原有业务）：冲量 + 进抛掷物理 + 音效/挤压/岛弹跳，事件驱动。
+
+    与 30Hz 检测无关：墙在落窗时按接触跟踪测得的接近速度判真撞，走 _apply_hit
+    业务链（撞岛像撞弹床 e=STATIC_RESTITUTION）。
+    """
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
+        # 身体 120×120 中心在岛左端帽左侧 80px（越界 80 < 60+22）
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        win = WallWin(ax0 - 140.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
+        now = time.monotonic()
+        # 模拟漫游接近：上一帧在更左 12px（30ms 前）→ 接触跟踪测得 400px/s
+        body._contact[id(win)] = (ax0 - 152.0, ay - 60.0, now - 0.03)
+        win._move_window_towards(win._virtual_pos().x(), win._virtual_pos().y())
+        assert win._physics_mode == "throw"  # 进抛掷物理（被拍飞）
+        assert win._interaction_state == "THROWN"
+        assert win._phys_vel[0] < 0.0  # 弹回左侧
+        assert abs(win._phys_vel[0]) > 400.0 * 1.3  # e=1.3 加速反弹
+        assert win.sounds == 1
+        assert win.squashes == 1
+        assert len(bumps) == 1
+        _assert_body_out_of_stadium(win, body, "漫游真撞")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_slow_roaming_pet_is_pushed_without_feedback(tmp_path):
+    """慢速贴岛（轻贴）：只推出不撞——不响、不挤、不弹、不进抛掷物理。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        win = WallWin(ax0 - 140.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
+        now = time.monotonic()
+        # 30ms 前同位 → 接触测得接近速度 ~0（轻贴）
+        body._contact[id(win)] = (ax0 - 140.0, ay - 60.0, now - 0.03)
+        win._move_window_towards(win._virtual_pos().x(), win._virtual_pos().y())
+        assert win._physics_mode != "throw"
+        assert win._interaction_state == "IDLE"
+        assert win.sounds == 0
+        assert win.squashes == 0
+        assert bumps == []
+        _assert_body_out_of_stadium(win, body, "轻贴推出")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_submit_flings_pet_when_island_swept_onto_it(tmp_path):
+    """拖岛拍鱼（原有业务）：岛被快速拖向静止桌宠，桌宠沿相对运动方向被拍飞
+    + 反馈（岛速参与结算，submit 事件驱动，无定时器）。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
+        # 让岛速采样基线暗示"正以 800px/s 向右拖"
+        rect = island.geometry()
+        body._last_size = (rect.width(), rect.height())
+        body._last_center = (float(rect.center().x()) - 40.0,
+                             float(rect.center().y()))
+        body._last_motion_ts = time.monotonic() - 0.05
+        # 静止桌宠中心在岛右端帽外侧 20px（身体已越界，会被推出并判真撞）
+        stadium = body._island_stadium()
+        ax0, ax1, ay, rr, _h = stadium
+        win = WallWin(ax1 + 20.0 - 60.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
+        body._pets_provider = lambda: [win]
+        island.on_geometry_changed = body.submit
+        island.on_geometry_changed()
+        assert win._physics_mode == "throw"  # 被拍飞进抛掷物理
+        assert win._phys_vel[0] > 0.0  # 沿岛运动方向（向右）飞出
+        assert win.sounds == 1
+        assert win.squashes == 1
+        assert len(bumps) == 1
+        _assert_body_out_of_stadium(win, body, "拖岛拍鱼")
     finally:
         island.hide()
         island.deleteLater()
