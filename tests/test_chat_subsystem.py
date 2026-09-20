@@ -2674,7 +2674,7 @@ def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             assert pix is not None
             self.initial = initial
 
@@ -2708,7 +2708,7 @@ def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             # 已有自定义裁切时编辑器初始框应带上它
             assert list(initial) == [0.1, 0.2, 0.5, 0.6]
 
@@ -2742,7 +2742,7 @@ def test_crop_entry_initial_box_falls_back_to_theme_focus(tmp_path, monkeypatch)
     seen = {}
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             seen["initial"] = initial
 
         def exec(self):
@@ -2872,7 +2872,7 @@ def test_crop_editor_receives_current_style_name(tmp_path, monkeypatch):
     seen = {}
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             seen["style"] = style_name
 
         def exec(self):
@@ -2906,6 +2906,134 @@ def test_crop_dialog_title_carries_style_name():
         app.processEvents()
 
 
+def test_clamp_box_uses_passed_aspect():
+    """clamp_box 的保比由传入 aspect 决定；缺省退回经典窗比例（430/780）。"""
+    from pet.chat.crop_dialog import clamp_box
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    # 1:1 底图：选区像素 w/h 直接等于传入的 aspect
+    _x, _y, w, h = clamp_box(0.0, 0.0, 0.5, 1.0, CHAT_UI_VIEW_ASPECT["modern"])
+    assert w / h == pytest.approx(CHAT_UI_VIEW_ASPECT["modern"])
+    # 竖版比例在 1:1 底图上先顶满高，宽度由 clamp 反向收紧
+    _x, _y, w, h = clamp_box(0.0, 0.0, 1.0, 1.0, CHAT_UI_VIEW_ASPECT["classic"])
+    assert h == pytest.approx(1.0)
+    assert w / h == pytest.approx(CHAT_UI_VIEW_ASPECT["classic"])
+    # 不传 aspect 时行为与显式传经典比例一致（兼容旧调用）
+    assert clamp_box(0.35, 0.2, 0.4, 1.0) == clamp_box(
+        0.35, 0.2, 0.4, 1.0, CHAT_UI_VIEW_ASPECT["classic"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("style_id", "style_name", "landscape"),
+    [("modern", "肥鱼版 DeepSeek", True), ("classic", "肥鱼牌小手机", False)],
+)
+def test_crop_dialog_box_keeps_style_view_aspect(style_id, style_name, landscape):
+    """编辑器默认选区与滚轮缩放后的像素纵横比 = 当前风格窗口比例，方向也正确。"""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QPixmap, QWheelEvent
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.crop_dialog import CropDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    app = QApplication.instance() or QApplication([])
+    pix = QPixmap(400, 400)  # 1:1 底图：选区像素比例由 view_aspect 唯一决定
+    expected = CHAT_UI_VIEW_ASPECT[style_id]
+    assert (expected > 1.0) is landscape
+    dlg = CropDialog(pix, None, None, style_name, expected)
+    try:
+        dlg.canvas.resize(360, 480)
+        _x, _y, w, h = dlg.canvas.box()
+        assert (w * pix.width()) / (h * pix.height()) == pytest.approx(expected, rel=1e-9)
+        wheel = QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, -120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+        dlg.canvas.wheelEvent(wheel)
+        _x, _y, w, h = dlg.canvas.box()
+        assert (w * pix.width()) / (h * pix.height()) == pytest.approx(expected, rel=1e-9)
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
+
+
+def test_crop_editor_receives_style_view_aspect(tmp_path, monkeypatch):
+    """两个调用方之一：主设置窗按当前编辑风格把窗口纵横比传给编辑器。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("modern_chat_background", "builtin:whale")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    import pet.chat.crop_dialog as crop_mod
+
+    seen = []
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            seen.append(view_aspect)
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    page.chat_ui_style.setCurrentData("classic")
+    page._crop_background()
+    assert seen == pytest.approx([CHAT_UI_VIEW_ASPECT["modern"], CHAT_UI_VIEW_ASPECT["classic"]])
+    page.close()
+    app.processEvents()
+
+
+def test_chat_settings_dialog_crop_uses_classic_aspect(tmp_path, monkeypatch):
+    """两个调用方之二：老聊天设置对话框固定服务经典窗，传经典纵横比。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.settings_dialog import ChatSettingsDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.save()
+    import pet.chat.crop_dialog as crop_mod
+
+    seen = []
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            seen.append((style_name, view_aspect))
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    dlg = ChatSettingsDialog(Config(tmp_path))
+    try:
+        dlg._crop_bg()
+    finally:
+        dlg.close()
+        app.processEvents()
+    assert len(seen) == 1
+    assert seen[0][0] == "肥鱼牌小手机"
+    assert seen[0][1] == pytest.approx(CHAT_UI_VIEW_ASPECT["classic"])
+
+
 def test_crop_entry_preserves_external_edits_when_untouched(tmp_path, monkeypatch):
     """用户没动裁切编辑器时，save() 不得把构造期快照写回覆盖外部改动。
 
@@ -2933,7 +3061,7 @@ def test_crop_dialog_released_after_use(tmp_path, monkeypatch):
     released = []
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             pass
 
         def exec(self):
@@ -2955,7 +3083,7 @@ def test_crop_persists_through_disk_roundtrip(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             pass
 
         def exec(self):
@@ -2996,7 +3124,7 @@ def test_crop_save_merges_only_edited_keys(tmp_path, monkeypatch):
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             pass
 
         def exec(self):
@@ -3036,7 +3164,7 @@ def test_crop_editor_reads_fresh_crops_at_open(tmp_path, monkeypatch):
     seen = {}
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             seen["initial"] = initial
 
         def exec(self):
@@ -3068,7 +3196,7 @@ def test_crop_merge_uses_disk_latest_via_host_reload(tmp_path, monkeypatch):
     page = dialog.ai_page
 
     class FakeDlg:
-        def __init__(self, pix, initial, parent, style_name=''):
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
             pass
 
         def exec(self):
