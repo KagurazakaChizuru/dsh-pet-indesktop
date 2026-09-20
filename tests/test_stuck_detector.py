@@ -278,3 +278,101 @@ class TestStuckHelpers:
         assert "{name}" not in stuck_reminder_text("DSH")
         assert "DSH" in stuck_reminder_text("DSH")
         assert stuck_reminder_text("DSH", "快去看 {name}！") == "快去看 DSH！"
+
+
+class TestStuckDetectorPrune:
+    def test_prune_emits_stuck_resolved_when_window_expires(self):
+        """窗口随时间清空 = 卡住状态自然解除：必须发射 stuck_resolved，
+        否则「卡住」的消费者（提示/干预 UI）永远等不到恢复信号。"""
+        det, clock = _make_detector(window_seconds=30)
+        resolved: list[str] = []
+        det.stuck_resolved.connect(lambda k: resolved.append(k))
+        for _ in range(3):
+            det.feed_record("dsh", _result("pip", False, error_code="ETIMEDOUT",
+                                           error_text="timed out", timeout=True))
+        assert det.get_score("dsh") >= DEFAULT_WORRIED_THRESHOLD
+        clock.advance(60)  # 全部事件过期
+        det._prune()
+        assert det.get_score("dsh") == 0
+        assert resolved == ["dsh"], "窗口清空时必须发射 stuck_resolved"
+
+    def test_prune_recomputes_score_for_remaining_events(self):
+        """部分事件过期后窗口非空：分数必须按剩余事件重算，
+        否则 get_score 返回剪枝前的陈旧分。"""
+        det, clock = _make_detector(window_seconds=30)
+        det.feed_record("dsh", _result("pip", False, error_text="boom"))
+        det.feed_record("dsh", _result("curl", False, error_text="boom2"))
+        assert det.get_score("dsh") >= 1  # 连续失败 +1
+        clock.advance(20)
+        det.feed_record("dsh", _result("pip", True))  # 窗口内只剩这次成功
+        clock.advance(20)  # 两次失败（t=0）过期，成功（t=20）仍在窗内
+        det._prune()
+        assert det.get_score("dsh") == 0, "过期事件不得再贡献分数"
+
+    def test_prune_emits_resolved_when_recompute_drops_below_worried(self):
+        """重算降分穿过 worried 阈值时同样要发 stuck_resolved（走 _recompute 链路）。"""
+        det, clock = _make_detector(window_seconds=30)
+        resolved: list[str] = []
+        det.stuck_resolved.connect(lambda k: resolved.append(k))
+        for _ in range(3):
+            det.feed_record("dsh", _result("pip", False, error_code="ETIMEDOUT",
+                                           error_text="timed out", timeout=True))
+        assert det.get_score("dsh") >= DEFAULT_WORRIED_THRESHOLD
+        clock.advance(20)
+        det.feed_record("dsh", _call("bash", "argv0:ls"))  # 只占窗，不贡献分数
+        clock.advance(20)  # 失败事件过期，只剩占窗事件
+        det._prune()
+        assert det.get_score("dsh") == 0
+        assert resolved == ["dsh"]
+
+
+def test_prune_recompute_does_not_emit_intervention_without_new_events():
+    """定时剪枝路径的重算只负责刷新分数/恢复信号：干预推荐仍只在喂入新
+    事件时发射——否则长窗口配置下（如 window_seconds=3600）零新事件也会
+    按冷却周期反复重发 intervention_recommended（未声明的行为变更）。"""
+    det, clock = _make_detector(window_seconds=3600, cooldown_seconds=300)
+    events: list[dict] = []
+    det.intervention_recommended.connect(lambda k, p: events.append(p))
+    for _ in range(3):
+        det.feed_record("dsh", _result("pip", False, error_code="ETIMEDOUT",
+                                       error_text="timed out", timeout=True))
+    recommends = [e for e in events if e.get("severity") == StuckSeverity.RECOMMEND]
+    assert len(recommends) == 1, "喂事件时发射一次"
+    clock.advance(301)  # 冷却已过、事件未过期、零新事件
+    det._prune()
+    recommends = [e for e in events if e.get("severity") == StuckSeverity.RECOMMEND]
+    assert len(recommends) == 1, "定时剪枝不得重发干预推荐"
+    assert det.get_score("dsh") >= DEFAULT_INTERVENE_THRESHOLD, "分数仍按剩余事件重算"
+
+
+def test_feed_record_from_worker_thread_emits_on_gui_thread():
+    """feed_record 从 worker 线程喂入时，信号槽必须在 GUI 线程执行
+    （PySide6 对非 QObject 接收者默认 queued 投递）。这条是护栏：当前
+    _prune/_recompute 与同一线程前提成立依赖该投递语义，未来若改连接
+    方式（如 DirectConnection），本测试会把「恰好安全」变成可见的红。"""
+    import threading
+    import time as _time
+
+    from PySide6.QtWidgets import QApplication
+
+    qapp = QApplication.instance() or QApplication([])
+    det, _ = _make_detector()
+    gui_thread = threading.current_thread()
+    slot_threads: list = []
+    det.stuck_resolved.connect(lambda k: slot_threads.append(threading.current_thread()))
+    for _ in range(2):
+        det.feed_record("dsh", _result("pip", False, error_text="boom"))
+    assert det.get_score("dsh") > 0
+
+    def _feed():
+        det.feed_record("dsh", {"event": "turn/end"})  # 触发 _reset → stuck_resolved
+
+    t = threading.Thread(target=_feed, daemon=True)
+    t.start()
+    deadline = _time.monotonic() + 3.0
+    while _time.monotonic() < deadline and not slot_threads:
+        qapp.processEvents()
+        _time.sleep(0.01)
+    t.join(timeout=2.0)
+    assert slot_threads, "worker 线程喂入后信号必须被投递"
+    assert all(th is gui_thread for th in slot_threads), "信号槽必须在 GUI 线程执行"

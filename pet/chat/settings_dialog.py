@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 from .models import ChatSettings, ProviderConfig, SecretStore
 from .providers import test_connection
 from .themes import theme_names
+from .utils import _safe_emit
 
 
 class ChatSettingsDialog(QDialog):
@@ -366,7 +367,9 @@ class ChatSettingsDialog(QDialog):
 
     def _run_test_worker(self, provider_config: ProviderConfig):
         ok, message = test_connection(provider_config, timeout=10.0)
-        self._test_done.emit(ok, message)
+        # 对话框可能在测试在飞时被关闭销毁（WA_DeleteOnClose）：直接
+        # self._test_done.emit 会对已删 C++ 对象 RuntimeError。
+        _safe_emit(self, "_test_done", ok, message)
 
     def _on_test_done(self, ok: bool, message: str):
         self.test.setEnabled(True)
