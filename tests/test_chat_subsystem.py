@@ -2628,7 +2628,7 @@ def _make_ai_page(tmp_path, monkeypatch, *, modern_bg="builtin:whale"):
 
 
 def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
-    """主设置窗的裁切取景：编辑器结果记编辑集，save() 时按键合并写 config。"""
+    """主设置窗的裁切取景：编辑器结果记编辑集，save() 时按背景值合并写 config。"""
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
     import pet.chat.crop_dialog as crop_mod
 
@@ -2978,5 +2978,39 @@ def test_crop_button_reenabled_after_background_fixed(tmp_path, monkeypatch):
     assert page.background_crop_btn.isEnabled() is False
     page.background_picker.edit.setText("C:/some/image.png")
     assert page.background_crop_btn.isEnabled() is True
+    page.close()
+    app.processEvents()
+
+
+def test_system_notify_keeps_external_edit_when_untouched(tmp_path, monkeypatch):
+    """未拨动系统通知开关时，save() 不得回写构造期快照覆盖外部即存改动。
+
+    老聊天设置对话框即存（pet/chat/settings_dialog.py:437）会写同一键：
+    主设置窗打开期间外部把它改成 False，主设置窗保存时若无条件回写
+    构造期快照（True），外部改动被静默回滚。
+    """
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    from pet.config import Config
+    assert page.system_notify_check.isChecked() is True  # 构造期快照值
+    other = Config(tmp_path)
+    other.set("system_notifications_enabled", False)
+    other.save()  # 外部即存改动（磁盘；对本窗口内存不可见）
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 save（Config.save 整体写内存视图）
+    page.save()
+    cfg.save()
+    assert Config(tmp_path).get("system_notifications_enabled") is False, "未触开关时外部值必须保留"
+    page.close()
+    app.processEvents()
+
+
+def test_system_notify_toggle_persists_on_save(tmp_path, monkeypatch):
+    """用户拨动系统通知开关（toggled 置脏）后，save() 新值必须落盘。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    from pet.config import Config
+    page.system_notify_check.setChecked(False)  # 用户拨动 → toggled → 置脏
+    cfg.reload()  # 宿主 reload 发生在拨动之后：磁盘旧值不得压过用户新值
+    page.save()
+    cfg.save()
+    assert Config(tmp_path).get("system_notifications_enabled") is False, "拨动后的新值必须生效"
     page.close()
     app.processEvents()

@@ -84,6 +84,10 @@ class _AiSettingsPage(QWidget):
         self.skip_ssl = ToggleSwitch()
         self.skip_ssl.setChecked(not provider.verify_ssl)
         self.system_notify_check = ToggleSwitch()
+        # 系统通知键：构造期快照无条件回写会把打开期间外部（老聊天设置即存入口
+        # settings_dialog.py:437）对该键的改动静默回滚，所以只在用户实际拨动过
+        # （脏标记）时才写；toggled 连接晚于这里的 setChecked，构造期不会误标。
+        self._system_notify_dirty = False
         self.system_notify_check.setChecked(bool(config.get("system_notifications_enabled", True)))
         self.chat_ui_style = ModernSelect(self, width=190)
         self.chat_ui_style.addItem("肥鱼版 DeepSeek", "modern")
@@ -130,13 +134,15 @@ class _AiSettingsPage(QWidget):
         self.background_fill.addItem("填充裁剪", "cover")
         self.background_fill.addItem("完整适应", "contain")
         self.background_fill.addItem("拉伸铺满", "stretch")
-        # 裁切取景：编辑器结果记成"按键编辑集"（值为 None = 重置删除），save()
-        # 时读磁盘最新配置后只覆盖编辑过的键——整字典快照回写会把主设置窗打开
-        # 期间外部（老聊天设置即存入口）对其他背景的裁切改动静默回滚。
+        # 裁切取景：编辑器结果按背景值记成编辑集（值为 None = 重置删除），save()
+        # 时读磁盘最新配置后只合并编辑过的背景——整字典快照回写会把主设置窗打开
+        # 期间外部（老聊天设置即存入口）对其他背景的裁切改动静默回滚。本页风格键
+        # 的落盘粒度只到"按风格脏标记"（见下），裁切这一路才是按背景值合并。
         self._bg_crop_edits: dict[str, list | None] = {}
-        # 背景键（两种对话风格各自的图片/不透明度/填充）同理：构造期快照无条件
-        # 回写会把打开期间外部对另一风格的即存改动静默回滚，所以只回写本窗口
-        # 实际编辑过的风格（脏标记）；_loading_background 挡住程序化赋值的误标。
+        # 背景风格键（两种对话风格各自的图片/不透明度/填充）同理：构造期快照无条件
+        # 回写会把打开期间外部对另一风格的即存改动静默回滚，所以按风格脏标记只回写
+        # 本窗口实际编辑过的风格；组内三键仍是整组回写，不承诺按键粒度。
+        # _loading_background 挡住程序化赋值的误标。
         self._bg_edited_styles: set[str] = set()
         self._loading_background = False
         self.background_crop_btn = QPushButton("裁切取景…", self)
@@ -193,6 +199,8 @@ class _AiSettingsPage(QWidget):
         self._vision_override_rows = vision_rows[1:]
         self.vision_same.toggled.connect(self._update_vision_visibility)
         self._update_vision_visibility(self.vision_same.isChecked())
+        # 用户拨动系统通知开关才置脏；连接晚于构造期 setChecked，程序化赋值不置脏。
+        self.system_notify_check.toggled.connect(self._on_system_notify_edited)
         self._test_row = self.findChild(SettingRow, "settingRow_connection_test")
         if self._test_row is not None:
             self.test_result = self._test_row.hint_label
@@ -280,6 +288,10 @@ class _AiSettingsPage(QWidget):
         if not self._loading_background:
             self._bg_edited_styles.add(self._background_style)
 
+    def _on_system_notify_edited(self, _checked: bool = False) -> None:
+        """用户拨动系统通知开关 → 该键落盘脏标记（未拨动则保留外部即存值）。"""
+        self._system_notify_dirty = True
+
     def _on_chat_ui_style_changed(self, _index: int = -1) -> None:
         self._capture_background_value()
         self._background_style = str(self.chat_ui_style.currentData() or "modern")
@@ -310,7 +322,7 @@ class _AiSettingsPage(QWidget):
             self.background_crop_btn.setEnabled(True)
 
     def _crop_background(self) -> None:
-        """打开裁切取景编辑器：结果记入 _bg_crop_edits，save() 时按键合并落盘。"""
+        """打开裁切取景编辑器：结果记入 _bg_crop_edits，save() 时按背景值合并落盘。"""
         from .crop_dialog import CropDialog
         from .themes import get_theme
         from .widgets import resolve_bg_pixmap
@@ -568,8 +580,9 @@ class _AiSettingsPage(QWidget):
         self.settings.default_system_prompt = self.prompt.toPlainText().strip()
         self.config.set("chat_ui_style", self.chat_ui_style.currentData())
         self._capture_background_value()
-        # 只回写本窗口编辑过的风格：未触风格保持磁盘最新值（宿主 save 前已
-        # reload），打开期间外部对它们的即存改动不被快照回滚。
+        # 按风格脏标记合并：只回写本窗口编辑过的风格，未触风格保持磁盘最新值
+        # （宿主 save 前已 reload），打开期间外部对它们的即存改动不被快照回滚。
+        # 粒度是风格而非按键：动过某风格即整组写回该风格的三个键。
         if "classic" in self._bg_edited_styles:
             self.config.set("chat_background", self._background_values["classic"])
             self.config.set("chat_background_opacity", self._background_display["classic"]["opacity"])
@@ -592,5 +605,8 @@ class _AiSettingsPage(QWidget):
             self.config.set("chat_bg_crops", crops)
             self._bg_crop_edits.clear()  # 落盘后编辑集失效：页面若复用，None 删除标记不得再次删外部新写入
         self.config.set("modern_chat_card_opacity", self.message_card_opacity.value())
-        self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
+        # 系统通知按脏标记合并：未拨动开关保持磁盘最新值（宿主 save 前已 reload），
+        # 打开期间外部（老聊天设置即存）对该键的改动不被构造期快照回滚。
+        if self._system_notify_dirty:
+            self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
         self.config.set_chat_settings(self.settings)
