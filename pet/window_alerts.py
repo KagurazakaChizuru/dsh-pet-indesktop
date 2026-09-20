@@ -384,7 +384,7 @@ def show_random_self_talk(host) -> bool:
             image_scale=host._self_talk_image_scale,
         )
 
-    return host._show_self_talk_text(expression_style_text(host, value))
+    return host._show_self_talk_text(value)
 
 
 def show_click_self_talk(host, click_name: str) -> bool:
