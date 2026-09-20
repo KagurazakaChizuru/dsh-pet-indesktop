@@ -130,8 +130,10 @@ class _AiSettingsPage(QWidget):
         self.background_fill.addItem("填充裁剪", "cover")
         self.background_fill.addItem("完整适应", "contain")
         self.background_fill.addItem("拉伸铺满", "stretch")
-        # 裁切取景：编辑器结果进缓冲，save() 才落盘（取消设置不带走裁切改动）
-        self._bg_crops: dict = dict(config.get('chat_bg_crops', {}) or {})
+        # 裁切取景：编辑器结果记成"按键编辑集"（值为 None = 重置删除），save()
+        # 时读磁盘最新配置后只覆盖编辑过的键——整字典快照回写会把主设置窗打开
+        # 期间外部（老聊天设置即存入口）对其他背景的裁切改动静默回滚。
+        self._bg_crop_edits: dict[str, list | None] = {}
         self.background_crop_btn = QPushButton("裁切取景…", self)
         self.background_crop_btn.clicked.connect(self._crop_background)
         self._populate_background_options(self._background_style)
@@ -220,7 +222,6 @@ class _AiSettingsPage(QWidget):
         ]
         self._background_file_row = rows[-5]
         self._background_detail_rows = rows[-4:-1]
-        self._background_crop_row = rows[-2]
         self._message_card_opacity_row = rows[-1]
         self.background_select.currentIndexChanged.connect(self._update_background_visibility)
         self._update_background_visibility()
@@ -286,9 +287,10 @@ class _AiSettingsPage(QWidget):
             card_opacity_row.setVisible(self._background_style == "modern")
         if getattr(self, "background_crop_btn", None) is not None:
             self.background_crop_btn.setText("裁切取景…")
+            self.background_crop_btn.setEnabled(True)
 
     def _crop_background(self) -> None:
-        """打开裁切取景编辑器：结果进 _bg_crops 缓冲，save() 时才写 config。"""
+        """打开裁切取景编辑器：结果记入 _bg_crop_edits，save() 时按键合并落盘。"""
         from .crop_dialog import CropDialog
         from .themes import get_theme
         from .widgets import resolve_bg_pixmap
@@ -297,18 +299,21 @@ class _AiSettingsPage(QWidget):
         pix = resolve_bg_pixmap(value) if value else None
         if pix is None:
             self.background_crop_btn.setText("无可裁背景")
+            self.background_crop_btn.setEnabled(False)
             return
-        initial = self._bg_crops.get(value)
+        _unset = object()
+        initial = self._bg_crop_edits.get(value, _unset)
+        if initial is _unset:  # 读打开时的最新配置，不用构造期快照
+            initial = (self.config.get('chat_bg_crops', {}) or {}).get(value)
         if initial is None and value.startswith("builtin:"):
             theme = get_theme(value[8:])
             initial = tuple(theme["focus"]) if theme else None
         dlg = CropDialog(pix, initial, self)
-        if dlg.exec():
-            reset, box = dlg.result_box()
-            if reset:
-                self._bg_crops.pop(value, None)
-            else:
-                self._bg_crops[value] = [round(float(v), 4) for v in box]
+        accepted = dlg.exec()
+        reset, box = dlg.result_box() if accepted else (False, None)
+        dlg.deleteLater()  # 延迟析构：对话框持有整张背景 QPixmap，不随使用次数累积
+        if accepted:
+            self._bg_crop_edits[value] = None if reset else [round(float(v), 4) for v in box]
 
     # ------------------------------------------------------------ API 列表管理
     @staticmethod
@@ -548,7 +553,16 @@ class _AiSettingsPage(QWidget):
         self.config.set("chat_background_fill", self._background_display["classic"]["fill"])
         self.config.set("modern_chat_background_opacity", self._background_display["modern"]["opacity"])
         self.config.set("modern_chat_background_fill", self._background_display["modern"]["fill"])
-        self.config.set("chat_bg_crops", self._bg_crops)
+        if self._bg_crop_edits:
+            # save() 跑在 config.reload() 之后，这里读到的是磁盘最新：只覆盖
+            # 本窗口编辑/重置过的键，外部对其他背景的即存改动原样保留。
+            crops = dict(self.config.get("chat_bg_crops", {}) or {})
+            for key, box in self._bg_crop_edits.items():
+                if box is None:
+                    crops.pop(key, None)
+                else:
+                    crops[key] = box
+            self.config.set("chat_bg_crops", crops)
         self.config.set("modern_chat_card_opacity", self.message_card_opacity.value())
         self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
         self.config.set_chat_settings(self.settings)

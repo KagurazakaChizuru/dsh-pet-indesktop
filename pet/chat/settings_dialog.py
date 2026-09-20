@@ -315,8 +315,10 @@ class ChatSettingsDialog(QDialog):
             t = get_theme(value[8:])
             initial = tuple(t['focus']) if t else None
         dlg = CropDialog(pix, initial, self)
-        if dlg.exec():
-            reset, box = dlg.result_box()
+        accepted = dlg.exec()
+        reset, box = dlg.result_box() if accepted else (False, None)
+        dlg.deleteLater()  # exec 后即释放：对话框持有整张背景 QPixmap，不随使用次数累积
+        if accepted:
             if reset:
                 crops.pop(value, None)
             else:

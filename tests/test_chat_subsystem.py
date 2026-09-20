@@ -2628,7 +2628,7 @@ def _make_ai_page(tmp_path, monkeypatch, *, modern_bg="builtin:whale"):
 
 
 def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
-    """主设置窗的裁切取景：编辑器结果进缓冲，保存时才写 config（取消不落地）。"""
+    """主设置窗的裁切取景：编辑器结果记编辑集，save() 时按键合并写 config。"""
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
     import pet.chat.crop_dialog as crop_mod
 
@@ -2643,9 +2643,12 @@ def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
         def result_box(self):
             return False, (0.1, 0.2, 0.5, 0.6)
 
+        def deleteLater(self):
+            pass
+
     monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
     page._crop_background()
-    assert page._bg_crops["builtin:whale"] == [0.1, 0.2, 0.5, 0.6]
+    assert page._bg_crop_edits["builtin:whale"] == [0.1, 0.2, 0.5, 0.6]
     # 未保存前不落盘
     from pet.config import Config
     assert Config(tmp_path).get("chat_bg_crops", {}) == {}
@@ -2657,7 +2660,7 @@ def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
 
 def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
-    page._bg_crops["builtin:whale"] = [0.1, 0.2, 0.5, 0.6]
+    cfg.set("chat_bg_crops", {"builtin:whale": [0.1, 0.2, 0.5, 0.6]})  # 已有自定义裁切（编辑器打开时读最新配置）
     import pet.chat.crop_dialog as crop_mod
 
     class FakeDlg:
@@ -2671,9 +2674,12 @@ def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
         def result_box(self):
             return True, None
 
+        def deleteLater(self):
+            pass
+
     monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
     page._crop_background()
-    assert "builtin:whale" not in page._bg_crops
+    assert page._bg_crop_edits["builtin:whale"] is None  # None = 重置删除标记
     page.close()
     app.processEvents()
 
@@ -2692,6 +2698,9 @@ def test_crop_entry_initial_box_falls_back_to_theme_focus(tmp_path, monkeypatch)
 
         def exec(self):
             return False
+
+        def deleteLater(self):
+            pass
 
     monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
     page._crop_background()
@@ -2716,10 +2725,144 @@ def test_crop_row_visibility_follows_background(tmp_path, monkeypatch):
     """裁切取景行：选了背景才可见，纯色隐藏。"""
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
     rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
-    row = page._background_crop_row
+    row = page._background_detail_rows[-1]  # 裁切取景是细节行组最后一行
     page.background_select.setCurrentData("builtin:whale")
     assert row.isVisibleTo(page) or not row.isHidden()
     page.background_select.setCurrentData("")
     assert row.isHidden()
+    page.close()
+    app.processEvents()
+
+
+def test_crop_entry_preserves_external_edits_when_untouched(tmp_path, monkeypatch):
+    """用户没动裁切编辑器时，save() 不得把构造期快照写回覆盖外部改动。
+
+    老聊天设置对话框是即存语义：主设置窗打开期间它改了 chat_bg_crops，
+    主设置窗保存时若无条件回写构造期快照，外部改动被静默回滚。
+    """
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    cfg.set("chat_bg_crops", {"builtin:whale": [0.9, 0.0, 0.1, 1.0]})  # 外部即存改动
+    page.save()
+    assert cfg.get("chat_bg_crops") == {"builtin:whale": [0.9, 0.0, 0.1, 1.0]}
+    page.close()
+    app.processEvents()
+
+
+def test_crop_dialog_released_after_use(tmp_path, monkeypatch):
+    """裁切编辑器用完必须释放（deleteLater），不随使用次数累积泄漏。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    released = []
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            pass
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            released.append(1)
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert released == [1], "CropDialog 使用后必须 deleteLater"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_persists_through_disk_roundtrip(tmp_path, monkeypatch):
+    """保存链路落到磁盘：page.save() → config.save() → 新 Config 可读回。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            pass
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.3, 0.3, 0.4, 0.4)
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    page.save()
+    cfg.save()
+    from pet.config import Config
+    assert Config(tmp_path).get("chat_bg_crops", {})["builtin:whale"] == [0.3, 0.3, 0.4, 0.4]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_button_disabled_state_for_no_background(tmp_path, monkeypatch):
+    """纯色无可裁背景：按钮进入禁用态（不是仍可点的文案提示）。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch, modern_bg="")
+    page._crop_background()
+    assert page.background_crop_btn.isEnabled() is False
+    page.close()
+    app.processEvents()
+
+
+def test_crop_save_merges_only_edited_keys(tmp_path, monkeypatch):
+    """动过编辑器后，save() 只覆盖编辑/重置过的键，不得整字典回写快照。
+
+    主设置窗保存前先 config.reload()（磁盘最新），若整字典回写构造期
+    快照，打开期间外部对**其他背景**的即存裁切改动会被静默回滚。
+    """
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            pass
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.1, 0.1, 0.5, 0.5)
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()  # 编辑了 builtin:whale
+    # 外部（老聊天设置，即存）在主设置窗打开期间改了另一个背景的裁切
+    cfg.set("chat_bg_crops", {"builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    page.save()
+    crops = cfg.get("chat_bg_crops", {})
+    assert crops["builtin:furina"] == [0.9, 0.0, 0.1, 1.0], "外部对其他背景的改动必须保留"
+    assert crops["builtin:whale"] == [0.1, 0.1, 0.5, 0.5], "本窗口编辑的键必须生效"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_editor_reads_fresh_crops_at_open(tmp_path, monkeypatch):
+    """编辑器初始框读打开时的最新配置，不是构造期快照。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+    cfg.set("chat_bg_crops", {"builtin:whale": [0.7, 0.0, 0.3, 1.0]})  # 构造后外部写入
+
+    seen = {}
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent):
+            seen["initial"] = initial
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert list(seen["initial"]) == [0.7, 0.0, 0.3, 1.0]
     page.close()
     app.processEvents()
