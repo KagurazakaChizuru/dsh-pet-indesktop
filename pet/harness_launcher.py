@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import socket
 import struct
 import subprocess
@@ -597,11 +598,18 @@ def describe_harness_process(port: int = DEFAULT_PORT) -> HarnessProcess | None:
 
 
 def _terminate_process_tree(pid: int) -> None:
-    """终止进程及其子进程树（Windows taskkill /T /F；POSIX 先 TERM 后 KILL）。
+    """终止进程及其子进程树（Windows taskkill /T /F；POSIX 按进程组先 TERM 后 KILL）。
 
     与 child_pet_cleanup._terminate_pet_process 同款：Windows 上的 .cmd shim
     会让 dsh 以「cmd → node」两层形态存在，/T 才能收干净；CREATE_NO_WINDOW
     防止 GUI 进程里凭空弹一个空白控制台窗口（实机反馈）。
+    POSIX 上 dsh 常为「npx → node」两层：只 kill 顶层 pid 会留下 node 子进程，
+    故按进程组终止（桌宠自拉实例 spawn 时 start_new_session=True，进程组即
+    dsh 自己的组）。**仅当目标是自己进程组的组长（pgid == pid）才 killpg**：
+    交互 shell 的前台作业与 start_new_session 的子进程都是组长；而脚本里
+    `dsh web &` 这类后台启动的 dsh 属于脚本的组，killpg 会把整个脚本组连带
+    终止——该场景回退单 pid kill（爆炸半径宁小勿大）。目标组恰为本进程组
+    时同样回退单 pid kill，绝不向自己的组发信号。
     """
     if os.name == "nt":
         result = subprocess.run(
@@ -616,20 +624,30 @@ def _terminate_process_tree(pid: int) -> None:
                 (result.stdout or "").strip(), (result.stderr or "").strip(),
             )
         return
-    import signal
 
-    try:
-        os.kill(int(pid), signal.SIGTERM)
-    except OSError:
-        return
+    def _group_kill(sig) -> None:
+        try:
+            pgid = os.getpgid(int(pid))
+        except (OSError, ProcessLookupError):
+            pgid = None
+        # 只杀目标自己领导的组；本进程组与非目标领导的组都回退单 pid
+        if pgid is not None and pgid == int(pid) and pgid != os.getpgrp():
+            try:
+                os.killpg(pgid, sig)
+                return
+            except (OSError, ProcessLookupError):
+                pass
+        try:
+            os.kill(int(pid), sig)
+        except OSError:
+            pass
+
+    _group_kill(signal.SIGTERM)
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and is_running_pid(pid):
         time.sleep(0.05)
     if is_running_pid(pid):
-        try:
-            os.kill(int(pid), signal.SIGKILL)
-        except OSError:
-            pass
+        _group_kill(signal.SIGKILL)
 
 
 def is_running_pid(pid: int) -> bool:

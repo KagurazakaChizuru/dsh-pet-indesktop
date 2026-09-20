@@ -612,3 +612,80 @@ def test_launch_harness_gui_confirm_raises_does_not_hang_worker(monkeypatch):
     assert "parent destroyed" in criticals[0]
     assert stops == [], "确认框异常时不得执行停止"
     del app
+# ------------------------------------------------------------ POSIX 进程树终止（复审 P1）
+
+# 本文件 autouse fixture 把 hl._terminate_process_tree 打桩成 no-op（破坏性边界），
+# 这里在导入期（fixture 应用前）存下真函数，本组用例显式换回去。
+_REAL_TERMINATE_PROCESS_TREE = hl._terminate_process_tree
+
+def _patch_posix(monkeypatch, calls, *, pgid=4321, own_pgrp=9999):
+    """命名空间级假 os/signal：只换本函数用到的成员，不动全局 os.name
+    （pathlib 等会按 os.name 实例化路径类）；Windows 的 signal 没有
+    SIGKILL，钉一个带齐常量的假 signal（sig 用 15/9 断言）。"""
+    import types
+
+    monkeypatch.setattr(hl, "os", types.SimpleNamespace(
+        name="posix",
+        getpgid=lambda pid: pgid,
+        getpgrp=lambda: own_pgrp,
+        killpg=lambda pg, sig: calls.append(("pg", pg, sig)),
+        kill=lambda pid, sig: calls.append(("kill", pid, sig)),
+    ))
+    monkeypatch.setattr(hl, "signal", types.SimpleNamespace(SIGTERM=15, SIGKILL=9))
+
+
+def test_terminate_process_tree_posix_kills_group_not_single_pid(monkeypatch):
+    """POSIX 分支必须按进程组终止：dsh 常以 npx→node 两层存在，只 kill 顶层
+    pid 会留下 node 子进程（docstring 声称'进程树'）。桌宠自拉实例 spawn 时
+    start_new_session=True，进程组即 dsh 自己的组，killpg 安全。"""
+    calls: list[tuple] = []
+    _patch_posix(monkeypatch, calls, pgid=1234)  # 目标是自己的组长
+    monkeypatch.setattr(hl, "_terminate_process_tree", _REAL_TERMINATE_PROCESS_TREE)
+    monkeypatch.setattr(hl, "is_running_pid", lambda pid: False)
+
+    hl._terminate_process_tree(1234)
+
+    assert ("pg", 1234, 15) in calls
+    assert not any(c[0] == "kill" for c in calls), "目标是组长时应按组终止"
+
+
+def test_terminate_process_tree_posix_never_signals_own_group(monkeypatch):
+    """目标进程的组恰好是本进程组时（异常配置），必须回退单 pid kill——
+    killpg 打自己的组会把桌宠一起带走。"""
+    calls: list[tuple] = []
+    _patch_posix(monkeypatch, calls, pgid=1234, own_pgrp=1234)  # 目标组即本进程组
+    monkeypatch.setattr(hl, "_terminate_process_tree", _REAL_TERMINATE_PROCESS_TREE)
+    monkeypatch.setattr(hl, "is_running_pid", lambda pid: False)
+
+    hl._terminate_process_tree(1234)
+
+    assert not any(c[0] == "pg" for c in calls), "不得对本进程组 killpg"
+    assert ("kill", 1234, 15) in calls
+
+
+def test_terminate_process_tree_posix_escalates_to_group_kill(monkeypatch):
+    """TERM 后仍存活：对进程组补 KILL（不是只对单 pid）。"""
+    calls: list[tuple] = []
+    _patch_posix(monkeypatch, calls, pgid=1234)
+    monkeypatch.setattr(hl, "_terminate_process_tree", _REAL_TERMINATE_PROCESS_TREE)
+    seq = iter([True, False, True])  # 轮询期内仍存活 → 退出轮询后补 KILL
+    monkeypatch.setattr(hl, "is_running_pid", lambda pid: next(seq))
+
+    hl._terminate_process_tree(1234)
+
+    assert ("pg", 1234, 15) in calls
+    assert ("pg", 1234, 9) in calls
+
+
+def test_terminate_process_tree_posix_no_killpg_when_not_group_leader(monkeypatch):
+    """目标不是自己组的组长（脚本里 `dsh web &` 后台启动，组属于脚本）：
+    回退单 pid kill——killpg 会把整个脚本组连带终止，爆炸半径宁小勿大。"""
+    calls: list[tuple] = []
+    _patch_posix(monkeypatch, calls, pgid=4321)  # 4321 != pid(1234)：目标非组长
+    monkeypatch.setattr(hl, "_terminate_process_tree", _REAL_TERMINATE_PROCESS_TREE)
+    monkeypatch.setattr(hl, "is_running_pid", lambda pid: False)
+
+    hl._terminate_process_tree(1234)
+
+    assert not any(c[0] == "pg" for c in calls), "目标非组长时不得 killpg"
+    assert ("kill", 1234, 15) in calls

@@ -3751,7 +3751,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 menu.deleteLater()
                 return
             if any(not pool.waitForDone(0) for pool in pools):
-                QTimer.singleShot(50, lambda: delete_when_idle(_attempts + 1))
+                # 绑定 menu 为 context：窗口/菜单在轮询途中销毁时定时器随
+                # context 失效被丢弃，否则回调会对已删 C++ 对象 deleteLater
+                #（GUI 线程 RuntimeError）。
+                QTimer.singleShot(50, menu, lambda: delete_when_idle(_attempts + 1))
                 return
             menu.deleteLater()
 

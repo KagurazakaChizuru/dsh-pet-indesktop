@@ -400,3 +400,24 @@ def test_hidden_host_without_hook_keeps_dropping():
     show_alert(host, "随便一条提醒", duration_ms=6000, sticky=False)
 
     assert host._alert_queue == deque()
+
+
+def test_unsuppress_reshows_surviving_nonsticky_current(win):
+    """存活且非 sticky 的 current（task_complete/turn/balance 等）在抑制解除后
+    必须重挂：否则 _alert_current 永不清除，pump_alerts 永久 early-return，
+    后续提醒全部被吞（队列死锁）。"""
+    win.show_alert("任务完成", duration_ms=6000, sticky=False, alert_type="task_complete")
+    assert win._alert_current is not None
+    shown_before = len(win._speech_bubble.shown)
+    win.set_bubble_suppressed(True)   # 抑制：气泡隐藏（hidden 链路被抑制守卫截断）
+    win.set_bubble_suppressed(False)  # 解除：存活提醒应按原时长重挂
+    assert len(win._speech_bubble.shown) > shown_before, \
+        "抑制解除后必须重挂存活的非 sticky 提醒（否则队列死锁）"
+    assert win._speech_bubble.shown[-1]["text"] == "任务完成"
+    assert win._speech_bubble.shown[-1]["duration_ms"] == 6000
+    assert win._alert_current is not None  # 由气泡超时 → hidden 链路正常清除
+    # 队列推进闭环：气泡超时隐藏后清除 current 并弹出下一条
+    win.show_alert("下一条", duration_ms=6000, sticky=False)
+    win._on_speech_bubble_hidden()
+    assert win._alert_current is not None
+    assert win._alert_current["text"] == "下一条"

@@ -46,14 +46,25 @@ def set_bubble_suppressed(host, suppressed: bool) -> None:
         if current is not None and alert_survives_suppression(
                 current.get("alertType", ""), sticky=bool(current.get("sticky")),
                 buttons=current.get("buttons"), priority=int(current.get("priority", 3))):
+            bubble = getattr(host, "_speech_bubble", None)
             if current.get("sticky"):
-                bubble = getattr(host, "_speech_bubble", None)
                 if bubble is not None:
                     bubble.show_text(
                         current["text"], window_placement.bubble_anchor_rect(host), 0,
                         pet_scale=host.scale, subtitle=current.get("subtitle", ""),
                         sticky=True, buttons=current.get("buttons"),
                     )
+            elif bubble is not None:
+                # 存活但非 sticky 的 current（task_complete/turn/balance 等）：
+                # 抑制期被隐藏且 hidden 链路被抑制守卫截断——不重挂则
+                # _alert_current 永不清除，pump_alerts 永久 early-return，
+                # 后续提醒全部被吞（队列死锁）。按原时长重挂，超时后走正常
+                # hidden → 清除 → 推进闭环。
+                bubble.show_text(
+                    current["text"], window_placement.bubble_anchor_rect(host),
+                    current.get("duration_ms") or 6000,
+                    pet_scale=host.scale, subtitle=current.get("subtitle", ""),
+                )
         elif current is None:
             pump = getattr(host, "_pump_alerts", None)
             if callable(pump):
