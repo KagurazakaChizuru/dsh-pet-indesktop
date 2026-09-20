@@ -31,11 +31,8 @@ from ..settings_widgets import (
     SettingRow,
     SettingsCard,
 )
+from .themes import CHAT_UI_STYLE_LABELS, theme_names
 from .utils import _safe_emit
-
-# 对话窗口风格标识 → 展示名：裁切行标签与编辑器标题必须和当前风格对齐，
-# 否则用户分不清裁的到底是哪套风格的背景。
-_CHAT_UI_STYLE_LABELS = {"modern": "肥鱼版 DeepSeek", "classic": "肥鱼牌小手机"}
 
 
 class _AiSettingsPage(QWidget):
@@ -94,8 +91,9 @@ class _AiSettingsPage(QWidget):
         self._system_notify_dirty = False
         self.system_notify_check.setChecked(bool(config.get("system_notifications_enabled", True)))
         self.chat_ui_style = ModernSelect(self, width=190)
-        self.chat_ui_style.addItem("肥鱼版 DeepSeek", "modern")
-        self.chat_ui_style.addItem("肥鱼牌小手机", "classic")
+        # 展示名与顺序（modern 在前 classic 在后）都取自 themes 的单一来源
+        for style_id, style_label in CHAT_UI_STYLE_LABELS.items():
+            self.chat_ui_style.addItem(style_label, style_id)
         self.chat_ui_style.setCurrentData(str(config.get("chat_ui_style", "modern")))
         self.vision_same = ToggleSwitch()
         self.vision_same.setChecked(bool(provider.vision_same_as_chat))
@@ -103,7 +101,6 @@ class _AiSettingsPage(QWidget):
         self.vision_url = _line_edit(provider.vision_base_url)
         self.vision_key = _line_edit(password=True)
 
-        from .themes import theme_names
         self._background_themes = list(theme_names())
         self._background_values = {
             "classic": str(config.get("chat_background", "") or ""),
@@ -313,7 +310,7 @@ class _AiSettingsPage(QWidget):
 
     def _background_style_label(self) -> str:
         """当前对话窗口风格的展示名（裁切行标签、编辑器标题共用）。"""
-        return _CHAT_UI_STYLE_LABELS.get(self._background_style, self._background_style)
+        return CHAT_UI_STYLE_LABELS.get(self._background_style, self._background_style)
 
     def _background_fill_mode(self) -> str:
         return str(self.background_fill.currentData() or "cover")

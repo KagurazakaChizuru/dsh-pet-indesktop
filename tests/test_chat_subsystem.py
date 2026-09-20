@@ -2784,16 +2784,22 @@ def test_crop_row_visibility_follows_background(tmp_path, monkeypatch):
 
 
 def test_crop_row_label_refreshes_with_style(tmp_path, monkeypatch):
-    """裁切行标签随对话窗口风格刷新，填充方式提示说明只有填充裁剪支持取景。"""
+    """裁切行标签随对话窗口风格刷新，accessibleName 同步；填充方式提示说明只有填充裁剪支持取景。"""
     app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
     rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
     row = page._background_crop_row
     assert row.label.text() == "裁切取景（肥鱼版 DeepSeek）"
+    assert "肥鱼版 DeepSeek" in row.control.accessibleName()
+    assert row.control.accessibleName() == row.label.text(), "屏幕阅读器读到的风格必须与标签一致"
     assert "仅「填充裁剪」支持自定义取景" in page._background_detail_rows[1].hint_label.text()
     page.chat_ui_style.setCurrentData("classic")  # 风格切换即刷新，不用重开窗口
     assert row.label.text() == "裁切取景（肥鱼牌小手机）"
+    assert "肥鱼牌小手机" in row.control.accessibleName()
+    assert row.control.accessibleName() == row.label.text()
     page.chat_ui_style.setCurrentData("modern")
     assert row.label.text() == "裁切取景（肥鱼版 DeepSeek）"
+    assert "肥鱼版 DeepSeek" in row.control.accessibleName()
+    assert row.control.accessibleName() == row.label.text()
     assert row is rows[-2]  # 裁切取景是细节行组最后一行
     page.close()
     app.processEvents()
@@ -2815,6 +2821,38 @@ def test_crop_row_hidden_when_fill_not_cover(tmp_path, monkeypatch):
     assert row is rows[-2]
     page.close()
     app.processEvents()
+
+
+def test_crop_row_visibility_reevaluated_on_style_switch(tmp_path):
+    """切换对话窗口风格后按新风格的 fill 重估裁切行：另一风格 contain 时隐藏，切回 cover 复现。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("modern_chat_background", "builtin:whale")
+    cfg.set("modern_chat_background_fill", "cover")
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("chat_background_fill", "contain")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_crop_row
+    try:
+        assert not row.isHidden(), "现代风格 fill=cover：裁切行可见"
+        page.chat_ui_style.setCurrentData("classic")  # 走到经典风格，其 fill=contain
+        assert page._background_style == "classic"
+        assert page.background_fill.currentData() == "contain"
+        assert row.isHidden(), "切风格后必须按新风格的 fill 重估（contain 隐藏）"
+        page.chat_ui_style.setCurrentData("modern")
+        assert page.background_fill.currentData() == "cover"
+        assert not row.isHidden(), "切回 cover 风格必须复现裁切行"
+        assert row is rows[-2]
+    finally:
+        page.close()
+        app.processEvents()
 
 
 def test_crop_editor_receives_current_style_name(tmp_path, monkeypatch):
