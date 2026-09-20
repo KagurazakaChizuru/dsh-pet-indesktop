@@ -154,7 +154,8 @@ def theme_names() -> list[tuple[str, str]]:
 # 顺序即下拉框顺序（modern 在前，classic 在后）。
 CHAT_UI_STYLE_LABELS: dict[str, str] = {'modern': '肥鱼版 DeepSeek', 'classic': '肥鱼牌小手机'}
 
-# 对话窗口风格 → 裁切选区纵横比（宽/高），与各风格窗口默认尺寸同源：
+# 对话窗口风格 → 裁切选区纵横比（宽/高），按各风格窗口默认尺寸取值（窗口可缩放，
+# 渲染端 cover 兜底）：
 # modern 现代窗默认 960x700（pet/chat/widgets.py:792），
 # classic 经典窗默认 430x780（pet/chat/legacy_widgets.py:262）。
 # 裁切编辑器据此选默认选区，保证选区形状与窗口里看到的取景一致。

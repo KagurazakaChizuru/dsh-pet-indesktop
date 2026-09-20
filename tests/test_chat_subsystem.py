@@ -2906,6 +2906,14 @@ def test_crop_dialog_title_carries_style_name():
         app.processEvents()
 
 
+def test_chat_ui_view_aspect_table_matches_window_defaults():
+    """比例表锚点：数值必须等于各风格窗口默认尺寸比，表值被改必红。"""
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    assert CHAT_UI_VIEW_ASPECT["modern"] == 960.0 / 700.0
+    assert CHAT_UI_VIEW_ASPECT["classic"] == 430.0 / 780.0
+
+
 def test_clamp_box_uses_passed_aspect():
     """clamp_box 的保比由传入 aspect 决定；缺省退回经典窗比例（430/780）。"""
     from pet.chat.crop_dialog import clamp_box
@@ -2922,6 +2930,69 @@ def test_clamp_box_uses_passed_aspect():
     assert clamp_box(0.35, 0.2, 0.4, 1.0) == clamp_box(
         0.35, 0.2, 0.4, 1.0, CHAT_UI_VIEW_ASPECT["classic"]
     )
+
+
+def test_clamp_box_falls_back_to_view_aspect_when_aspect_not_positive():
+    """aspect 非正数（0/负）时回退缺省比例，不得除零或产出负尺寸。"""
+    from pet.chat.crop_dialog import VIEW_ASPECT, clamp_box
+
+    expected = clamp_box(0.1, 0.2, 0.5, 1.0, VIEW_ASPECT)
+    assert clamp_box(0.1, 0.2, 0.5, 1.0, 0.0) == expected
+    assert clamp_box(0.1, 0.2, 0.5, 1.0, -VIEW_ASPECT) == expected
+
+
+def test_crop_dialog_normalizes_existing_box_to_view_aspect():
+    """既有框（另一风格存下的横版框）在当前风格打开时被归一到当前比例。"""
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.crop_dialog import CropDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    app = QApplication.instance() or QApplication([])
+    pix = QPixmap(400, 400)
+    stale = (0.05, 0.3, 0.9, 0.6562)  # modern 横版默认框，像素比例 ≈ 1.371
+    dlg = CropDialog(pix, stale, None, "肥鱼牌小手机", CHAT_UI_VIEW_ASPECT["classic"])
+    try:
+        x, y, w, h = dlg.canvas.box()
+        assert (w * pix.width()) / (h * pix.height()) == pytest.approx(
+            CHAT_UI_VIEW_ASPECT["classic"], rel=1e-9
+        )
+        assert (x, y, w, h) != stale
+        assert x >= 0.0 and y >= 0.0 and x + w <= 1.0 and y + h <= 1.0
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
+    # 已是当前比例的框再开一次保持不变（归一幂等）
+    same = (0.2244, 0.0, CHAT_UI_VIEW_ASPECT["classic"], 1.0)
+    again = CropDialog(pix, same, None, "", CHAT_UI_VIEW_ASPECT["classic"])
+    try:
+        assert again.canvas.box() == pytest.approx(same)
+    finally:
+        again.deleteLater()
+        app.processEvents()
+
+
+def test_crop_dialog_default_box_is_vertically_centered():
+    """默认框竖向居中（clamp 之后按最终 h 取 (1-h)/2），水平居中保持。"""
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.crop_dialog import CropDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    app = QApplication.instance() or QApplication([])
+    pix = QPixmap(400, 400)  # 1:1 底图 + modern：默认框不满高，居中可观测
+    dlg = CropDialog(pix, None, None, "肥鱼版 DeepSeek", CHAT_UI_VIEW_ASPECT["modern"])
+    try:
+        x, y, w, h = dlg.canvas.box()
+        assert h < 1.0
+        assert y == pytest.approx((1 - h) / 2)
+        assert y > 0.0
+        assert x == pytest.approx((1 - w) / 2)
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
 
 
 @pytest.mark.parametrize(
