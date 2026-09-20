@@ -77,7 +77,7 @@ D:\dsh-pet\
 │   ├── speech_bubble_text.py     # 气泡分页/定位纯函数（272 行）
 │   ├── voice_chime.py            # ★ 语音报时纯逻辑层（459 行，零 Qt / 零 edge_tts）
 │   ├── voice_chime_service.py    # ★ 语音报时服务层（479 行，tick + 合成 + 播放）
-│   ├── voice_chime_settings.py   # ★ 语音报时设置页（245 行）
+│   ├── voice_chime_settings.py   # ★ 语音报时设置页（234 行）
 │   ├── voice_chime_quotes.py     # ★ 台词/歌词纯数据库（96 行，中英各 40 条）
 │   ├── context_menus\            # 右键菜单（registry.py 动作注册 + legacy/modern/fun_entry）
 │   ├── menu_templates\           # 菜单布局 JSON（modern-default-v1.json 为默认模板）
@@ -285,7 +285,7 @@ modern_settings_dialog.py
 |---|---|---|---|
 | `pet/voice_chime.py` | 459 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、edge 参数与缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
 | `pet/voice_chime_service.py` | 479 | 服务 | 20s tick、预合成、`edge-tts` 后台合成、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪、降级 |
-| `pet/voice_chime_settings.py` | 245 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config` |
+| `pet/voice_chime_settings.py` | 234 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config` |
 | `pet/voice_chime_quotes.py` | 96 | 数据 | 中英台词/歌词库各 40 条（`CHINESE_QUOTES` / `ENGLISH_QUOTES`），纯数据零依赖 |
 
 ### 5.1 六种调度与「槽位幂等」
