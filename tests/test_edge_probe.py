@@ -324,7 +324,9 @@ def test_collision_throw_settle_off_edge_does_not_start_countdown():
 class DeltaWin(FakeWin):
     """带「稳定身体框 + 贴边绘制偏移」的窗口桩，复现 #137 之后的真实坐标关系。
 
-    - 窗口局部坐标（可见区/身体框）**不含**绘制偏移；
+    - character_local_region() / _frame_draw_rect() 返回**含绘制偏移**的窗口局部
+      矩形（与真实 _sync_mask / _content_frame_rect 一致：mask 由按偏移绘制的帧
+      生成，贴边时把身体在窗口内整体平移了一个 delta）；
     - 虚拟位置 = 实际位置 + 绘制偏移；移动时按身体框钳进可用区（同
       window_placement.move_window_towards 的口径）。
     """
@@ -334,18 +336,20 @@ class DeltaWin(FakeWin):
         self._w = 640
         self._h = 390
         self._body = QRect(212, 90, 216, 270)   # 画布留白：左 212 / 右 212
-        self._vis = QRect(264, 124, 212, 266)   # 可见像素（窗口局部，不含偏移）
+        self._vis = QRect(264, 124, 212, 266)   # 可见像素（窗口内容坐标，不含偏移）
         self._draw_delta = QPoint(0, 0)
 
     def _stable_body_local_rect(self):
         return QRect(self._body)
 
     def character_local_region(self):
-        return QRect(self._vis)
+        # 真实 _mask_bounds 是「帧按含偏移的绘制矩形渲染」后的可见像素包围盒：
+        # 贴边时整体平移了一个 delta（issue #146 根因口径）。
+        return QRect(self._vis).translated(self._draw_delta)
 
     def _frame_draw_rect(self):
-        # 与 _vis 同系：不含绘制偏移
-        return QRect(0, 0, self._w, self._h)
+        # 真实 _content_frame_rect 的 x/y 起点就是 delta（与 mask 同系，含偏移）。
+        return QRect(self._draw_delta.x(), self._draw_delta.y(), self._w, self._h)
 
     def _virtual_pos(self):
         return QPoint(self._x + self._draw_delta.x(), self._y + self._draw_delta.y())
@@ -368,12 +372,13 @@ def _delta_controller():
 
 
 def test_vis_local_is_delta_free_even_right_after_a_big_draw_offset():
-    """入场时可见区必须与「窗口内容坐标」同系：不得再叠加一次绘制偏移。
+    """入场时可见区必须换算到虚拟窗口坐标（反平移 delta），不得把偏移带进分母框。
 
-    回归背景（用户反馈「探头按框的区域来、几乎整只露在屏外」）：入场发生在
-    拖到边缘松手那一刻，此时 _draw_delta 已经变成约 -212，而 _mask_bounds 还是
-    上一个偏移算出的值；旧实现再 translate(delta) 一次，露出量的分母框整体偏了
-    一整个画布留白，探头落点算到屏幕另一侧。
+    回归背景（issue #146「回弹」）：character_local_region() 返回的 _mask_bounds
+    由「按含偏移的绘制矩形渲染的帧」生成，贴边时把身体在窗口内整体平移了一个
+    delta（实测 scale=1.0 贴左缘 delta=-212，mask 左缘从 264 变成 52）；直接当
+    分母框用，入场第一帧就把 delta 重算平、角色跳回修复前位置。旧实现「不平移」
+    与「再平移 delta」都错：前者把 delta 带进分母框，后者多减一整个画布留白。
     """
     _qapp()
     ctrl, times = _delta_controller()
@@ -382,9 +387,41 @@ def test_vis_local_is_delta_free_even_right_after_a_big_draw_offset():
     win._draw_delta = QPoint(-212, 0)  # 贴边后的真实偏移
     ctrl.on_release(was_dragging=True)
     assert ctrl.side == "left"
-    # 分母框必须等于角色可见区本身（不含偏移），不是可见区再平移 delta
-    assert ctrl._vis_local == win.character_local_region()
-    assert ctrl._vis_local.left() == win.character_local_region().left()
+    # 分母框必须等于可见区的虚拟窗口坐标（= 含偏移的 mask 反平移 delta）
+    assert ctrl._vis_local == win.character_local_region().translated(-win._draw_delta)
+    assert ctrl._vis_local == win._vis
+    assert ctrl._vis_local.left() == win._vis.left()
+
+
+def test_entry_pose_does_not_jump_back_from_the_edge():
+    """松手后探头入场第一帧不得把角色推回屏幕内侧（issue #146「回弹」）。
+
+    贴左缘（delta=-212）松手触发探头：入场前角色身体左缘贴住可用区左缘（0）。
+    旧实现把含 delta 的 mask 当分母框时，入场第一帧 x≈0-(1-exposure)*w-mask.left()
+    把 delta 重算成约 -62，身体左缘跳到 +150（= #137 修复前位置）；换算到虚拟
+    坐标后入场第一帧身体左缘应留在边缘一侧（≤ 小正数），不得回弹进屏。
+    """
+    _qapp()
+    ctrl, times = _delta_controller()
+    win = ctrl.win
+
+    def body_left():
+        return win.x() + win._draw_delta.x() + win._stable_body_local_rect().left()
+
+    # 贴左缘：身体框左缘 = 可用区左缘（0），delta=-212
+    win._move_window_towards(-win._stable_body_local_rect().left(), 100)
+    assert win._draw_delta == QPoint(-212, 0)
+    assert body_left() == 0  # 贴边静止
+
+    ctrl.on_release(was_dragging=True)
+    assert ctrl.mode == "ENTERING"
+    times[0] += 0.016  # 第一个过渡帧
+    ctrl._on_timer()
+    # 不得跳回屏幕内侧：修复前该值 ≈ +150（回弹到画布留白处）
+    assert body_left() <= 5, (
+        f"入场第一帧身体左缘={body_left()}，跳回屏幕内侧（修复前 ≈ +150）"
+    )
+    ctrl.cancel(restore=True)
 
 
 def test_probe_body_bounds_allow_the_body_to_leave_the_screen_on_both_sides():
