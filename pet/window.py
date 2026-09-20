@@ -15,10 +15,7 @@
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
 from collections import deque
-import json
 import logging
 import os
 import math
@@ -62,13 +59,8 @@ from PySide6.QtGui import (
 
 from PySide6.QtWidgets import (
     QApplication,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
     QInputDialog,
-    QLineEdit,
     QMenu,
-    QToolTip,
     QWidget,
 )
 
@@ -88,7 +80,6 @@ from .library import MovieLibrary
 from .movement import body_reach, choose_move_direction, inward_facing, move_position_at_frame, quantize_move, wander_target_y
 from .predictive_prewarm import PredictivePrewarm, pick_from_pool, roll_next
 from .report_gates import REPORT_GATE_DEFAULTS
-from . import slot_manager as slot_manager_mod
 from . import window_placement
 from . import window_screen
 from . import window_alerts
@@ -104,23 +95,15 @@ from .click_sound import (
     play_press_sound, play_release_sound,
 )
 from .proactive import effective_proactive_config
-from .updater import QUARK_PAN_URL, REPO_URL
 from .window_optional_services import WindowFeatureGateMixin
 
 from . import platform_win
 from .platform_mac import _keep_macos_tool_window_visible, _mac_set_window_level
 from .platform_win import (
-    GWL_STYLE as GWL_STYLE,
     GWL_EXSTYLE as GWL_EXSTYLE,
-    _WS_CAPTION as _WS_CAPTION,
-    _WS_EX_TOPMOST as _WS_EX_TOPMOST,
-    _WS_EX_TRANSPARENT as _WS_EX_TRANSPARENT,
-    _WinRect as _WinRect,
-    _WinMonitorInfo as _WinMonitorInfo,
     _set_windows_click_through as _set_windows_click_through,
     _set_windows_no_activate as _set_windows_no_activate,
     WindowsPerPixelInputController as WindowsPerPixelInputController,
-    _FS_SKIP_CLASSES as _FS_SKIP_CLASSES,
     _fullscreen_geometry_hit as _fullscreen_geometry_hit,
     _fs_user_busy_state as _fs_user_busy_state,
     _fg_fullscreen_probe as _fg_fullscreen_probe,
@@ -157,7 +140,6 @@ def _resolve_self_talk_image_dir(raw: str) -> str:
 STREAM_CAPTURE_TITLE = 'dsh-pet 桌宠'
 
 IDLE = "IDLE"
-PRESS_CANDIDATE = "PRESS_CANDIDATE"
 DRAGGING = "DRAGGING"
 SLINGSHOT_AIMING = "SLINGSHOT_AIMING"
 THROWN = "THROWN"
@@ -927,9 +909,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         """Compatibility delegation (window_placement.ensure_visible_after_restore)."""
         return window_placement.ensure_visible_after_restore(self, *args, **kwargs)
 
-    def _on_screen_added_restore(self, *args, **kwargs):
-        """Compatibility delegation (window_placement.on_screen_added_restore)."""
-        return window_placement.on_screen_added_restore(self, *args, **kwargs)
     def _apply_scale(self) -> None:
         """按缩放计算窗口尺寸：宽度 220×scale，高度 (124+落地偏移)×scale。"""
         self._w = max(1, int(round(catalog.CANVAS_W * self.scale)))
@@ -1055,10 +1034,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         """Compatibility wrapper; external patches remain effective."""
         return window_placement.pid_alive(pid)
 
-    def _runtime_marker_versioned(self) -> bool:
-        """Compatibility wrapper for the runtime-marker naming policy."""
-        return window_placement.runtime_marker_versioned(self)
-
     def _live_instance_rects(self) -> list[tuple[int, int, int, int]]:
         """Compatibility wrapper for live multi-instance rectangles."""
         return window_placement.live_instance_rects(self, pid_alive_fn=self._pid_alive)
@@ -1168,7 +1143,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         music_timer = getattr(self, "_music_sing_timer", None)
         if getattr(self, "_music_sing_enabled", False) and music_timer is not None and music_timer.isActive():
             QTimer.singleShot(0, self, self._check_music_sing)
-        self._restore_dock_icon_preference()
         self._effects_on_shown()
 
     def hide(self, *, notify: bool = True) -> None:
@@ -1593,17 +1567,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._dock_reactivate_armed = False
         self.show()
 
-
-    def _restore_dock_icon_preference(self) -> None:
-        """macOS：桌宠恢复显示后按用户偏好还原 Dock 图标策略。"""
-        if sys.platform != 'darwin' or not getattr(self, "_dock_icon_forced", False):
-            return
-        self._dock_icon_forced = False
-        try:
-            from .app import _mac_set_dock_icon_visible
-            _mac_set_dock_icon_visible(bool(self.cfg.get('show_dock_icon', True)))
-        except Exception:
-            pass
     def set_no_move(self, on: bool) -> None:
         """切换「不移动」：禁用自动移动；勾选瞬间若正在移动则立即停下回待机。"""
         self.no_move = bool(on)
@@ -2392,7 +2355,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                     trajectory = physics_mod.slingshot_trajectory(vx, vy)
                     painter.setPen(Qt.PenStyle.NoPen)
                     trajectory = self._slingshot_trajectory_preview(
-                        trajectory, anchor, QRect(0, 0, self._w, self._h), self.scale,
+                        trajectory, anchor,
                     )
                     for index, (tx, ty) in enumerate(trajectory):
                         fade = 1.0 - index / max(1, len(trajectory) - 1)
@@ -2940,8 +2903,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
 
     @staticmethod
     def _slingshot_trajectory_preview(
-        trajectory: list[tuple[float, float]], center: QPointF, bounds: QRect,
-        scale: float,
+        trajectory: list[tuple[float, float]], center: QPointF,
     ) -> list[tuple[float, float]]:
         """Translate physical samples from the character edge without distorting the arc."""
         if not trajectory:

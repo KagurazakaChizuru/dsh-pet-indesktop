@@ -238,8 +238,6 @@ def dialogue_params_hint(key: str) -> str:
 class ModernSettingsDialog(QDialog):
     """Settings window matching Modern's sidebar and rounded-card hierarchy."""
 
-    settings_saved = Signal()
-
     def __init__(self, config, parent=None, *, include_ai: bool = True,
                  standalone: bool = False):
         super().__init__(parent)
@@ -1459,10 +1457,6 @@ class ModernSettingsDialog(QDialog):
             vol = float(self.agent_sound_volume_spin.value()) / 100.0
             play_sound(target, volume=vol)
 
-    def _import_dialogue_template(self) -> None:
-        """导入默认台词模板（逻辑 host 在 settings_pet_controls）。"""
-        settings_pet_controls._import_dialogue_template(self)
-
     def _import_dialogue_template_json(self) -> None:
         """Import a complete persona template from the inline JSON editor."""
         settings_pet_controls._import_dialogue_template_json(self)
@@ -2057,10 +2051,6 @@ class ModernSettingsDialog(QDialog):
         for control in self.findChildren(ToggleSwitch):
             control.update()
 
-    def _stylesheet(self) -> str:
-        theme = self.menu_theme_select.currentData() if hasattr(self, "menu_theme_select") else "system"
-        return _settings_stylesheet(str(theme or "system"))
-
     def _apply_autostart(self) -> None:
         """应用「开机自启」开关：仅在实际改动时写入系统登录项。
 
@@ -2082,7 +2072,6 @@ class ModernSettingsDialog(QDialog):
             return
         self._saved_via_button = True
         self._apply_autostart()
-        self.settings_saved.emit()
         self.accept()
 
     def _write_config(self) -> bool:

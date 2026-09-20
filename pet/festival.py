@@ -283,14 +283,6 @@ def build_festival_text(day: _dt.date, cfg: dict, index: int = 0) -> str:
     return text
 
 
-def festival_label(day: _dt.date, cfg: dict) -> str:
-    """当日节目的简短标签（供菜单项显示）；无命中时返回空串。"""
-    hits = festivals_on(day, cfg)
-    if not hits:
-        return ""
-    return "、".join(festival.name for festival in hits)
-
-
 def reminder_slot(now: _dt.datetime, cfg: dict) -> str:
     """到点提醒的幂等槽位；不该提醒时返回空串。
 

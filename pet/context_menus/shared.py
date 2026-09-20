@@ -10,7 +10,7 @@ import time
 
 import shiboken6
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QActionGroup, QDesktopServices, QIcon, QPixmap
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QMenu
@@ -19,7 +19,7 @@ from .. import autostart as autostart_mod
 from .. import catalog
 from ..harness_launcher import launch_harness_gui
 from ..report_gates import REPORT_GATE_DEFAULTS
-from ..updater import QUARK_PAN_URL, REPO_URL
+from ..updater import QUARK_PAN_URL as QUARK_PAN_URL, REPO_URL as REPO_URL
 from .icons import fitted_pet_pixmap_icon, pet_avatar_menu_icon, vector_menu_icon
 from .menu_styles.common import inherit_menu_style
 

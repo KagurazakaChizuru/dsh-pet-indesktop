@@ -318,9 +318,6 @@ class DeleteConversationDialog(QDialog):
 class ChatTitleBar(QFrame):
     """独立聊天窗的自绘标题栏。"""
 
-    close_requested = Signal()
-    minimize_requested = Signal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("chat-title-bar")
@@ -1115,7 +1112,6 @@ class ChatWindow(QDialog):
         self.provider_label.setObjectName("provider-label")
         self.provider_label.setMaximumWidth(150)
         self.provider_label.setToolTip(self.settings.active_config.model)
-        self.provider = self.provider_label
         header_status_layout.addWidget(self.provider_label)
         header_status_layout.addStretch(1)
         title_text.addWidget(self.header_status)
@@ -1380,33 +1376,6 @@ class ChatWindow(QDialog):
         if self._bg_theme is not None:
             painter.fillPath(clip, QColor(*chat_themes.scrim_rgba(self._bg_theme)))
         painter.end()
-
-    @staticmethod
-    def _apply_session_palette(widget: QWidget) -> None:
-        """Keep the session selector readable on light and dark host palettes."""
-        palette = widget.palette()
-        dark_text = QColor("#1f2937")
-        disabled_text = QColor("#9ca3af")
-        white = QColor("#ffffff")
-        highlight = QColor("#e7f1ff")
-
-        for group in (
-            QPalette.ColorGroup.Active,
-            QPalette.ColorGroup.Inactive,
-            QPalette.ColorGroup.Disabled,
-        ):
-            text = disabled_text if group == QPalette.ColorGroup.Disabled else dark_text
-            palette.setColor(group, QPalette.ColorRole.WindowText, text)
-            palette.setColor(group, QPalette.ColorRole.Text, text)
-            palette.setColor(group, QPalette.ColorRole.ButtonText, text)
-            palette.setColor(group, QPalette.ColorRole.Base, white)
-            palette.setColor(group, QPalette.ColorRole.Button, white)
-            palette.setColor(group, QPalette.ColorRole.Window, white)
-            palette.setColor(group, QPalette.ColorRole.Highlight, highlight)
-            palette.setColor(group, QPalette.ColorRole.HighlightedText, dark_text)
-
-        widget.setPalette(palette)
-        widget.setAutoFillBackground(True)
 
     def _apply_avatar_style(self, label: QLabel, color: str) -> None:
         label.setStyleSheet(f"background-color: {color}; color: #ffffff; border-radius: {label.width() // 2}px;")

@@ -130,7 +130,7 @@ _RECLAIM_JOIN_TIMEOUT = 0.5
 # 终结点一个短窗口吸收尾差，仍存活者再交给模块级孤儿注册表持续回收。
 # 只在 cleanup() 生效，stop()/sweep 等热路径不动（GUI 阻塞纪律不变）。
 _CLEANUP_RETIRE_GRACE_S = 2.0
-# 定时 sweep（模块级 _reap_orphaned_clips → _reap_retired 消费）对仍存活退役
+# 定时 sweep（孤儿注册表 → _reap_retired 消费）对仍存活退役
 # reader 的 join 时长（秒）。退役 reader 本就 ≤1s 自灭，
 # join 只是加速确认，不该让 GUI 每趟最多垫 0.2s×N（圈末 churn 批量慢死 reader
 # 时 2-3×0.2s ≈ 400-600ms，正是 444-499ms 卡顿簇候选主因之一，F3 下调到 0.05）。
@@ -279,7 +279,7 @@ def _ensure_ffmpeg_exe() -> None:
 # 退役 reader 的回收由「独立生命周期管理器」持有：注册表记录所有
 # 退役池非空的 clip，lazy QTimer 周期回收。状态与回收逻辑收编进
 # `_OrphanClipRegistry`（N2b），模块级 `_register_orphan` /
-# `_unregister_orphan` / `_reap_orphaned_clips` 只是委托到模块底部单例
+# `_unregister_orphan` 只是委托到模块底部单例
 # `_ORPHAN_REGISTRY` 的薄壳，clip 侧调用点与时序零改动。
 #
 # 为什么必须模块级单例持有：若 sweep timer 是 clip 的成员 QTimer，会形成
@@ -385,6 +385,7 @@ class _OrphanClipRegistry:
         with self._lock:
             self._clips.discard(clip)
 
+    # 测试 seam：仅供测试注入，产品侧无调用
     def holders(self) -> "set[WebMClip]":
         """当前被持有追踪的 clip 快照（加锁拷贝；诊断/测试用）。"""
         with self._lock:
@@ -595,11 +596,6 @@ def _ffr_evict(victims) -> None:
                 victim._ffr_evict_token = None
         except Exception:
             pass  # clip 可能正在 cleanup，逐出失败无碍（其清理路径自会释放）
-
-
-def _reap_orphaned_clips() -> None:
-    """模块级回收（薄壳）：委托给 _ORPHAN_REGISTRY.reap()。"""
-    _ORPHAN_REGISTRY.reap()
 
 
 # ------------------------------------------------------------ 内存取证（DSPET_MEM_DEBUG=1）
@@ -894,8 +890,6 @@ else:
 class WebMClip(QObject):
     """与窗口层期望的媒体播放器接口兼容。"""
 
-    available = imageio_ffmpeg is not None
-
     frameChanged = Signal(int)
     finished = Signal()
     errorOccurred = Signal(str)
@@ -939,6 +933,7 @@ class WebMClip(QObject):
         # stop 解除阻塞——两类 Popen 互不相交，锁也互不相交。
         self._ff_proc_lock = threading.Lock()
         # reader 已拉起并登记 ffmpeg 进程（或确定无进程）的信号；每轮 start() 重建。
+        # 测试 seam：仅供测试注入，产品侧无调用
         self._reader_ready = threading.Event()
         # 退役 reader 池（有硬上限）：thread + 其 ffmpeg 进程句柄的记录列表。
         self._retired: list[_Reader] = []

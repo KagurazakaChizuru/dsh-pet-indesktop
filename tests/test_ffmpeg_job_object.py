@@ -56,7 +56,7 @@ argv = [exe, "-v", "error", "-re", "-f", "lavfi", "-i",
 spawn = {spawn}
 proc = spawn(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 sys.stdout.write(json.dumps({{"ffmpeg_pid": proc.pid,
-                              "job_ready": win_job.is_available()}}) + "\n")
+                              "job_ready": win_job._ensure_job() is not None}}) + "\n")
 sys.stdout.flush()
 time.sleep(300)
 '''
@@ -241,7 +241,7 @@ def test_adopt_is_defensive_and_idempotent():
     dead.wait(timeout=30)
     assert win_job.adopt(dead) is False  # 已退出：只降级，不抛
 
-    assert win_job.is_available() is True
+    assert win_job._ensure_job() is not None
     live = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
     try:
         assert win_job.adopt(live) is True

@@ -224,21 +224,6 @@ def _prune_cache(limit: int = CACHE_LIMIT) -> None:
         log.debug("清理歌词缓存失败", exc_info=True)
 
 
-def clear_cache() -> int:
-    """清空歌词缓存，返回删除的条目数（供设置页"清空歌词缓存"按钮）。"""
-    removed = 0
-    try:
-        for path in cache_dir().glob("*.json"):
-            try:
-                path.unlink()
-                removed += 1
-            except OSError:
-                continue
-    except Exception:
-        log.debug("清空歌词缓存失败", exc_info=True)
-    return removed
-
-
 # ---------------------------------------------------------------- 网络
 
 

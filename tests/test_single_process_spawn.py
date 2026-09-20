@@ -81,7 +81,7 @@ class _FakeWindow:
     def remove_runtime_marker(self):
         self.calls.append("marker_del")
         slot_manager_mod.delete_runtime_marker(
-            self.cfg.dir, self.cfg.instance_id, versioned=self._single_process_spawn)
+            self.cfg.dir, self.cfg.instance_id)
 
     def detach_collision_session(self):
         self.calls.append("detach_collision")

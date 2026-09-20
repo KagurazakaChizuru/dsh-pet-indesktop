@@ -54,9 +54,6 @@ def _initial(character_id: str) -> str:
 class ChatTitleBar(QFrame):
     """独立聊天窗的自绘标题栏。"""
 
-    close_requested = Signal()
-    minimize_requested = Signal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("chat-title-bar")
@@ -463,7 +460,6 @@ class ChatWindow(QDialog):
         context_top.addWidget(self.status)
         self.provider_label = QLabel(self.settings.active_config.name)
         self.provider_label.setObjectName("provider-label")
-        self.provider = self.provider_label
         context_top.addWidget(self.provider_label)
         context_top.addStretch(1)
         self.follow_button = QToolButton()

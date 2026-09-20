@@ -40,7 +40,7 @@ from .config import (
 )
 from .context_menus.icons import vector_widget_icon
 from .fun_image_popup import oijingjing_image_path, resolve_fun_asset
-from .persona_phrases import PUBLIC_DIALOGUE_EVENTS, default_phrases, phrase_keys
+from .persona_phrases import PUBLIC_DIALOGUE_EVENTS, phrase_keys
 from .persona_template import build_persona_template
 from .report_gates import REPORT_GATE_DEFAULTS, REPORT_GATE_KEYS
 from .settings_widgets import (
@@ -693,15 +693,6 @@ def _export_dialogue_template(host) -> None:
         "模板已复制到剪贴板：可直接粘贴给 AI 依角色卡改写，"
         "或粘贴回「导入模板」输入框一键导回。",
     )
-
-
-def _import_dialogue_template(host) -> None:
-    """导入默认台词模板：将所有预设台词填充到自定义编辑框。"""
-    defaults = default_phrases()
-    for key, edit in host.dialogue_phrase_edits.items():
-        if key in defaults:
-            edit.setPlainText(defaults[key])
-    QMessageBox.information(host, "导入成功", "已导入全部默认台词模板。")
 
 
 def _import_dialogue_template_json(host) -> None:

@@ -13,8 +13,8 @@
 语速/音调/音量键；同一分钟两者都到点时由报时让位（见 festival_service）。
 
 风格对齐 pet/voice_chime_settings.py 与 pet/exploration_watchdog_settings.py：
-自含 QWidget 页，提供 apply_to_config / refresh_from_config 与 settings_saved
-信号，由 modern_settings_dialog.py 在 automation 域注册并参与 _write_config 保存。
+自含 QWidget 页，提供 apply_to_config，
+由 modern_settings_dialog.py 在 automation 域注册并参与 _write_config 保存。
 
 **本页刻意不提供「试听/立即提醒」按钮**：立即提醒已由右键菜单「今日节日」
 承担，而 modern_settings_dialog.py 的行数预算只剩个位数余量（见该文件顶部
@@ -61,7 +61,6 @@ from .voice_chime import clean_flag
 class FestivalSettingsPage(QWidget):
     """自含节日提醒设置页。"""
 
-    settings_saved = Signal()
     #: 用户点击「立即试听」时发出（无载荷）。回调由本页自行向上解析并调用；
     #: 保留信号是为了让外部（测试/宿主）也能观察到试听动作，与语音报时页对称。
     preview_requested = Signal()
@@ -317,30 +316,3 @@ class FestivalSettingsPage(QWidget):
         self.config.set("festival_reminder_speak", self.speak_check.isChecked())
         self.config.set("festival_custom_quotes_cn", self.custom_cn_edit.toPlainText().strip())
         self.config.set("festival_custom_quotes_west", self.custom_west_edit.toPlainText().strip())
-        self.settings_saved.emit()
-
-    def refresh_from_config(self) -> None:
-        """用当前配置刷新控件（外部取消保存后回滚用）。"""
-        def flag(key: str, default: bool) -> bool:
-            return clean_flag(self.config.get(key, default), default)
-
-        self.enabled_check.setChecked(flag("festival_reminder_enabled", False))
-        self.cn_check.setChecked(flag("festival_reminder_cn", True))
-        self.solar_terms_check.setChecked(flag("festival_reminder_solar_terms", True))
-        self.west_check.setChecked(flag("festival_reminder_west", True))
-        self.mode_select.setCurrentData(
-            clean_mode(self.config.get("festival_reminder_mode", DEFAULT_MODE))
-        )
-        self.count_spin.setValue(
-            clean_count(self.config.get("festival_reminder_count", DEFAULT_COUNT))
-        )
-        self.times_edit.setText(str(self.config.get("festival_reminder_times", DEFAULT_TIMES) or ""))
-        self.quote_check.setChecked(flag("festival_reminder_show_quote", DEFAULT_SHOW_QUOTE))
-        self.speak_check.setChecked(flag("festival_reminder_speak", False))
-        self.custom_cn_edit.setPlainText(
-            str(self.config.get("festival_custom_quotes_cn", "") or "")
-        )
-        self.custom_west_edit.setPlainText(
-            str(self.config.get("festival_custom_quotes_west", "") or "")
-        )
-        self._refresh_mode_controls()

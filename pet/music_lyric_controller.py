@@ -66,20 +66,6 @@ def pick_instrumental_hint(rng=None) -> str:
     return (rng or random).choice(INSTRUMENTAL_HINTS)
 
 
-def compose_bubble_text(title_line: str, lyric: str = "") -> str:
-    """把常驻标题与当前歌词拼成气泡文本。
-
-    歌名固定在第一行长期显示，歌词在下面跟着走；没有歌词时只显示标题。
-    """
-    title_line = str(title_line or "").strip()
-    lyric = str(lyric or "").strip()
-    if not title_line:
-        return lyric
-    if not lyric:
-        return title_line
-    return f"{title_line}\n{lyric}"
-
-
 def split_bubble_text(title_line: str, lyric: str = "") -> tuple[str, str]:
     """拆成 ``(subtitle, text)`` 两个参数喂给气泡。
 

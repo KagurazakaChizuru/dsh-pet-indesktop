@@ -58,9 +58,6 @@ _TIMEOUT_RE = re.compile(
 # 错误相似度阈值（Jaccard bigram 相似度）
 _ERROR_SIMILARITY_THRESHOLD = 0.55
 
-# 焦虑动画关键词映射（从当前角色 acts 池里按语义挑选）
-WORRIED_KEYWORDS = ("焦急", "着急", "气急败坏", "抓狂", "拍打", "敲桌", "烦恼", "抓狂", "焦虑")
-
 # 默认提醒文案
 DEFAULT_STUCK_REMINDER = (
     "主人，{name} 好像卡在环境/网络问题上转圈圈了…… 人工介入可能更快哦。"

@@ -104,19 +104,6 @@ def test_apply_to_config_writes_pattern_keys(app, tmp_path):
         page.deleteLater()
 
 
-def test_refresh_from_config_updates_pattern_controls(app, tmp_path):
-    page = _make_page(tmp_path)
-    try:
-        page.refresh_from_config({"pattern_detect": False, "pattern_w6_control": 8,
-                                  "pattern_macro_w6_action": 2, "pattern_cooldown_seconds": 90})
-        assert page.pattern_enabled_check.isChecked() is False
-        assert page.pattern_w6_control_spin.value() == 8
-        assert page.pattern_macro_w6_action_spin.value() == 2
-        assert page.pattern_cooldown_seconds_spin.value() == 90
-    finally:
-        page.deleteLater()
-
-
 def test_pattern_rows_grouped_under_own_section(app, tmp_path):
     """设置对话框必须把 pattern 行单独成组，不能混进循环/卡住检测组。"""
     from pet.modern_settings_dialog import ModernSettingsDialog

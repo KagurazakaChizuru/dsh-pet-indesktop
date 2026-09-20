@@ -24,7 +24,7 @@ import threading
 import time
 import weakref
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QMovie
@@ -125,7 +125,6 @@ class MovieLibrary(QObject):
         *,
         character_id: str | None = None,
         asset_dir: Path | str | None = None,
-        manifest: Mapping[str, str] | None = None,
         prewarm_policy: str = "balanced",
         prewarm_enabled: bool = True,
     ) -> None:
@@ -138,7 +137,7 @@ class MovieLibrary(QObject):
             self._asset_dir = Path(asset_dir)
         else:
             self._asset_dir = catalog.resolve_character_video_dir(self.character_id)
-        self._manifest = None if manifest is None else dict(manifest)
+        self._manifest = None
         self.manifest = catalog.load_character_manifest(self.character_id, self._asset_dir)
         self.folder_map: dict[str, str] = {}
         self.folder_files: dict[str, list[str]] = {}
@@ -162,6 +161,7 @@ class MovieLibrary(QObject):
         self._interaction_holders = 0
         self._interaction_lock = threading.Lock()
         self._interaction_cond = threading.Condition(self._interaction_lock)
+        # 测试 seam：仅供测试注入，产品侧无调用
         self._interaction_active = threading.Event()  # 观测镜像：set=交互中
         # 预热代次：pause_warm（隐藏/切角色）时自增；在飞的旧代次预热线程
         # 据此放弃，保证旧角色（旧库）的预热不会在交互结束后"复活"。
@@ -518,6 +518,7 @@ class MovieLibrary(QObject):
     @classmethod
     def _shutdown_live_for_tests(cls) -> None:
         """收口未由窗口持有的素材库，避免 reader 跨测试存活。"""
+        # 测试 seam：仅供测试注入，产品侧无调用
         for library in tuple(_LIVE_MOVIE_LIBRARIES):
             try:
                 library.shutdown()

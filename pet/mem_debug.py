@@ -73,13 +73,6 @@ def note_reader(label: str, q, thread, frame_bytes: int) -> None:
         _readers[label] = entry
 
 
-def forget_reader(label: str) -> None:
-    if not ENABLED:
-        return
-    with _lock:
-        _readers.pop(label, None)
-
-
 def _queue_snapshot(q) -> tuple[int, int]:
     """(帧数, 字节数)：优先按真实条目长度求和，退化到 qsize×帧大小。"""
     try:

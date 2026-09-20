@@ -7,7 +7,6 @@ from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QMenu, QProxyStyle, QStyle
 
 SYSTEM_FONT_STACK = '"SF Pro Text", ".AppleSystemUIFont", "PingFang SC"'
-ICON_COLOR = "#55585c"
 
 
 class ResponsiveMenuStyle(QProxyStyle):

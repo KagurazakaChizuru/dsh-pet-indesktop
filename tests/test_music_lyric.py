@@ -229,14 +229,6 @@ def test_cache_prune_evicts_oldest(monkeypatch, tmp_path):
     assert len(list(tmp_path.glob("*.json"))) == 2
 
 
-def test_clear_cache(monkeypatch, tmp_path):
-    monkeypatch.setattr(music_lyric, "cache_dir", lambda: tmp_path)
-    for i in range(3):
-        music_lyric._write_cache(f"歌{i}", "手", Lyrics(lines=(LyricLine(1.0, "x"),)))
-    assert music_lyric.clear_cache() == 3
-    assert list(tmp_path.glob("*.json")) == []
-
-
 # ---------------------------------------------------------------- LyricTracker
 
 
@@ -379,30 +371,6 @@ class _FakeWin(QObject):
 
     def isVisible(self):
         return True
-
-
-def test_compose_bubble_text_two_lines():
-    """气泡文本 = 常驻标题一行 + 当前歌词一行。"""
-    from pet.music_lyric_controller import compose_bubble_text
-
-    assert compose_bubble_text("我在唱《夜曲》", "一群嗜血的蚂蚁") == (
-        "我在唱《夜曲》\n一群嗜血的蚂蚁"
-    )
-
-
-def test_compose_bubble_text_without_lyric():
-    """还没有歌词（取词中 / 无词歌）时只显示标题，不能留空。"""
-    from pet.music_lyric_controller import compose_bubble_text
-
-    assert compose_bubble_text("我在唱《夜曲》") == "我在唱《夜曲》"
-    assert compose_bubble_text("我在唱《夜曲》", "") == "我在唱《夜曲》"
-
-
-def test_compose_bubble_text_handles_missing_title():
-    from pet.music_lyric_controller import compose_bubble_text
-
-    assert compose_bubble_text("", "只有歌词") == "只有歌词"
-    assert compose_bubble_text("", "") == ""
 
 
 def test_title_shows_immediately_on_track_change():
