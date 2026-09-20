@@ -7,7 +7,9 @@
 
 - 30Hz 本地检测：岛建模为体育场形（stadium = 中轴矩形 + 两端半圆），
   法线取"胶囊轴线最近点"方向——宽胶囊从正上/正下方撞不再被斜着弹飞；
-- 桌宠圆链带上帧扫掠（TOI），高速甩不穿；彻底穿过的放回接触点再弹回；
+- 桌宠按**椭圆代理**（横向半宽、纵向半高）带帧扫掠（TOI），高速甩不穿；
+  彻底穿过的放回接触点再弹回；旧实现用「身高一半」当圆半径，横向凭空
+  粗出（ry−rx）px，碰撞体积远大于岛本身（issue #146 后续反馈）；
 - 岛是无限质量墙但保留弹性（STATIC_RESTITUTION，撞岛像撞弹床）；
 - 拖岛扫鱼：岛速参与相对速度（岛=移动的拍子）；深度重叠时按相对运动
   方向解围（岛从哪边来，鱼往哪边飞）；
@@ -56,6 +58,80 @@ def _segment_circle_entry(p0: tuple[float, float], p1: tuple[float, float],
         return None
     t = (-b - math.sqrt(disc)) / (2.0 * a)
     return t if 0.0 <= t <= 1.0 else None
+
+
+def _segment_ellipse_entry(p0: tuple[float, float], p1: tuple[float, float],
+                           cx: float, cy: float, a: float, b: float) -> float | None:
+    """线段进入轴对齐椭圆的最早时刻 t∈[0,1]（单位圆化）；起点在内返回 0。
+
+    用于「桌宠为圆」的缩放空间里对 stadium 端帽（椭圆）的扫掠 TOI。
+    """
+    fx, fy = (p0[0] - cx) / a, (p0[1] - cy) / b
+    if fx * fx + fy * fy <= 1.0:
+        return 0.0
+    ux, uy = (p1[0] - p0[0]) / a, (p1[1] - p0[1]) / b
+    q = ux * ux + uy * uy
+    if q <= 1e-9:
+        return None
+    c = fx * fx + fy * fy - 1.0
+    bq = 2.0 * (fx * ux + fy * uy)
+    disc = bq * bq - 4.0 * q * c
+    if disc < 0.0:
+        return None
+    t = (-bq - math.sqrt(disc)) / (2.0 * q)
+    return t if 0.0 <= t <= 1.0 else None
+
+
+def _virtual_xy(win) -> tuple[float, float]:
+    """虚拟窗口坐标（物理/碰撞的坐标系，贴边时与实际窗口位置差一个绘制偏移）。
+
+    与 collision_client._virtual_xy 同口径：#137 视口模型后抛掷物理按虚拟坐标
+    跑，本地分离/进入 throw 必须用同一坐标系，否则贴边命中会从错误位置起跳
+    （issue #146 后续反馈「意料之外的情况」）。轻量桩无该接口时回退实际位置。
+    """
+    vp_fn = getattr(win, "_virtual_pos", None)
+    if callable(vp_fn):
+        vp = vp_fn()
+        return float(vp.x()), float(vp.y())
+    return float(win.x()), float(win.y())
+
+
+def _pet_radii(rect) -> tuple[float, float]:
+    """桌宠碰撞椭圆半轴 (rx, ry)：横向=可见并集半宽，纵向=半高。
+
+    旧实现取 max(w,h)/2 当圆半径，横向被身高放大（shenshen 0.72 下 97 vs
+    视觉半宽 78，1.5 下 202 vs 162）——碰撞体积远大于岛视觉。椭圆代理横向
+    用半宽，贴岛两侧不再被虚胖的圆顶在远处。
+    """
+    return max(1.0, rect.width() / 2.0), max(1.0, rect.height() / 2.0)
+
+
+def _scaled_axes(rx: float, ry: float) -> tuple[float, float, float]:
+    """把桌宠椭圆压成单位圆的空间缩放 (sx, sy, r)：短轴保持、长轴方向压扁。
+
+    竖向角色（ry>=rx，如 shenshen）sy=rx/ry、sx=1、圆半径=rx；横向角色对称。
+    在该空间里桌宠是半径 r 的圆，stadium 的端帽圆随之变成椭圆 (rr·sx, rr·sy)，
+    中部矩形压成 [ax0·sx, ax1·sx] × [ay·sy ± rr·sy]——几何判定全部在圆口径下
+    完成，无逐点椭圆距离迭代。
+    """
+    if ry >= rx:
+        return 1.0, rx / ry, rx
+    return ry / rx, 1.0, ry
+
+
+def _scaled_stadium(stadium, sx: float, sy: float):
+    """stadium 在「桌宠为圆」空间的像：返回 (ax0, ax1, ay, rr_x, rr_y)。
+
+    rr_x/rr_y 为端帽椭圆半轴（原端帽圆 rr 按 (sx, sy) 缩放）。
+    """
+    ax0, ax1, ay, rr, _h = stadium
+    return ax0 * sx, ax1 * sx, ay * sy, rr * sx, rr * sy
+
+
+def _ellipse_radial(rx: float, ry: float, nx: float, ny: float) -> float:
+    """桌宠椭圆在单位法线 (nx, ny) 方向上的径向半径（分离距离用）。"""
+    u = (nx / rx) ** 2 + (ny / ry) ** 2
+    return rx if u <= 1e-12 else 1.0 / math.sqrt(u)
 
 
 def _segment_rect_entry(p0: tuple[float, float], p1: tuple[float, float],
@@ -224,14 +300,21 @@ class IslandCollisionBody(QObject):
         return (min(max(px, ax0), ax1), ay)
 
     def _stadium_entry(self, p0: tuple[float, float], p1: tuple[float, float],
-                       stadium, pet_radius: float) -> float | None:
-        """圆心从 p0 扫到 p1 进入体育场形（外扩 pet_radius）的最早 TOI。"""
-        ax0, ax1, ay, rr, _h = stadium
-        expanded = pet_radius + rr
+                       stadium, rx: float, ry: float) -> float | None:
+        """桌宠中心从 p0 扫到 p1 进入体育场形（外扩桌宠椭圆）的最早 TOI。
+
+        在「桌宠为圆」的缩放空间里算：stadium 中部矩形竖直外扩 (rr·sy + r)，
+        两端端帽按膨胀椭圆 (rr·sx + r, rr·sy + r) 判进入（与 check_collision_ellipse
+        同口径的归一化近似）。
+        """
+        sx, sy, r = _scaled_axes(rx, ry)
+        ax0, ax1, ay, rrx, rry = _scaled_stadium(stadium, sx, sy)
+        p0s = (p0[0] * sx, p0[1] * sy)
+        p1s = (p1[0] * sx, p1[1] * sy)
         candidates = [
-            _segment_circle_entry(p0, p1, (ax0, ay), expanded),
-            _segment_circle_entry(p0, p1, (ax1, ay), expanded),
-            _segment_rect_entry(p0, p1, ax0, ay - expanded, ax1, ay + expanded),
+            _segment_rect_entry(p0s, p1s, ax0, ay - (rry + r), ax1, ay + (rry + r)),
+            _segment_ellipse_entry(p0s, p1s, ax0, ay, rrx + r, rry + r),
+            _segment_ellipse_entry(p0s, p1s, ax1, ay, rrx + r, rry + r),
         ]
         hits = [t for t in candidates if t is not None]
         return min(hits) if hits else None
@@ -314,7 +397,7 @@ class IslandCollisionBody(QObject):
         self._pet_prev[key] = center
         self._pet_prev_ts[key] = now
 
-        pet_radius = max(rect.width(), rect.height()) / 2.0
+        rx, ry = _pet_radii(rect)
         # 瞬移守卫：跳变超过"极速飞行 × 间隔 + 体型余量"（传送/缩放/切屏）
         # 不扫掠，避免把瞬移轨迹当成高速路径产生幽灵命中；合法的高速甩出
         # （4800px/s × 100ms 才 480px）必须放行——守卫跟着 dt 走
@@ -323,8 +406,18 @@ class IslandCollisionBody(QObject):
             + island_rect.width() + max(rect.width(), rect.height())
         if prev is None or prev_ts is None \
                 or math.hypot(center[0] - prev[0], center[1] - prev[1]) > jump_guard:
-            if self._overlaps_stadium(center, pet_radius, stadium):
-                self._separate_from_stadium(win, center, pet_radius, stadium,
+            if self._overlaps_stadium(center, rx, ry, stadium):
+                self._separate_from_stadium(win, center, rx, ry, stadium,
+                                            island_rect, now, key)
+            return
+
+        # 抛掷物理接管期间只挡不弹（多重回弹根因）：岛撞飞后桌宠在 throw 中，
+        # 若仍按命中结算，往返（岛↔屏幕边缘）每 150ms 冷却后再进一次 throw、
+        # 叠加新冲量，观感就是连环弹。物理期间只做分离，不再重进 throw——
+        # 剩余往返由抛掷物理自身的弹性自然衰减。
+        if getattr(win, "_physics_mode", "") == "throw":
+            if self._overlaps_stadium(center, rx, ry, stadium):
+                self._separate_from_stadium(win, center, rx, ry, stadium,
                                             island_rect, now, key)
             return
 
@@ -341,6 +434,7 @@ class IslandCollisionBody(QObject):
             measured_vx = measured_vy = 0.0
 
         # AABB 预筛：扫掠路径包围盒（外扩桌宠半径）与岛不相交 → 必不撞
+        pet_radius = max(rx, ry)
         path_left = min(prev[0], center[0]) - pet_radius
         path_right = max(prev[0], center[0]) + pet_radius
         path_top = min(prev[1], center[1]) - pet_radius
@@ -350,14 +444,14 @@ class IslandCollisionBody(QObject):
                 or path_top > island_rect.y() + island_rect.height():
             return
 
-        toi = self._stadium_entry(prev, center, stadium, pet_radius)
+        toi = self._stadium_entry(prev, center, stadium, rx, ry)
         if toi is None:
             return
         if now - self._pet_cooldown.get(key, 0.0) < _HIT_COOLDOWN_S:
             return
         entry = (prev[0] + (center[0] - prev[0]) * toi,
                  prev[1] + (center[1] - prev[1]) * toi)
-        currently_overlapping = self._overlaps_stadium(center, pet_radius, stadium)
+        currently_overlapping = self._overlaps_stadium(center, rx, ry, stadium)
         vrel = (measured_vx - self._vx, measured_vy - self._vy)
         ref = center if currently_overlapping else entry
         nx, ny, is_fallback = self._normal(stadium, ref, vrel)
@@ -368,14 +462,14 @@ class IslandCollisionBody(QObject):
         if vn >= -approach_floor:
             if currently_overlapping:
                 # 贴着重叠但不接近：只把桌宠推出岛体（防嵌入累积）
-                self._separate_from_stadium(win, center, pet_radius, stadium,
+                self._separate_from_stadium(win, center, rx, ry, stadium,
                                             island_rect, now, key)
             return
         self._pet_cooldown[key] = now
         dv = -(1.0 + collision.STATIC_RESTITUTION) * vn
         dvx, dvy = dv * nx, dv * ny
         self._apply_hit(win, dvx, dvy, now, key)
-        self._separate_from_stadium(win, center, pet_radius, stadium,
+        self._separate_from_stadium(win, center, rx, ry, stadium,
                                     island_rect, now, key,
                                     ref=None if currently_overlapping else entry)
         dv_mag = math.hypot(dvx, dvy)
@@ -385,17 +479,29 @@ class IslandCollisionBody(QObject):
             self._island.bump(min(3.0, dv_mag / 400.0),
                               -dvx / dv_mag, -dvy / dv_mag)
 
-    def _overlaps_stadium(self, center, pet_radius: float, stadium) -> bool:
-        closest = self._axis_closest(stadium, center[0], center[1])
-        return math.hypot(center[0] - closest[0], center[1] - closest[1]) \
-            <= pet_radius + stadium[3]
+    def _overlaps_stadium(self, center, rx: float, ry: float, stadium) -> bool:
+        """桌宠椭圆代理是否与体育场形重叠（缩放空间，同 _stadium_entry 口径）。
 
-    def _separate_from_stadium(self, win, center, pet_radius: float, stadium,
+        中部（中心 x 在轴区间内）：只判竖直外扩带；两端：判膨胀端帽椭圆。
+        """
+        sx, sy, r = _scaled_axes(rx, ry)
+        ax0, ax1, ay, rrx, rry = _scaled_stadium(stadium, sx, sy)
+        px, py = center[0] * sx, center[1] * sy
+        if ax0 <= px <= ax1:
+            return abs(py - ay) <= rry + r
+        capx = ax0 if px < ax0 else ax1
+        dx = (px - capx) / (rrx + r)
+        dy = (py - ay) / (rry + r)
+        return dx * dx + dy * dy <= 1.0
+
+    def _separate_from_stadium(self, win, center, rx: float, ry: float, stadium,
                                island_rect, now: float, key: int,
                                ref=None) -> None:
         """把桌宠放到岛体表面（沿法线推出，含 TOI 放回——它本不该在岛体内）。
 
         ref：法线参考点，默认当前中心；隧道放回时传进入点（放回来路一侧）。
+        分离距离按桌宠椭圆在法线方向的径向半径算（旧口径身高一半的胖圆会
+        把桌宠推到离岛多出 (ry−rx)px 的地方）。
         """
         # 边缘探头会话期间位置归探头控制器管（PEEKING 稳态无 timer，被顶偏
         # 不会自动归位）——轻贴分离位移直接丢弃，与权威冲量路径同口径；
@@ -407,7 +513,7 @@ class IslandCollisionBody(QObject):
         vrel = (0.0 - self._vx, 0.0 - self._vy)
         nx, ny, _is_fallback = self._normal(stadium, ref, vrel)
         closest = self._axis_closest(stadium, ref[0], ref[1])
-        gap = pet_radius + stadium[3] + 1.0
+        gap = _ellipse_radial(rx, ry, nx, ny) + stadium[3] + 1.0
         target_x = closest[0] + nx * gap
         target_y = closest[1] + ny * gap
         dx, dy = target_x - center[0], target_y - center[1]
@@ -428,9 +534,20 @@ class IslandCollisionBody(QObject):
         cancel_gap = getattr(win, "_cancel_animation_gap", None)
         if callable(cancel_gap):
             cancel_gap()
+        # 分离位移作用在**虚拟窗口坐标**上（#137 视口模型后统一出口按虚拟坐标
+        # 落窗；贴边时实际窗口被钳在工作区内，用实际坐标会把位移喂给错误的
+        # clamp 边界、抛掷起点也差一个绘制偏移）。轻量桩无虚拟接口时回退实际。
+        vp_x, vp_y = _virtual_xy(win)
         clamp = getattr(win, "_collision_clamp_pos", None)
         if callable(clamp):
-            nx_pos, ny_pos = clamp(win.x() + dx, win.y() + dy)
+            nx_pos, ny_pos = clamp(vp_x + dx, vp_y + dy)
+        else:
+            nx_pos, ny_pos = vp_x + dx, vp_y + dy
+        mover = getattr(win, "_move_window_towards", None)
+        if callable(mover):
+            mover(nx_pos, ny_pos)
+        elif callable(clamp):
+            # 轻量桩回退：直接 move + 边界钳位（旧口径）
             left, top = clamp(float("-inf"), float("-inf"))
             right, bottom = clamp(float("inf"), float("inf"))
             win.move(
@@ -438,10 +555,10 @@ class IslandCollisionBody(QObject):
                 min(max(int(round(ny_pos)), math.ceil(top)), math.floor(bottom)),
             )
         else:
-            win.move(int(round(win.x() + dx)), int(round(win.y() + dy)))
+            win.move(int(round(nx_pos)), int(round(ny_pos)))
         phys_pos = getattr(win, "_phys_pos", None)
         if isinstance(phys_pos, list) and len(phys_pos) >= 2:
-            phys_pos[:] = [float(win.x()), float(win.y())]
+            phys_pos[:] = [float(nx_pos), float(ny_pos)]
 
     def _apply_hit(self, win, dvx: float, dvy: float, now: float, key: int) -> None:
         """复用桌宠侧真实撞击反应：加冲量 → 限速 → 音效 → 进抛掷物理 → 挤压。
@@ -493,7 +610,10 @@ class IslandCollisionBody(QObject):
         if callable(enter):
             enter("throw")
         if isinstance(getattr(win, "_phys_pos", None), list):
-            win._phys_pos[:] = [float(win.x()), float(win.y())]
+            # 抛掷起点用虚拟坐标：_tick_throw_physics 按虚拟坐标跑，贴边时
+            # 实际窗口位置差一个绘制偏移，写实际坐标会让 throw 从错误位置起跳
+            vx_p, vy_p = _virtual_xy(win)
+            win._phys_pos[:] = [float(vx_p), float(vy_p)]
         win._last_physics_tick_time = None
         physics_timer = getattr(win, "_physics_timer", None)
         if physics_timer is not None:

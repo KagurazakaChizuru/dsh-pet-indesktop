@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QApplication
 
 from pet import collision
@@ -87,9 +87,13 @@ class FakeWin:
     """最小桌宠窗口桩：本地结算触及的全部属性/方法。"""
 
     def __init__(self, x: float, y: float, vx: float = 0.0, vy: float = 0.0,
-                 size: int = 120, visible: bool = True):
+                 size: int = 120, visible: bool = True, *, w: int | None = None,
+                 h: int | None = None, screen_w: int = 2560, screen_h: int = 1440):
         self._x, self._y = x, y
         self._size = size
+        self._w = w if w is not None else size
+        self._h = h if h is not None else size
+        self._screen_w, self._screen_h = screen_w, screen_h
         self._visible = visible
         self._phys_vel = [vx, vy]
         self._phys_pos = [x, y]
@@ -111,7 +115,7 @@ class FakeWin:
         return self._visible
 
     def collision_content_rect(self) -> QRect:
-        return QRect(int(self._x), int(self._y), self._size, self._size)
+        return QRect(int(self._x), int(self._y), self._w, self._h)
 
     def x(self):
         return int(self._x)
@@ -123,8 +127,8 @@ class FakeWin:
         self._x, self._y = float(x), float(y)
 
     def _collision_clamp_pos(self, x, y):
-        x = 0.0 if x == float("-inf") else (2560.0 if x == float("inf") else x)
-        y = 0.0 if y == float("-inf") else (1440.0 if y == float("inf") else y)
+        x = 0.0 if x == float("-inf") else (float(self._screen_w) if x == float("inf") else x)
+        y = 0.0 if y == float("-inf") else (float(self._screen_h) if y == float("inf") else y)
         return x, y
 
     def _cancel_move(self):
@@ -142,6 +146,28 @@ class FakeWin:
 
     def _start_squash(self):
         self.squashes += 1
+
+
+class VirtualWin(FakeWin):
+    """带 #137 视口模型接口的桌宠桩：虚拟位置 = 实际 + 绘制偏移。
+
+    _move_window_towards 记录虚拟目标并让窗口跟到该虚拟位置（模拟统一出口
+    的「窗口钳回 + 偏移」语义），供「贴边命中走虚拟坐标」回归使用。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._draw_delta = QPoint(-80, 0)  # 贴左缘：虚拟 = 实际 - 80
+        self.moves: list[tuple[float, float]] = []
+
+    def _virtual_pos(self):
+        return QPoint(int(self._x) + self._draw_delta.x(),
+                      int(self._y) + self._draw_delta.y())
+
+    def _move_window_towards(self, x, y, body_bounds=None):
+        self.moves.append((float(x), float(y)))
+        self._x = x - self._draw_delta.x()
+        self._y = y - self._draw_delta.y()
 
 
 def _make_body(tmp_path: Path, pets=()):
@@ -459,3 +485,115 @@ def test_island_resize_does_not_inject_phantom_speed(tmp_path):
     finally:
         island.hide()
         island.deleteLater()
+
+
+# ------------------------------------------------------------ issue #146 后续修复回归
+def test_tall_pet_separates_at_half_width_not_half_height(tmp_path):
+    """高瘦桌宠贴岛侧壁：分离距离按横向半宽（椭圆代理），不再按身高一半的胖圆。
+
+    回归：旧实现 pet_radius=max(w,h)/2，shenshen 0.72 下横向凭空粗 19px
+    （1.5 下 40px），贴岛侧壁时被推得离岛更远（「碰撞体积比岛本身大得多」）。
+    """
+    _qapp()
+    # 高瘦身体 156×194（横向半宽 78、纵向半高 97），中心与岛轴同高（纯横向分离）
+    win = FakeWin(x=300.0, y=225.0, w=156, h=194)
+    island, body = _make_body(tmp_path, pets=[win])
+    try:
+        island.show()
+        body._running = True
+        now = time.monotonic()
+        rect = win.collision_content_rect()
+        body._pet_prev[id(win)] = (float(rect.center().x()), float(rect.center().y()))
+        body._pet_prev_ts[id(win)] = now - 0.05
+        body._tick()  # 静止轻贴 → 只分离
+        ax0, _ax1, ay, rr, _h = body._island_stadium()
+        assert win._interaction_state == "IDLE"
+        # 分离后中心距轴 = 横向半宽 78 + 岛半径 22 + 1
+        center_x = win.collision_content_rect().center().x()
+        assert abs(center_x - (ax0 - (78.0 + rr + 1.0))) < 2.0
+        # 旧胖圆口径会把中心推到 ax0 - (97+22+1)，多出 19px——断言没被推那么远
+        assert center_x > ax0 - (97.0 + rr + 1.0) + 1.0
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_throw_mode_pet_separates_without_rehit(tmp_path):
+    """抛掷物理中的桌宠：岛只挡不弹（不叠加冲量/不进第二次 throw/不响）。
+
+    多重回弹根因回归：撞飞后桌宠在岛↔屏幕边缘间往返时，若每次接近都重新
+    命中结算，会连环弹。物理期间只分离——用高速接近姿态判别（旧实现会命中）。
+    """
+    _qapp()
+    win = FakeWin(x=300.0, y=260.0, vx=600.0)
+    win._physics_mode = "throw"
+    island, body = _make_body(tmp_path, pets=[win])
+    try:
+        island.show()
+        body._running = True
+        bumps = []
+        island.bump = lambda *args: bumps.append(args)
+        now = time.monotonic()
+        # 50ms 前在 (330,320) → 实测 600px/s 向右高速接近（旧实现会重新命中）
+        body._pet_prev[id(win)] = (330.0, 320.0)
+        body._pet_prev_ts[id(win)] = now - 0.05
+        body._tick()
+        assert win._interaction_state == "IDLE"  # 未重进 throw
+        assert win.entered_modes == []
+        assert win.sounds == 0
+        assert bumps == []
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_hit_and_separation_use_virtual_coordinates(tmp_path):
+    """贴边（delta≠0）被岛撞：抛掷起点与分离位移都落在虚拟坐标上（#137 口径）。
+
+    回归：旧实现写实际窗口位置，_phys_pos 与分离目标都差一个绘制偏移，throw
+    从错误位置起跳（贴边命中后出现「意料之外」的轨迹/连环弹）。
+    """
+    _qapp()
+    win = VirtualWin(x=340.0, y=285.0, vx=600.0)
+    island, body = _make_body(tmp_path, pets=[win])
+    try:
+        island.show()
+        body._running = True
+        now = time.monotonic()
+        body._pet_prev[id(win)] = (370.0, 320.0)
+        body._pet_prev_ts[id(win)] = now - 0.05
+        body._tick()
+        assert win._interaction_state == "THROWN"
+        # 抛掷起点 = 虚拟坐标（= 实际 + 绘制偏移），不是实际窗口位置
+        vp = win._virtual_pos()
+        assert abs(win._phys_pos[0] - vp.x()) < 2.0, \
+            f"_phys_pos.x={win._phys_pos[0]} 应为虚拟 {vp.x()}（旧实现写成实际 {win.x()}）"
+        assert abs(win._phys_pos[1] - vp.y()) < 2.0
+        # 分离经统一出口（虚拟坐标）落窗，而不是直接 move 实际位置
+        assert win.moves, "分离应经 _move_window_towards 落窗"
+        vx2, vy2 = win._virtual_pos().x(), win._virtual_pos().y()
+        assert abs(win.moves[-1][0] - vx2) < 2.0 and abs(win.moves[-1][1] - vy2) < 2.0
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_hit_geometry_independent_of_screen_size(tmp_path):
+    """不同分辨率屏幕：岛命中/分离几何与屏幕尺寸无关（只依赖岛几何与桌宠椭圆）。"""
+    _qapp()
+    for screen_w, screen_h in ((1024, 768), (1920, 1080), (3840, 2160)):
+        win = FakeWin(x=300.0, y=260.0, vx=600.0,
+                      screen_w=screen_w, screen_h=screen_h)
+        island, body = _make_body(tmp_path, pets=[win])
+        try:
+            island.show()
+            body._running = True
+            now = time.monotonic()
+            body._pet_prev[id(win)] = (330.0, 320.0)
+            body._pet_prev_ts[id(win)] = now - 0.05
+            body._tick()
+            assert win._interaction_state == "THROWN"
+            assert win._phys_vel[0] < 0.0  # 弹回来路
+        finally:
+            island.hide()
+            island.deleteLater()
