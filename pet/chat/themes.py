@@ -149,6 +149,12 @@ def theme_names() -> list[tuple[str, str]]:
     return [(key, t['name']) for key, t in THEMES.items()]
 
 
+# 对话窗口风格标识 → 展示名，设置界面的唯一来源：主设置窗的风格下拉项、裁切行
+# 标签/编辑器标题、老聊天设置对话框的裁切入口都从这里派生，避免多处字面量走样。
+# 顺序即下拉框顺序（modern 在前，classic 在后）。
+CHAT_UI_STYLE_LABELS: dict[str, str] = {'modern': '肥鱼版 DeepSeek', 'classic': '肥鱼牌小手机'}
+
+
 def resolve_background_pixmap(config_value: str) -> QPixmap | None:
     """Resolve a built-in classic theme or an absolute custom image path."""
     value = str(config_value or '').strip()

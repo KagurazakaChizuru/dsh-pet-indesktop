@@ -7,8 +7,13 @@ from PySide6.QtWidgets import (
 )
 from .models import ChatSettings, ProviderConfig, SecretStore
 from .providers import test_connection
-from .themes import theme_names
+from .themes import CHAT_UI_STYLE_LABELS, theme_names
 from .utils import _safe_emit
+
+# 本对话框只读写经典风格的 chat_background 键（肥鱼版 DeepSeek 走主设置窗的
+# modern_chat_background），所以裁切入口按单一风格标注名称；名字取自 themes 的
+# 单一来源，不在本模块重复字面量。
+_CLASSIC_STYLE_LABEL = CHAT_UI_STYLE_LABELS['classic']
 
 
 class ChatSettingsDialog(QDialog):
@@ -107,8 +112,13 @@ class ChatSettingsDialog(QDialog):
         bg_lay.setContentsMargins(0, 0, 0, 0)
         bg_lay.addWidget(self.bg)
         bg_lay.addWidget(self.bg_btn)
-        self.crop_btn = QPushButton('裁切取景…')
+        # 显式父对象：无父时 setVisible(True) 会瞬时建顶层原生窗口，慢机/远程桌面
+        # 可能闪一下（下面 addWidget 之后才真正入布局）。
+        self.crop_btn = QPushButton(f'裁切取景（{_CLASSIC_STYLE_LABEL}）…', self)
         self.crop_btn.clicked.connect(self._crop_bg)
+        # contain/stretch 下取景框被渲染路径整体忽略（见 themes.py 的 fill 语义）；
+        # 本对话框没有填充方式控件，直接按配置里的经典风格填充值决定入口是否可见。
+        self.crop_btn.setVisible(str(config.get('chat_background_fill', 'cover') or 'cover') == 'cover')
         bgmode_row = QWidget()
         bgm_lay = QHBoxLayout(bgmode_row)
         bgm_lay.setContentsMargins(0, 0, 0, 0)
@@ -307,14 +317,14 @@ class ChatSettingsDialog(QDialog):
         value = '' if i == 0 else ('builtin:' + self._bg_keys[i - 1] if i <= len(self._bg_keys) else self.bg.text().strip())
         pix = resolve_bg_pixmap(value)
         if pix is None:
-            self.crop_btn.setText('无可裁背景')
+            self.crop_btn.setText(f'无可裁背景（{_CLASSIC_STYLE_LABEL}）')
             return
         crops = dict(self.config.get('chat_bg_crops', {}) or {})
         initial = crops.get(value)
         if initial is None and value.startswith('builtin:'):
             t = get_theme(value[8:])
             initial = tuple(t['focus']) if t else None
-        dlg = CropDialog(pix, initial, self)
+        dlg = CropDialog(pix, initial, self, _CLASSIC_STYLE_LABEL)
         accepted = dlg.exec()
         reset, box = dlg.result_box() if accepted else (False, None)
         dlg.deleteLater()  # exec 后即释放：对话框持有整张背景 QPixmap，不随使用次数累积
