@@ -84,6 +84,10 @@ class _AiSettingsPage(QWidget):
         self.skip_ssl = ToggleSwitch()
         self.skip_ssl.setChecked(not provider.verify_ssl)
         self.system_notify_check = ToggleSwitch()
+        # 系统通知键：构造期快照无条件回写会把打开期间外部（老聊天设置即存入口
+        # settings_dialog.py:437）对该键的改动静默回滚，所以只在用户实际拨动过
+        # （脏标记）时才写；toggled 连接晚于这里的 setChecked，构造期不会误标。
+        self._system_notify_dirty = False
         self.system_notify_check.setChecked(bool(config.get("system_notifications_enabled", True)))
         self.chat_ui_style = ModernSelect(self, width=190)
         self.chat_ui_style.addItem("肥鱼版 DeepSeek", "modern")
@@ -130,12 +134,27 @@ class _AiSettingsPage(QWidget):
         self.background_fill.addItem("填充裁剪", "cover")
         self.background_fill.addItem("完整适应", "contain")
         self.background_fill.addItem("拉伸铺满", "stretch")
-        # 裁切取景：编辑器结果进缓冲，save() 才落盘（取消设置不带走裁切改动）
-        self._bg_crops: dict = dict(config.get('chat_bg_crops', {}) or {})
+        # 裁切取景：编辑器结果按背景值记成编辑集（值为 None = 重置删除），save()
+        # 时读磁盘最新配置后只合并编辑过的背景——整字典快照回写会把主设置窗打开
+        # 期间外部（老聊天设置即存入口）对其他背景的裁切改动静默回滚。本页风格键
+        # 的落盘粒度只到"按风格脏标记"（见下），裁切这一路才是按背景值合并。
+        self._bg_crop_edits: dict[str, list | None] = {}
+        # 背景风格键（两种对话风格各自的图片/不透明度/填充）同理：构造期快照无条件
+        # 回写会把打开期间外部对另一风格的即存改动静默回滚，所以按风格脏标记只回写
+        # 本窗口实际编辑过的风格；组内三键仍是整组回写，不承诺按键粒度。
+        # _loading_background 挡住程序化赋值的误标。
+        self._bg_edited_styles: set[str] = set()
+        self._loading_background = False
         self.background_crop_btn = QPushButton("裁切取景…", self)
         self.background_crop_btn.clicked.connect(self._crop_background)
         self._populate_background_options(self._background_style)
         self.chat_ui_style.currentIndexChanged.connect(self._on_chat_ui_style_changed)
+        self.background_select.currentIndexChanged.connect(self._on_background_edited)
+        self.background_picker.edit.textChanged.connect(self._on_background_edited)
+        # 路径变化要重新评估裁切按钮可用性：禁用后修好路径必须恢复可点
+        self.background_picker.edit.textChanged.connect(self._update_background_visibility)
+        self.background_opacity.valueChanged.connect(self._on_background_edited)
+        self.background_fill.currentIndexChanged.connect(self._on_background_edited)
         self.test_button = QPushButton("测试连接")
         self.test_button.clicked.connect(self._run_test)
         self.test_result = QLabel("验证当前 Provider、API 地址和凭据是否可用。")
@@ -180,6 +199,8 @@ class _AiSettingsPage(QWidget):
         self._vision_override_rows = vision_rows[1:]
         self.vision_same.toggled.connect(self._update_vision_visibility)
         self._update_vision_visibility(self.vision_same.isChecked())
+        # 用户拨动系统通知开关才置脏；连接晚于构造期 setChecked，程序化赋值不置脏。
+        self.system_notify_check.toggled.connect(self._on_system_notify_edited)
         self._test_row = self.findChild(SettingRow, "settingRow_connection_test")
         if self._test_row is not None:
             self.test_result = self._test_row.hint_label
@@ -220,7 +241,6 @@ class _AiSettingsPage(QWidget):
         ]
         self._background_file_row = rows[-5]
         self._background_detail_rows = rows[-4:-1]
-        self._background_crop_row = rows[-2]
         self._message_card_opacity_row = rows[-1]
         self.background_select.currentIndexChanged.connect(self._update_background_visibility)
         self._update_background_visibility()
@@ -238,26 +258,39 @@ class _AiSettingsPage(QWidget):
         }
 
     def _populate_background_options(self, style: str) -> None:
-        self.background_select.clear()
-        self.background_select.addItem("纯色背景", "")
-        # 内置主题两种对话窗口风格都可用（肥鱼版 DeepSeek 与肥鱼牌小手机一致）
-        for key, label in self._background_themes:
-            self.background_select.addItem(label, f"builtin:{key}")
-        self.background_select.addItem("自定义图片", "custom")
-        value = str(self._background_values.get(style, "") or "")
-        if value.startswith("builtin:") and self.background_select.findData(value) >= 0:
-            self.background_select.setCurrentData(value)
-            self.background_picker.setText("")
-        elif value:
-            self.background_select.setCurrentData("custom")
-            self.background_picker.setText(value)
-        else:
-            self.background_select.setCurrentData("")
-            self.background_picker.setText("")
-        display = self._background_display.get(style, {})
-        self.background_opacity.setValue(int(display.get("opacity", 100)))
-        self.background_fill.setCurrentData(str(display.get("fill", "cover")))
+        self._loading_background = True  # 程序化赋值不得误标脏
+        try:
+            self.background_select.clear()
+            self.background_select.addItem("纯色背景", "")
+            # 内置主题两种对话窗口风格都可用（肥鱼版 DeepSeek 与肥鱼牌小手机一致）
+            for key, label in self._background_themes:
+                self.background_select.addItem(label, f"builtin:{key}")
+            self.background_select.addItem("自定义图片", "custom")
+            value = str(self._background_values.get(style, "") or "")
+            if value.startswith("builtin:") and self.background_select.findData(value) >= 0:
+                self.background_select.setCurrentData(value)
+                self.background_picker.setText("")
+            elif value:
+                self.background_select.setCurrentData("custom")
+                self.background_picker.setText(value)
+            else:
+                self.background_select.setCurrentData("")
+                self.background_picker.setText("")
+            display = self._background_display.get(style, {})
+            self.background_opacity.setValue(int(display.get("opacity", 100)))
+            self.background_fill.setCurrentData(str(display.get("fill", "cover")))
+        finally:
+            self._loading_background = False
         self._update_background_visibility()
+
+    def _on_background_edited(self, *_args) -> None:
+        """用户在当前风格上动了背景控件 → 该风格落盘脏标记（程序化赋值除外）。"""
+        if not self._loading_background:
+            self._bg_edited_styles.add(self._background_style)
+
+    def _on_system_notify_edited(self, _checked: bool = False) -> None:
+        """用户拨动系统通知开关 → 该键落盘脏标记（未拨动则保留外部即存值）。"""
+        self._system_notify_dirty = True
 
     def _on_chat_ui_style_changed(self, _index: int = -1) -> None:
         self._capture_background_value()
@@ -286,29 +319,34 @@ class _AiSettingsPage(QWidget):
             card_opacity_row.setVisible(self._background_style == "modern")
         if getattr(self, "background_crop_btn", None) is not None:
             self.background_crop_btn.setText("裁切取景…")
+            self.background_crop_btn.setEnabled(True)
 
     def _crop_background(self) -> None:
-        """打开裁切取景编辑器：结果进 _bg_crops 缓冲，save() 时才写 config。"""
+        """打开裁切取景编辑器：结果记入 _bg_crop_edits，save() 时按背景值合并落盘。"""
         from .crop_dialog import CropDialog
         from .themes import get_theme
         from .widgets import resolve_bg_pixmap
 
+        self.config.reload()  # 打开期间外部可能即存改动：初始框必须读磁盘最新
         value = self._current_background_value()
         pix = resolve_bg_pixmap(value) if value else None
         if pix is None:
             self.background_crop_btn.setText("无可裁背景")
+            self.background_crop_btn.setEnabled(False)
             return
-        initial = self._bg_crops.get(value)
+        _unset = object()
+        initial = self._bg_crop_edits.get(value, _unset)
+        if initial is _unset:  # 会话编辑集里没有才读配置（上面已 reload 到磁盘最新）
+            initial = (self.config.get('chat_bg_crops', {}) or {}).get(value)
         if initial is None and value.startswith("builtin:"):
             theme = get_theme(value[8:])
             initial = tuple(theme["focus"]) if theme else None
         dlg = CropDialog(pix, initial, self)
-        if dlg.exec():
-            reset, box = dlg.result_box()
-            if reset:
-                self._bg_crops.pop(value, None)
-            else:
-                self._bg_crops[value] = [round(float(v), 4) for v in box]
+        accepted = dlg.exec()
+        reset, box = dlg.result_box() if accepted else (False, None)
+        dlg.deleteLater()  # 延迟析构：对话框持有整张背景 QPixmap，不随使用次数累积
+        if accepted:
+            self._bg_crop_edits[value] = None if reset else [round(float(v), 4) for v in box]
 
     # ------------------------------------------------------------ API 列表管理
     @staticmethod
@@ -542,13 +580,33 @@ class _AiSettingsPage(QWidget):
         self.settings.default_system_prompt = self.prompt.toPlainText().strip()
         self.config.set("chat_ui_style", self.chat_ui_style.currentData())
         self._capture_background_value()
-        self.config.set("chat_background", self._background_values["classic"])
-        self.config.set("modern_chat_background", self._background_values["modern"])
-        self.config.set("chat_background_opacity", self._background_display["classic"]["opacity"])
-        self.config.set("chat_background_fill", self._background_display["classic"]["fill"])
-        self.config.set("modern_chat_background_opacity", self._background_display["modern"]["opacity"])
-        self.config.set("modern_chat_background_fill", self._background_display["modern"]["fill"])
-        self.config.set("chat_bg_crops", self._bg_crops)
+        # 按风格脏标记合并：只回写本窗口编辑过的风格，未触风格保持磁盘最新值
+        # （宿主 save 前已 reload），打开期间外部对它们的即存改动不被快照回滚。
+        # 粒度是风格而非按键：动过某风格即整组写回该风格的三个键。
+        if "classic" in self._bg_edited_styles:
+            self.config.set("chat_background", self._background_values["classic"])
+            self.config.set("chat_background_opacity", self._background_display["classic"]["opacity"])
+            self.config.set("chat_background_fill", self._background_display["classic"]["fill"])
+        if "modern" in self._bg_edited_styles:
+            self.config.set("modern_chat_background", self._background_values["modern"])
+            self.config.set("modern_chat_background_opacity", self._background_display["modern"]["opacity"])
+            self.config.set("modern_chat_background_fill", self._background_display["modern"]["fill"])
+        if self._bg_crop_edits:
+            # save() 跑在宿主 config.reload() 之后，这里读到的是磁盘最新：只覆盖
+            # 本窗口编辑/重置过的键，外部对其他背景的即存改动原样保留。
+            # 注意：此处绝不能再 reload()——本页 save 之前宿主已写入其它页的键，
+            # reload 会把它们全部冲掉。
+            crops = dict(self.config.get("chat_bg_crops", {}) or {})
+            for key, box in self._bg_crop_edits.items():
+                if box is None:
+                    crops.pop(key, None)
+                else:
+                    crops[key] = box
+            self.config.set("chat_bg_crops", crops)
+            self._bg_crop_edits.clear()  # 落盘后编辑集失效：页面若复用，None 删除标记不得再次删外部新写入
         self.config.set("modern_chat_card_opacity", self.message_card_opacity.value())
-        self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
+        # 系统通知按脏标记合并：未拨动开关保持磁盘最新值（宿主 save 前已 reload），
+        # 打开期间外部（老聊天设置即存）对该键的改动不被构造期快照回滚。
+        if self._system_notify_dirty:
+            self.config.set("system_notifications_enabled", self.system_notify_check.isChecked())
         self.config.set_chat_settings(self.settings)

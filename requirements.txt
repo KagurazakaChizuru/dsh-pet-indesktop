@@ -23,7 +23,7 @@ edge-tts>=6.1.10
 
 # —— 歌词显示（可选）——
 # 「显示歌词」功能靠 Windows 系统媒体控制（SMTC）读取当前播放的曲目。
-# 不装不影响桌宠本体：now_playing.available() 会返回 False，
+# 不装不影响桌宠本体：歌词能力探测返回不可用，
 # 设置页的歌词开关置灰并说明原因，其余功能一切照旧。
 # 打包时注意 winrt 是 namespace package，需在 hiddenimports 里登记子模块
 # （winrt.windows.media.control / winrt.windows.foundation.collections），

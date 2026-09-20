@@ -1938,8 +1938,13 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         plan = self._move_plan
         if plan is not None and name == plan.get('anim') and 'loops' in plan:
             if plan['loops_done'] + 1 < plan['loops']:
+                # 圈数递增必须先于续圈：GifClip(QMovie) 的 jumpToFrame(0) 同步发
+                # frameChanged，_on_frame 按 loops_done 定位——先回首帧再递增会让
+                # 圈边界位置按旧圈数瞬态回退一个步幅（GLM 终审 F-2）。续圈被拒
+                # 随即 _cancel_move() 弃计划，位置口径无残留（同步回调里
+                # _predict_prewarm 可能按新圈数提前掷骰，与 #165 前旧实现同语义）。
+                plan['loops_done'] += 1
                 if self._restart_current_clip(name):
-                    plan['loops_done'] += 1
                     return  # 续圈成功：链推进留给末圈（start 被拒则落播完降级）
             self._cancel_move()  # 末圈播完：progress 已到 1，清计划走播完链
         self._ended_fired = True
