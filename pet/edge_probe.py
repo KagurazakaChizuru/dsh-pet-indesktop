@@ -366,15 +366,14 @@ class EdgeProbeController:
             vis_rect.left(), getattr(self.win, "_w", 0) - vis_rect.right() - 1,
             avail.getRect(),
         )
-        # 可见区**直接取窗口局部坐标**（character_local_region 就是 _mask_bounds），
-        # 不要再 translate(_draw_delta)：
-        # 实测（scale=1.0 放到左缘）：入场时 _mask_bounds 是**上一个偏移**算出的
-        # (401,...)，而 _draw_delta 已被 _move_window_towards 改成 -212；再加一次
-        # 平移得到 (-211,...)，于是露出量的分母框整体偏了「一整个画布留白」，
-        # 探头落点算出正数 x（跑到屏幕另一侧），稳定后角色 100% 露在屏外——
-        # 就是用户看到的「在离边缘还有一段空白时就开始探、且几乎整个身子都露着」。
-        # _mask_bounds 本身表达的就是「角色可见像素相对窗口内容的位置」，与偏移无关。
-        self._vis_local = QRect(self.win.character_local_region())
+        # 可见区必须换算到虚拟窗口坐标系（= 窗口内容坐标，与 _draw_delta 无关）：
+        # character_local_region() 返回的 _mask_bounds 是「当前帧按含偏移的绘制
+        # 矩形渲染」得到的可见像素包围盒（_sync_mask 用 _frame_draw_rect 画帧，
+        # 贴边时 delta≠0 把身体在窗口内整体平移了一个 delta）——直接当分母框用，
+        # probe_window_x 会把它按虚拟坐标解释，入场第一帧就把 delta 重算平、
+        # 角色跳回修复前位置（issue #146「回弹」）。这里反向平移 -delta 还原成
+        # 虚拟窗口坐标；_apply_pose 的旋转基准 pivot 同系（同样反平移）。
+        self._vis_local = QRect(self.win.character_local_region()).translated(-delta)
         self._restore_x = _virtual_xy(self.win)[0]
         # 会话期间只允许 idle/turn：当前若不是，先回 idle。
         anim = getattr(self.win, "anim", None)
@@ -487,15 +486,17 @@ class EdgeProbeController:
         avail = scr.availableGeometry() if scr is not None else None
         if avail is None:
             return
-        # 旋转中心与 paint/_sync_mask 一致：帧绘制矩形中心。**必须用不含绘制偏移的
-        # 矩形**——_vis_local（= _mask_bounds）与「窗口内容坐标」同系、不含偏移，
-        # 两者必须在同一坐标系里算投影，否则分母框会平白多出一个 delta（实测左向
-        # 探头 delta≈-424 时，分母框左边界被推到屏幕外 -467，算出 x=-20 而不是
-        # -133，角色于是几乎整只留在屏幕内、「藏半边」失效）。
+        # 旋转中心与 paint/_sync_mask 一致：帧绘制矩形中心。**必须换算到虚拟窗口
+        # 坐标系（反平移 -delta）**——_frame_draw_rect 含绘制偏移（_content_frame_rect
+        # 的 x/y 起点就是 delta），而 _vis_local 在 _maybe_enter 已还原成不含偏移的
+        # 窗口内容坐标；两者必须在同一坐标系里算投影，否则分母框会平白多出一个
+        # delta（实测左向探头 delta≈-424 时，分母框左边界被推到屏幕外 -467，算出
+        # x=-20 而不是 -133，角色于是几乎整只留在屏幕内、「藏半边」失效）。
         frame_fn = getattr(self.win, "_frame_draw_rect", None)
-        pivot = frame_fn() if callable(frame_fn) else QRect(
-            0, 0, getattr(self.win, "_w", 0), getattr(self.win, "_h", 0)
-        )
+        if callable(frame_fn):
+            pivot = frame_fn().translated(-_win_delta(self.win))
+        else:
+            pivot = QRect(0, 0, getattr(self.win, "_w", 0), getattr(self.win, "_h", 0))
         bounds = rotated_region_bounds(self._vis_local, pivot, self._angle_deg)
         x = probe_window_x(self._side, self._exposure, bounds, avail)
         vx, vy = _virtual_xy(self.win)

@@ -1221,3 +1221,36 @@ def test_bounds_cache_restore_returns_copy_not_alias(tmp_path, app):
     restored = win._collision_local_bounds
     assert restored == cached and restored is not cached
     win.close()
+
+
+def test_collision_body_uses_declared_body_box_not_frame_union(tmp_path, app):
+    """碰撞体取角色声明的稳定身体框，不是"各帧轮廓并集"。
+
+    回归背景：并集把动画里走过的位移并进来，且按动画缓存、只增不减——实测
+    「左转奔跑」并集 294px vs 可见身体 184px（scale 0.85），两鱼都在这条动画
+    时可见之间还留 105px 空隙就判碰撞（待机体 15px），表现为"没碰却被挤动、
+    碰撞体积时大时小"。碰撞判据必须与看得见的身体一致。
+    """
+    win, _session = _make_pet_window(tmp_path, "pet_a")
+    box = catalog.character_body_box(str(win.cfg.get("character") or ""))
+    assert box is not None, "本用例依赖角色声明了 body_box"
+    # 现场：某条动画播过，并集被撑到 346x278（源像素）——远大于身体框
+    win._collision_local_bounds = QRect(
+        0, 0, int(round(346 * win.scale)), int(round(278 * win.scale)))
+    rect = win.collision_content_rect()
+    sbr = win._stable_body_local_rect()
+    assert (rect.width(), rect.height()) == (sbr.width(), sbr.height()),         "碰撞体不该沿用被撑大的并集"
+    assert rect.topLeft() == win.frameGeometry().topLeft() + sbr.topLeft()
+    win.close()
+
+
+def test_collision_body_falls_back_to_frame_union_without_body_box(tmp_path, app):
+    """未声明 body_box 的角色包保持改造前口径（并集），不误用整窗。"""
+    win, _session = _make_pet_window(tmp_path, "pet_b")
+    win.cfg.set("character", "__no_such_character__")
+    assert catalog.character_body_box("__no_such_character__") is None
+    union = QRect(10, 20, 180, 226)
+    win._collision_local_bounds = QRect(union)
+    rect = win.collision_content_rect()
+    assert (rect.width(), rect.height()) == (union.width(), union.height())
+    win.close()

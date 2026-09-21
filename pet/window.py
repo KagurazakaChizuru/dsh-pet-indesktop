@@ -2280,9 +2280,23 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             perfstats.time('rebuild.mask', perfstats.clock() - _mask_t0)
 
     def collision_content_rect(self) -> QRect:
-        """碰撞用的稳定可见区域（全局坐标）：取当前动画各帧包围盒的并集，
-        避免圆链随帧跳动；尚无并集时回退当前帧区域。"""
+        """碰撞用的角色区域（全局坐标）。
+
+        优先取角色声明的稳定身体框（manifest body_box，与摆放/贴边钳制同一个
+        锚，按 alpha≥128 量出，即"看得见的身体"）；未声明的角色包回退"当前动画
+        各帧包围盒的并集"（改造前口径），尚无并集时再回退当前帧区域。
+
+        为什么不一律用并集：并集把动画里走过的位移也并进来，而且按动画缓存、
+        只增不减——实测「左转奔跑」并集 294px vs 可见身体 184px（scale 0.85），
+        两鱼都在这条动画时可见之间还留 105px 空隙就判碰撞（待机体 15px），表现
+        为"没碰到却被挤动、碰撞体积时大时小"。
+        """
         frame_rect = self.frameGeometry()
+        character = str(self.cfg.get('character', '') or '')
+        if catalog.character_body_box(character) is not None:
+            sbr = self._stable_body_local_rect()
+            if not sbr.isEmpty():
+                return QRect(frame_rect.topLeft() + sbr.topLeft(), sbr.size())
         local = self._collision_local_bounds
         if local is not None and not local.isEmpty():
             return QRect(frame_rect.topLeft() + local.topLeft(), local.size())
