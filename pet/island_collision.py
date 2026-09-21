@@ -108,6 +108,17 @@ class IslandCollisionBody(QObject):
         except RuntimeError:
             pass
 
+    def refresh_hooks(self) -> None:
+        """运行中窗口增减后重挂硬墙钩子（幂等，不改运行状态）。
+
+        start() 只覆盖"那一刻已存在"的窗口，本进程 spawn 出来的新窗（生小肥鱼）
+        必须经这里补挂，否则它会直接走进岛里；碰撞体已停（果冻墙关掉）时是
+        no-op——刷新钩子绝不偷偷把墙挂回来。
+        """
+        if not self._running:
+            return
+        self._register_clamp_hooks()
+
     def start(self) -> None:
         if self._running:
             return

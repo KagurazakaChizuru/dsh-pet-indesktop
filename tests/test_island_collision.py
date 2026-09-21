@@ -552,3 +552,54 @@ def test_submit_pushes_out_resting_pet_when_island_moved_onto_it(tmp_path):
     finally:
         island.hide()
         island.deleteLater()
+
+
+
+def test_wall_hook_covers_pet_window_created_after_start(tmp_path):
+    """启动之后新生的桌宠（生小肥鱼）也必须受硬墙约束。
+
+    回归背景：硬墙 hook 只在 start() 挂到当时已存在的窗口上；本进程 spawn
+    出来的新窗不在那一刻的列表里，且 start() 二次调用直接 return——新鱼于是
+    可以整个走进岛里（30Hz 时代由每帧遍历 pets_provider 自动覆盖，无此缺口）。
+    管线：spawn → body.refresh_hooks() → 新窗同样被钳出岛区。
+    """
+    _qapp()
+    pets = [WallWin(1000, 900, 200, 300)]
+    island, body = _make_body(tmp_path, pets)
+    try:
+        island.show()
+        body.start()
+        assert callable(getattr(pets[0], "_island_clamp_body", None)), "启动时已存在的窗应有钩子"
+
+        late = WallWin(1000, 1500, 200, 300)  # 启动之后才入列（spawn_in_process_window）
+        pets.append(late)
+        body.refresh_hooks()
+
+        assert callable(getattr(late, "_island_clamp_body", None)), (
+            "启动后新生的桌宠未挂上硬墙钩子——它会直接穿过灵动岛")
+        stadium = body._island_stadium()
+        ax0, ax1, ay, _rr, _h = stadium
+        late._move_window_towards((ax0 + ax1) / 2.0 - late._w / 2.0, ay - late._h / 2.0)
+        _assert_body_out_of_stadium(late, body, "启动后新生的桌宠")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_refresh_hooks_is_noop_when_stopped(tmp_path):
+    """碰撞体已停（果冻墙关掉）时刷新钩子不得把墙偷偷挂回来。"""
+    _qapp()
+    pets = [WallWin(1000, 900, 200, 300)]
+    island, body = _make_body(tmp_path, pets)
+    try:
+        island.show()
+        body.start()
+        body.stop()
+        late = WallWin(1000, 1500, 200, 300)
+        pets.append(late)
+        body.refresh_hooks()
+        assert getattr(late, "_island_clamp_body", None) is None, "停用状态下不该挂墙"
+        assert getattr(pets[0], "_island_clamp_body", None) is None, "停用状态下旧的钩子应已清掉"
+    finally:
+        island.hide()
+        island.deleteLater()

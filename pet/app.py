@@ -2604,6 +2604,10 @@ class AppShell:
         # build_tray=False：非主窗不再新建/替换进程级托盘，改由 _refresh_tray_menu 聚合。
         inst._build_window(character_id, build_tray=False)
         self._instances.append(inst)
+        # 硬墙钩子只在碰撞体 start 时挂过一轮：新窗补挂，否则新鱼会穿过岛。
+        island_body = getattr(self, "island_collision", None)
+        if island_body is not None:
+            island_body.refresh_hooks()
         inst._apply_spawn_offset()
         self._refresh_tray_menu()
         # 批5.2a §③.4：_check_autostart_wanted 逐窗（读各自 config），新窗入列后补一次。
