@@ -104,17 +104,17 @@ D:\dsh-pet\
 ├── dsh-pet-standalone-webm-chat.spec   # PyInstaller 规格（onedir）
 ├── pet\                          # 应用源码（128 个 .py，含子包）
 │   ├── __main__.py               # 入口：python -m pet
-│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（2751 行）
-│   ├── window.py                 # 桌宠主窗口（组合根，4507 行，顶满行数预算红线 4507）
-│   ├── config.py                 # 配置读取/清洗/迁移/持久化（1436 行）
+│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3264 行）
+│   ├── window.py                 # 桌宠主窗口（组合根，4624 行，预算 4632）
+│   ├── config.py                 # 配置读取/清洗/迁移/持久化（1565 行）
 │   ├── config_domains.py         # 配置域 facade（chat/agent_link/proactive/collision/menu）
-│   ├── modern_settings_dialog.py # 现代设置主对话框（2311 行，预算 2311，零余量）
+│   ├── modern_settings_dialog.py # 现代设置主对话框（2390 行，预算 2393，余 3 行）
 │   ├── settings_widgets.py       # 设置控件库（ToggleSwitch / SettingRow / ModernSelect …）
-│   ├── speech_bubble.py          # 气泡绘制与交互（1160 行）
-│   ├── speech_bubble_text.py     # 气泡分页/定位纯函数（272 行）
-│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（460 行，零 Qt / 零 edge_tts）
-│   ├── voice_chime_service.py    # ★ 语音报时服务层（506 行，tick + 合成 + 播放）
-│   ├── voice_chime_settings.py   # ★ 语音报时设置页（250 行）
+│   ├── speech_bubble.py          # 气泡绘制与交互（1491 行）
+│   ├── speech_bubble_text.py     # 气泡分页/定位纯函数（408 行）
+│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（457 行，零 Qt / 零 edge_tts）
+│   ├── voice_chime_service.py    # ★ 语音报时服务层（694 行，tick + 合成 + 播放）
+│   ├── voice_chime_settings.py   # ★ 语音报时设置页（234 行）
 │   ├── voice_chime_quotes.py     # ★ 台词/歌词纯数据库（96 行，中英各 40 条）
 │   ├── festival.py               # ★ 节日提醒纯逻辑层（395 行，零 Qt）
 │   ├── festival_data.py          # ★ 节日定义表 + 动态生日节日（158 行）
@@ -233,10 +233,8 @@ modern_settings_dialog.py
 
 | 文件 | 预算常量 | 当前预算 | 当前实测 |
 |---|---|---|---|
-| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4507** | 4507 |
-| `pet/modern_settings_dialog.py` | `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` | **2311** | 2311 |
-
-> `window.py` 预算于 2026-09-15 由 4478 上调到 4507：issue #98「点击桌宠导致全局复制粘贴失效」修复（`_apply_windows_no_activate()` 在 `showEvent` 置位 `WS_EX_NOACTIVATE`，window.py +29，原生样式操作本体在 `pet/platform_win.py`）。
+| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4632** | 4624 |
+| `pet/modern_settings_dialog.py` | `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` | **2393** | 2390 |
 
 **触发预算时的正确动作（优先级从高到低）**：
 
@@ -305,7 +303,7 @@ modern_settings_dialog.py
 
 | 键 | 含义 | 默认值 | 校验/清洗 |
 |---|---|---|---|
-| `voice_chime_enabled` | 语音报时总开关 | `True` | `clean_flag`（兼容 `"1"/"true"/"开"` 等字符串） |
+| `voice_chime_enabled` | 语音报时总开关 | `False`（新装默认；存量配置里的显式值保留） | `clean_flag`（兼容 `"1"/"true"/"开"` 等字符串） |
 | `voice_chime_schedule` | 调度模式 | `"hourly"` | `clean_schedule`：`hourly` / `every_30` / `every_15` / `every_5` / `every_minute` / `custom`，非法回落 `hourly` |
 | `voice_chime_custom_times` | 自定义时间点 | `""`（空串） | `clean_custom_times`：逗号/中文逗号/分号/空白分隔的 `HH:MM`，归一化为 `08:30` 形式，非法项丢弃 |
 | `voice_chime_voice` | edge-tts 音色名 | `"zh-CN-XiaoxiaoNeural"` | `clean_voice`：去空白、截断 64 字符，空值回落默认 |
@@ -329,9 +327,9 @@ modern_settings_dialog.py
 
 | 文件 | 行数 | 层 | 职责 |
 |---|---|---|---|
-| `pet/voice_chime.py` | 460 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、edge 参数与缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
-| `pet/voice_chime_service.py` | 506 | 服务 | 20s tick、预合成、`edge-tts` 后台合成、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪、降级 |
-| `pet/voice_chime_settings.py` | 250 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config` / `refresh_from_config` |
+| `pet/voice_chime.py` | 457 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、edge 参数与缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
+| `pet/voice_chime_service.py` | 694 | 服务 | 20s tick、预合成、`edge-tts` 后台合成、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪、降级 |
+| `pet/voice_chime_settings.py` | 234 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config` / `refresh_from_config` |
 | `pet/voice_chime_quotes.py` | 96 | 数据 | 中英台词/歌词库各 40 条（`CHINESE_QUOTES` / `ENGLISH_QUOTES`），纯数据零依赖 |
 
 ### 5.1 六种调度与「槽位幂等」
@@ -412,7 +410,7 @@ _on_tick(now)
 |---|---|
 | 未安装 `edge-tts` | 合成直接失败 → `_notify_missing_tts()` 给出提示，**气泡照常**显示报时与台词，无声 |
 | 网络/代理异常导致合成失败 | 同上：有气泡无声音，日志留痕；已缓存的文本仍可直接播 |
-| `voice_chime_enabled=False` | AppShell 不创建服务；但右键「立即报时」与设置页试听仍可用（走 `trigger_voice_chime_now` → `say_now`，无视总开关） |
+| `voice_chime_enabled=False` | AppShell 不创建服务；「立即报时」菜单项（默认隐藏，菜单编辑器可加回）与设置页试听仍可用（走 `trigger_voice_chime_now` → `say_now`，无视总开关） |
 | `voice_chime_show_bubble=False` | 只出声不出气泡 |
 | `voice_chime_show_quote=False` | 只报时间，不带台词/歌词 |
 | 设置窗口打开导致 `window.show_bubble` 被抑制 | 报时属用户主动关注事件，`_bubble()` 检测到抑制时**直接经桌宠气泡位（`win._speech_bubble`）展示**，避免闪一下就丢 |
@@ -515,7 +513,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 1. 启动进程存活 >8 秒，无新增 `_MEI`。
 2. 设置页可见「语音报时」域全部行（含**试听按钮**）——这是 `SettingRow` 收集机制的历史事故点。
 3. 把 `voice_chime_schedule` 临时设为 `every_minute`，观察 1-2 分钟内：`%APPDATA%\dsh-pet-standalone-<variant>\voice_chime_cache\` 出现 mp3，气泡与语音内容一致，随后缓存文件数随裁剪策略收敛。
-4. 右键菜单「立即报时」「启用/关闭语音报时」可用且状态同步。
+4. 语音报时/节日四项默认不在右键菜单（模板 `visible:false`）；经菜单编辑器加回后「立即报时」「启用/关闭语音报时」可用且状态同步。
 5. 断网（或卸载 edge-tts）时仍有气泡、无崩溃。
 
 ---
@@ -574,7 +572,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 3. **设置页控件必须包 `SettingRow`**：普通布局里的按钮在打包版**不可见**；且 `SettingRow` 的键在 `objectName`（`settingRow_<key>`），校验收集性要用 `objectName().startswith("settingRow_")`，不要按属性 `key` 查。
 4. **`modern_settings_dialog.py` 顶层禁止 import `pet.chat`**：no-chat 变体会 exclude `pet.chat`，顶层 import 会让设置界面整体打不开。
 5. **菜单动作四件套同步**：registry + 模板 JSON + 两处测试断言，缺一即红。
-6. **`window.py`「只许瘦不许胖」**：当前 4507 行已顶满预算（4507），下一个功能必须先拆控制器，再校准预算（并写日期+理由）。
+6. **`window.py`「只许瘦不许胖」**：当前 4624 行（预算 4632，余 8 行）。增量按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器；超预算只随实测校准（写日期+理由）。
 7. **纯逻辑层禁 Qt / 禁 edge_tts**：`voice_chime.py`、`voice_chime_quotes.py` 不得 import Qt 与 edge_tts；`edge-tts` 只在服务层惰性导入（缺失即降级为纯气泡）。
 8. **跨线程纪律**：`_TTSWorker` 中禁止触碰 QWidget/QMediaPlayer；一律经 `_AudioBridge` queued 信号回 GUI 线程。
 9. **预合成状态的清理时机**：`_consume_precache` 会清空整组状态，气泡文本必须先取后用（历史缺陷点）。
@@ -593,9 +591,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 
 | 优先级 | 事项 | 说明 / 切入点 |
 |---|---|---|
-| 高 | 承接 PR [#131](https://github.com/MerZlin/dsh-pet-indesktop/pull/131) 的评审与 CI 跟进 | 当前 open（`feat/festival-reminder-v2` @ `1ca34af` → `main`，11 files +844/-11，承接 #127）；合并后再有增量改动时，按 8.2 重新起承接分支 + 承接 PR |
-| 高 | `window.py` 增量拆分 | 预算已顶满（4507）；按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器 |
-| 高 | `modern_settings_dialog.py` 再拆分 | 预算与实测同为 2311（**零余量**）；新设置页一律先拆到独立 `*_settings.py` |
+| 高 | `window.py` 增量拆分 | 4624/4632；按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器 |
+| 高 | `modern_settings_dialog.py` 再拆分 | 余量仅 3 行（2390/2393）；新设置页应先拆到独立 `*_settings.py` |
 | 中 | 节日动画素材缺口补齐（复活节/母亲节/父亲节） | 补素材后从 `festival_animations.KNOWN_GAPS` 移除，对应用例会变红提醒 |
 | 中 | 离线音色兜底（候选：Windows SAPI / pyttsx3） | 当前 edge-tts 不可用时仅气泡；可评估本地离线音色作为第二合成后端 |
 | 中 | 任务栏隐藏模式下的报时行为验证 | 隐藏/自动隐藏场景下气泡与播放位置的体验待专项验证 |

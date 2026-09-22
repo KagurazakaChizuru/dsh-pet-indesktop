@@ -29,7 +29,7 @@ FEET_Y = 330 / 360 * CANVAS_H  # = 330
 # 落地偏移：帧下移多少让脚底恰好落在窗口底线
 PAD = CANVAS_H - FEET_Y        # = 30
 
-# 视频帧时长（毫秒）—— 24fps → 1000/24 ≈ 42ms，用于时长/移动插值换算
+# 视频帧时长（毫秒）—— 24fps → 1000/24 ≈ 42ms，用于时长/帧率换算
 FRAME_MS = 42
 
 # 动画链概率（与 client.js 一致）：30% 待机 / 10% 转向 / 40% 动作 / 20% 移动
@@ -41,8 +41,9 @@ P_ACTS = 0.80  # 累计阈值：<0.8 动作，>=0.8 移动
 MOVE_MIN_PX = 60
 MOVE_MAX_PX = 240
 MOVE_MARGIN = 20    # 屏幕边缘安全边距
-MOVE_LEAD_SEC = 2   # 动画开头 2s 准备动作，位置不动
-MOVE_TAIL_SEC = 2   # 动画结尾 2s 收尾动作，位置不动
+# 移动动画每圈地面位移缺省值（scale=1.0，px）；角色包可在 videos/move_strides.json
+# 逐动画覆盖（库加载进 MovieLibrary.move_strides），缺数据时回退本值
+MOVE_STRIDE_DEFAULT_PX = 120
 
 # 拖拽判定阈值（像素，缩放前逻辑像素）
 DRAG_THRESHOLD = 5
@@ -124,9 +125,6 @@ ANIM_FILES: dict[str, str] = {
     '中秋赏月吃月饼': '中秋赏月吃月饼.webm',
     '堆雪人': '堆雪人.webm',
 }
-
-# 兼容旧字段名：webm 文件名映射
-WEBM_FILES: dict[str, str] = ANIM_FILES
 
 # 动画分组（语义与 client.js 一致）
 IDLE = '待机呼吸休闲'

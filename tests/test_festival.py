@@ -138,15 +138,6 @@ def test_nth_weekday_dates_2026():
     assert C.nth_weekday(2026, 11, 3, 4).isoformat() == "2026-11-26"  # 通用工具：11 月第 4 个周四
 
 
-def test_solar_terms_of_year_2026():
-    terms = C.solar_terms_of_year(2026)
-    assert len(terms) == 24
-    assert terms["立春"].isoformat() == "2026-02-04"
-    assert terms["春分"].isoformat() == "2026-03-20"
-    assert terms["清明"].isoformat() == "2026-04-05"
-    assert terms["冬至"].isoformat() == "2026-12-22"
-
-
 def test_leap_month_is_flagged_and_excluded_from_festivals():
     """闰月必须被识别，且闰月里的同号日不得被当成农历节日。
 
@@ -352,11 +343,6 @@ def test_build_festival_text_empty_when_nothing_matches():
     assert F.build_festival_text(PLAIN_DAY, cfg()) == ""
     # 分类全关时同样不提醒
     assert F.build_festival_text(dt.date(2026, 2, 17), cfg(cn=False, solar_terms=False, west=False)) == ""
-
-
-def test_festival_label_for_menu():
-    assert F.festival_label(dt.date(2026, 2, 17), cfg()) == "春节"
-    assert F.festival_label(PLAIN_DAY, cfg()) == ""
 
 
 def test_no_festival_text_is_available_for_manual_entry():

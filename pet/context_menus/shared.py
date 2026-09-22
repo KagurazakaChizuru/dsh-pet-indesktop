@@ -10,7 +10,7 @@ import time
 
 import shiboken6
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QActionGroup, QDesktopServices, QIcon, QPixmap
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QMenu
@@ -19,7 +19,7 @@ from .. import autostart as autostart_mod
 from .. import catalog
 from ..harness_launcher import launch_harness_gui
 from ..report_gates import REPORT_GATE_DEFAULTS
-from ..updater import QUARK_PAN_URL, REPO_URL
+from ..updater import QUARK_PAN_URL as QUARK_PAN_URL, REPO_URL as REPO_URL
 from .icons import fitted_pet_pixmap_icon, pet_avatar_menu_icon, vector_menu_icon
 from .menu_styles.common import inherit_menu_style
 
@@ -521,7 +521,33 @@ def add_edge_probe(menu: QMenu, pet, *, icons: bool = True):
 
 
 def add_harness(menu: QMenu, pet, *, icons: bool = True):
-    return add_action(menu, "启动 DeepSeek Harness", "harness" if icons else None, lambda: launch_harness_gui(pet), close_on_trigger=True)
+    """DeepSeek Harness 子菜单：启动 / 重启 / 停止。
+
+    为什么用子菜单而不是三个平级项：菜单模板（pet/menu_templates/*.json）与用户
+    自己编排过的布局里只有 ``harness`` 这一个 id，新增 id 对老布局不生效；子菜单
+    挂在既有 id 上，老用户的菜单立刻拿到完整生命周期入口。
+
+    重启/停止是破坏性动作（可能结束你自己在终端里跑着的 dsh），带确认框；启动
+    保持原语义（复用本机实例并打开页面）。
+    """
+    start_icon = "harness" if icons else None
+    submenu = add_submenu(menu, "DeepSeek Harness", start_icon)
+    # 三个动作都 close_on_trigger：菜单先关闭、回调延迟到菜单关闭后执行——
+    # 重启/停止的确认框是模态框，macOS 原生菜单跟踪会话中弹模态框会被
+    # AppKit 抑制（与设置对话框首次点击无反应同源）。
+    add_action(submenu, "启动并打开页面", start_icon, lambda: launch_harness_gui(pet),
+               close_on_trigger=True)
+    add_action(
+        submenu, "重启服务", "play" if icons else None,
+        lambda: launch_harness_gui(pet, action="restart"),
+        close_on_trigger=True,
+    )
+    add_action(
+        submenu, "停止服务", "quit" if icons else None,
+        lambda: launch_harness_gui(pet, action="stop"),
+        close_on_trigger=True,
+    )
+    return submenu
 
 
 def _music_controller(pet):

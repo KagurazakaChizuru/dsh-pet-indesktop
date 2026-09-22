@@ -80,7 +80,7 @@
   `_fs_user_busy_state` / `_on_fullscreen_changed` /
   `set_auto_hide_fullscreen` / `_on_application_state_changed`
 - 屏幕恢复重试：`_arm_screen_restore_retry` / `_disarm_screen_restore_retry` /
-  `_screen_retry_tick` / `_on_screen_added_restore`
+  `_screen_retry_tick`
 - 位置持久化与多实例避让：`_restore_position` / `_save_position` /
   `save_position` / `_go_default_corner` / `go_default_corner` /
   `_screen_available` / `screen_available` / `_live_instance_rects` /

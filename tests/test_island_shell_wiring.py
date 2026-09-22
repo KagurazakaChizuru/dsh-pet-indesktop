@@ -62,7 +62,6 @@ def test_shell_creates_island_and_local_collision_body(tmp_path):
         body = shell.island_collision
         assert island is not None and island.isVisible()
         assert body is not None and body._running is True
-        assert body._timer.isActive()
         # 几何变化钩子与可见性回调都指向碰撞体
         assert island.on_geometry_changed == body.submit
         assert island.on_pet_visibility_changed == body.set_own_pet_visible
@@ -74,7 +73,7 @@ def test_shell_creates_island_and_local_collision_body(tmp_path):
 
 
 def test_collision_body_restart_after_disable(tmp_path):
-    """关→开果冻墙：本地碰撞体停表/重开都干净（无 IPC session 语义）。"""
+    """关→开果冻墙：本地碰撞体停/开都干净（无定时器、无 IPC session 语义）。"""
     app = _qapp()
     shell = _make_shell(tmp_path)
     try:
@@ -84,11 +83,11 @@ def test_collision_body_restart_after_disable(tmp_path):
         cfg = dict(shell.config.get("dynamic_island"))
         cfg["collision_enabled"] = False
         shell._sync_island_collision(cfg)
-        assert body._running is False and not body._timer.isActive()
+        assert body._running is False
         # 再打开 → 重新运行
         cfg["collision_enabled"] = True
         shell._sync_island_collision(cfg)
-        assert body._running is True and body._timer.isActive()
+        assert body._running is True
     finally:
         _teardown_shell(shell)
         app.processEvents()

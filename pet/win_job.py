@@ -149,11 +149,6 @@ def _ensure_job():
     return _job_handle
 
 
-def is_available() -> bool:
-    """Job Object 是否已成功建立（诊断/测试用）。"""
-    return _ensure_job() is not None
-
-
 def adopt(proc) -> bool:
     """把一个已创建的子进程挂进 kill-on-close job（幂等；非 Windows 无操作）。
 
@@ -204,6 +199,7 @@ def adopt(proc) -> bool:
                 pass
 
 
+# 测试 seam：仅供测试注入，产品侧无调用
 def _reset_for_tests() -> None:
     """仅测试用：允许重新建 job（生产代码绝不复位——句柄必须活到进程退出）。"""
     global _job_handle, _configure_failed

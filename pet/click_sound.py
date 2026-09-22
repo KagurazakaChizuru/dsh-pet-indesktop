@@ -517,7 +517,6 @@ class ClickSoundPool:
         state = self._click_pair_state.setdefault((str(press), str(release)), {})
         state["generation"] = int(state.get("generation", 0)) + 1
         state["press_started_at"] = time.monotonic()
-        state["press_played"] = True
         state["release_scheduled"] = False
         state["release_played"] = False
         return self.play_sound(press, volume=volume)
@@ -657,6 +656,7 @@ _pool = ClickSoundPool()
 # 测试桩点（替换模块级名称），其余模块级 helper 属生产内部实现。
 # ---------------------------------------------------------------------------
 
+# 测试 seam：仅供测试注入，产品侧无调用
 def _warm_player_pool() -> None:
     """预创建 QMediaPlayer 池，避免首次点击时初始化 QtMultimedia 造成卡顿。"""
     _pool.warm_player_pool()

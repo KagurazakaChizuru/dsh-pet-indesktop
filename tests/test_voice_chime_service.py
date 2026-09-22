@@ -158,7 +158,7 @@ def test_service_cfg_matches_contract_shape_at_construction(tmp_path, monkeypatc
         "show_bubble", "show_quote", "custom_quotes_zh", "custom_quotes_en",
     } <= set(service._cfg)
     assert service._cfg["voice"] == DEFAULT_VOICE
-    assert service._cfg["enabled"] is True
+    assert service._cfg["enabled"] is False  # 默认关闭（2026-09-19 起），显式开启后才启动调度
 
 
 # ------------------------------------------------------------ 服务：合成/播放路径
@@ -343,22 +343,26 @@ def test_voice_chime_service_is_lazy_gated_by_config(tmp_path):
 
 
 def test_toggle_voice_chime_flips_config_and_syncs(tmp_path):
-    """右键「关闭/启用语音报时」：翻转配置、落盘、并同步服务启停。"""
+    """右键「启用/关闭语音报时」：翻转配置、落盘、并同步服务启停。
+
+    默认关闭（2026-09-19 起）：初始无服务；第一次 toggle 开启并建服务，
+    第二次 toggle 关闭并释放。
+    """
     from pet.app import AppShell
 
     _qapp()
     cfg = Config(base=tmp_path)
     shell = AppShell(_qapp(), cfg, enable_chat=False)
-    assert shell.voice_chime_service is not None
-
-    shell.toggle_voice_chime()
-    assert cfg.get("voice_chime_enabled") is False
-    assert shell.voice_chime_service is None
-    assert Config(base=tmp_path).get("voice_chime_enabled") is False, "开关须落盘"
+    assert shell.voice_chime_service is None, "默认关闭：初始不得创建报时服务"
 
     shell.toggle_voice_chime()
     assert cfg.get("voice_chime_enabled") is True
     assert shell.voice_chime_service is not None
+    assert Config(base=tmp_path).get("voice_chime_enabled") is True, "开关须落盘"
+
+    shell.toggle_voice_chime()
+    assert cfg.get("voice_chime_enabled") is False
+    assert shell.voice_chime_service is None
 
 
 def test_audio_channel_survives_on_festival_speak_alone(tmp_path):
@@ -406,6 +410,7 @@ def test_appshell_injects_yield_hook_into_chime_service(tmp_path):
 
     _qapp()
     cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", True)  # 默认关闭（2026-09-19 起），测通道创建须显式开启
     shell = AppShell(_qapp(), cfg, enable_chat=False)
 
     service = shell.voice_chime_service
@@ -422,6 +427,7 @@ def test_window_callbacks_for_voice_chime_are_wired(tmp_path):
 
     _qapp()
     cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", True)  # 默认关闭，这里需要通道实例存在
     shell = AppShell(_qapp(), cfg, enable_chat=False)
 
     class _BareWin:
@@ -481,6 +487,7 @@ def test_about_to_quit_stops_voice_chime_service(tmp_path, monkeypatch):
             pass
 
     cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", True)  # 默认关闭（2026-09-19 起），测退出收口须显式开启
     # custom + 空时间点：本次启动绝不命中报时点（用例不打网络、不依赖当前时刻）
     cfg.set("voice_chime_schedule", "custom")
     cfg.set("voice_chime_custom_times", "")
@@ -611,6 +618,7 @@ def test_stop_clears_pending_speech(tmp_path, monkeypatch):
 def test_yield_slot_hook_makes_chime_give_up_the_whole_minute(tmp_path, monkeypatch):
     """报时让位：本分钟不发声，且槽位被消费，同分钟后续 tick 不再询问。"""
     service, app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)  # 默认关闭（2026-09-19 起），测调度行为须显式开启
     cfg.set("voice_chime_schedule", "hourly")
     service.apply_config()
     monkeypatch.setattr(service, "_fire", lambda *a, **k: pytest.fail("让位时不得报时"))
@@ -632,6 +640,7 @@ def test_yield_slot_hook_makes_chime_give_up_the_whole_minute(tmp_path, monkeypa
 def test_chime_still_fires_when_hook_declines(tmp_path, monkeypatch):
     """钩子说"不让位"时，报时照常发声——让位是例外而非常态。"""
     service, app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)  # 默认关闭，测调度行为须显式开启
     cfg.set("voice_chime_schedule", "hourly")
     service.apply_config()
     service.yield_slot = lambda slot: False
@@ -647,6 +656,7 @@ def test_chime_still_fires_when_hook_declines(tmp_path, monkeypatch):
 def test_service_without_hook_behaves_exactly_as_before(tmp_path, monkeypatch):
     """默认无钩子（未注入）时报时行为不变——这是对既有功能的回归防线。"""
     service, app, cfg = _service(tmp_path, monkeypatch)
+    cfg.set("voice_chime_enabled", True)  # 默认关闭，测调度行为须显式开启
     cfg.set("voice_chime_schedule", "hourly")
     service.apply_config()
     assert service.yield_slot is None
@@ -819,3 +829,54 @@ def test_service_bubbles_install_hint_when_edge_tts_import_fails(tmp_path, monke
 
     assert app.win.bubbles, "缺 edge-tts 时必须给用户可见提示（不能静默）"
     assert "pip install edge-tts" in app.win.bubbles[-1][0]
+
+
+def test_fire_blocked_by_busy_queues_and_plays_after_synthesis_completes(tmp_path, monkeypatch):
+    """到点回退即时合成不得被 busy 门挡死：预合成在飞时 _fire 必须排队，
+    合成完成后自动补播——此前直接丢弃且 _last_slot 已盖戳，到点静默丢报时。"""
+    import time as _time
+    from datetime import datetime as _dt
+
+    service, app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    # 预合成在飞（_maybe_precache 置 busy，角色 precache）
+    service._busy = True
+    service._busy_since = _time.monotonic()
+    service._synthesis_role = "precache"
+    played: list = []
+    service._play_and_bubble = lambda path, text, bubble_text=None: played.append(text)
+    workers_before = len(_WorkerSpy.instances)
+
+    service._fire("现在时刻，上午十点整", _dt.now(), "10:00")
+    assert played == [], "合成在飞时不得立即播放"
+    assert len(_WorkerSpy.instances) == workers_before, "合成在飞时不得再起一路合成"
+
+    # 预合成完成：排队的报时必须补播（缓存未落盘则新起一路即时合成）
+    service._on_synthesized(str(service._cache_dir / "p.mp3"), "现在时刻，上午十点整", "")
+    assert played or len(_WorkerSpy.instances) > workers_before, \
+        "合成完成后，被 busy 门拦下的报时必须补播"
+    if not played:
+        _WorkerSpy.instances[-1].finish(path=str(service._cache_dir / "x.mp3"))
+    assert played, "补播链路必须到达播放"
+
+
+def test_queued_fire_discarded_after_stop(tmp_path, monkeypatch):
+    """stop()（关闭开关/退出）后，排队的待补播报一并作废，不得再出声。"""
+    import time as _time
+    from datetime import datetime as _dt
+
+    service, app, cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    service._busy = True
+    service._busy_since = _time.monotonic()
+    service._synthesis_role = "precache"
+    played: list = []
+    service._play_and_bubble = lambda path, text, bubble_text=None: played.append(text)
+    workers_before = len(_WorkerSpy.instances)
+
+    service._fire("现在时刻，上午十点整", _dt.now(), "10:00")
+    service.stop()
+    service._on_synthesized(str(service._cache_dir / "p.mp3"), "现在时刻，上午十点整", "")
+
+    assert played == []
+    assert len(_WorkerSpy.instances) == workers_before, "stop 后不得补播排队项"

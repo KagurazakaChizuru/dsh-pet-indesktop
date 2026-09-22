@@ -409,14 +409,14 @@ def test_cleanup_keeps_tracking_via_module_lifecycle_manager(app):
     assert clip in webm_clip_mod._ORPHAN_REGISTRY.holders(), "cleanup 后存活 reader 的追踪必须由管理器持有"
 
     # 手动触发一次模块回收：卡死 reader 仍在 → 继续持有（不静默丢弃）
-    webm_clip_mod._reap_orphaned_clips()
+    webm_clip_mod._ORPHAN_REGISTRY.reap()
     assert clip in webm_clip_mod._ORPHAN_REGISTRY.holders()
     assert clip._retired[0].thread.is_alive()
 
     # reader 退出后：回收清空退役池 → 管理器释放该 clip
     clip.reader_release.set()
     clip._retired[0].thread.join(5.0)
-    webm_clip_mod._reap_orphaned_clips()
+    webm_clip_mod._ORPHAN_REGISTRY.reap()
     assert len(clip._retired) == 0
     assert clip not in webm_clip_mod._ORPHAN_REGISTRY.holders(), "退役池清空后管理器必须释放追踪"
     app.processEvents()
@@ -593,7 +593,7 @@ def test_reap_releases_registry_lock_during_clip_reap(app, monkeypatch):
     monkeypatch.setattr(clip, "_reap_retired", _blocking_reap_retired)
 
     reaper = threading.Thread(
-        target=webm_clip_mod._reap_orphaned_clips, daemon=True
+        target=webm_clip_mod._ORPHAN_REGISTRY.reap, daemon=True
     )
     reaper.start()
     assert entered.wait(5.0), "sweep 必须已进入 clip 的 _reap_retired（锁外窗口）"

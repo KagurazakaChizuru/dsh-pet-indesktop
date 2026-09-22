@@ -81,7 +81,7 @@ class _FakeWindow:
     def remove_runtime_marker(self):
         self.calls.append("marker_del")
         slot_manager_mod.delete_runtime_marker(
-            self.cfg.dir, self.cfg.instance_id, versioned=self._single_process_spawn)
+            self.cfg.dir, self.cfg.instance_id)
 
     def detach_collision_session(self):
         self.calls.append("detach_collision")
@@ -186,6 +186,46 @@ def test_spawn_in_process_creates_isolated_second_window(tmp_path, app, monkeypa
     assert second.win._single_process_spawn is True
 
     # 释放：停本测试启动的 second 会话 + 解锁两把锁
+    _stop_sessions(second)
+    second.win.close()
+    slot_manager_mod._unlock_file(second.slot_handle)
+    second.slot_handle = None
+    slot_manager_mod._unlock_file(primary_handle)
+
+
+
+
+def test_spawn_refreshes_island_wall_hooks(tmp_path, app, monkeypatch):
+    """生小肥鱼后必须刷新灵动岛硬墙钩子——否则新鱼直接穿过岛（回归）。
+
+    硬墙 hook 只在碰撞体 start() 挂过一轮（那一刻已存在的窗口），本进程新窗
+    不在列表里；spawn 路径必须补挂（island_collision.refresh_hooks）。
+    """
+    shell, config, primary_handle = _make_primary_with_slot(tmp_path)
+
+    def fake_build_window(self, character_id, lib=None, build_tray=True):
+        win = _FakeWindow()
+        win.cfg = self.config
+        win._single_process_spawn = self.shell._single_process_spawn
+        self.win = win
+        return win
+
+    monkeypatch.setattr(app_mod.PetInstance, "_build_window", fake_build_window)
+    monkeypatch.setattr(app_mod.PetInstance, "_apply_spawn_offset", lambda self: None)
+    monkeypatch.setattr(app_mod.PetInstance, "_check_autostart_wanted", lambda self: None)
+
+    class _RecordingBody:
+        def __init__(self):
+            self.calls = 0
+
+        def refresh_hooks(self):
+            self.calls += 1
+
+    body = _RecordingBody()
+    shell.island_collision = body
+    second = shell.spawn_in_process_window(1)
+    assert body.calls == 1, "spawn 后未刷新硬墙钩子——新鱼会穿过灵动岛"
+
     _stop_sessions(second)
     second.win.close()
     slot_manager_mod._unlock_file(second.slot_handle)

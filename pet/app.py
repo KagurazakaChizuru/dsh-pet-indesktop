@@ -457,6 +457,11 @@ class PetInstance:
         win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
         win.on_open_legacy_settings = None
         win.on_open_modern_settings = self._slot_wrap(self.open_modern_settings)
+        # 桌宠隐藏时的气泡改道面（DSH 联动等非交互反馈气泡 → 灵动岛，见
+        # window_alerts.redirect_hidden_bubble）；岛对话不可用时注入方返回 False。
+        win.hidden_bubble_redirect = self.shell._island_feedback_bubble
+        # 反馈面可用性探针：隐藏期联动监视器是否跳过低功耗暂停（mixin 消费）。
+        win.island_feedback_available = self.shell._island_feedback_available
         win.on_spawn_pet = self._slot_wrap(self.shell.spawn_pet)
         # 「退出子肥鱼」只挂给主肥鱼（instance_id 为空）：子肥鱼进程里该入口的
         # pid==os.getpid() 自我保护会跳过子鱼自己、把主鱼当子鱼 taskkill 掉
@@ -1066,8 +1071,9 @@ class AppShell:
         self.todo_panel = None
         if self._todo_wanted():
             self._ensure_todo_service()
-        # 语音报时：进程级单例（多窗共用调度器）。默认启用 → 启动即创建并
-        # 跑 20s tick；设置关闭后 stop 并释放。edge-tts 合成在后台线程，
+        # 语音报时：进程级单例（多窗共用调度器）。默认关闭（2026-09-19 起，
+        # 主动打扰型功能改由用户显式开启）→ 启动不创建；开启后跑 20s tick，
+        # 设置关闭后 stop 并释放。edge-tts 合成在后台线程，
         # 播放与气泡走 GUI 线程（QtMultimedia + win.show_bubble）。
         self.voice_chime_service = None
         if self._chime_wanted():
@@ -1207,7 +1213,7 @@ class AppShell:
     def _chime_wanted(self) -> bool:
         # 报时自身开启，或节日语音需要这条音频通道（两者共用一套合成与播放，
         # 因此"通道是否存在"取决于两者之一是否需要）。
-        return bool(self.config.get("voice_chime_enabled", True)) or self._festival_speak_wanted()
+        return bool(self.config.get("voice_chime_enabled", False)) or self._festival_speak_wanted()
 
     def _ensure_chime_service(self):
         """懒创建语音报时服务（报时 / 手动触发 / 节日语音播报共用）。"""
@@ -2017,9 +2023,11 @@ class AppShell:
     def _sync_island_collision(self, island_cfg) -> None:
         """果冻墙：按配置创建/启停岛的本进程碰撞体（island_collision.py）。
 
-        本进程直连检测（30Hz 圆链扫掠 + 本地结算），不走碰撞 IPC——
-        IPC 版的保活/快照时序在 GUI 卡顿时会让岛掉出碰撞世界（实机教训）。
-        岛的位置永远由用户拖拽决定；拖拽中岛速参与结算（岛=移动的拍子）。
+        同步硬墙（无 30Hz 检测/结算）：岛作为屏幕边界式位置墙，在统一位置
+        出口 move_window_towwards 里逐次钳制——身体框任何移动都进不了岛区，
+        杜绝采样间隙导致的穿透抽搐；岛被拖到桌宠身上由 on_geometry_changed
+        事件驱动推出。不走碰撞 IPC（IPC 版保活/快照时序在 GUI 卡顿时会让岛
+        掉出碰撞世界，实机教训）。
         """
         enabled = bool(island_cfg.get("collision_enabled", True)) \
             if isinstance(island_cfg, dict) else True
@@ -2107,6 +2115,36 @@ class AppShell:
         inst = getattr(self, "instance", None)
         if inst is not None and callable(getattr(inst, "open_chat", None)):
             inst.open_chat()
+
+    def _island_feedback_available(self) -> bool:
+        """桌宠隐藏期间灵动岛反馈面是否可用（window 的联动暂停决策探针）。
+
+        可用时隐藏不暂停联动监视器：DSH 事件继续驱动岛反馈气泡；
+        不可用（无聊天模块 / 岛未启用 / hidden_chat 关）时照旧暂停省电。"""
+        return self._island_chat_available()
+
+    def _island_feedback_bubble(self, text: str, subtitle: str = "",
+                                duration_ms: int = 3200) -> bool:
+        """桌宠隐藏时的反馈气泡改道面（window_alerts.redirect_hidden_bubble 注入调用）。
+
+        DSH 联动状态/提醒等非交互气泡在桌宠隐藏期间改弹到岛对话气泡
+        （预览式，不抢焦点，超时自动收回，后到覆盖）。岛对话不可用
+        （无聊天模块 / 岛未启用 / hidden_chat 关 / 桌宠其实可见）时返回
+        False，调用方维持原丢弃行为。"""
+        if self._aggregate_pet_visible() or not self._island_chat_available():
+            return False
+        island = getattr(self, "island", None)
+        if island is None or not shiboken6.isValid(island):
+            return False
+        from .island_chat import IslandChatBubble
+
+        if getattr(self, "island_chat", None) is None:
+            self.island_chat = IslandChatBubble(self.config)
+            self.island_chat.show_pet_requested.connect(self._show_pets_from_island_chat)
+        bubble = self.island_chat
+        bubble.open_chat_callback = self._open_full_chat_from_island_chat
+        bubble.show_feedback(island, text, subtitle=subtitle, duration_ms=duration_ms)
+        return True
 
     def _show_pets_from_island_chat(self) -> None:
         """岛对话气泡里的「显示桌宠」：恢复全部窗并同步岛状态。"""
@@ -2566,6 +2604,10 @@ class AppShell:
         # build_tray=False：非主窗不再新建/替换进程级托盘，改由 _refresh_tray_menu 聚合。
         inst._build_window(character_id, build_tray=False)
         self._instances.append(inst)
+        # 硬墙钩子只在碰撞体 start 时挂过一轮：新窗补挂，否则新鱼会穿过岛。
+        island_body = getattr(self, "island_collision", None)
+        if island_body is not None:
+            island_body.refresh_hooks()
         inst._apply_spawn_offset()
         self._refresh_tray_menu()
         # 批5.2a §③.4：_check_autostart_wanted 逐窗（读各自 config），新窗入列后补一次。
@@ -2848,21 +2890,30 @@ class AppShell:
         self.todo_panel = None
 
     def trigger_voice_chime_now(self, text: str = "") -> None:
-        """手动报时：右键菜单「立即报时」/ 设置页试听共用。
+        """手动报时：设置页试听入口与菜单编排加回的「立即报时」共用（该菜单项默认隐藏）。
 
         无论报时总开关是否开启都会执行（试听/手动触发语义），服务懒创建。
         """
         service = self._ensure_chime_service()
         service.say_now(text=text)
 
-    def toggle_voice_chime(self) -> None:
-        """右键菜单「启用语音报时」开关：翻转配置并同步服务启停。"""
-        self.config.set("voice_chime_enabled", not bool(self.config.get("voice_chime_enabled", True)))
+    def _toggle_flag(self, key: str, sync) -> None:
+        """布尔开关的统一实现：翻转配置 → 落盘 → 同步服务启停。
+
+        语音报时/节日提醒两个开关此前逐字同构（读旧值取反、save、调各自的
+        `_sync_*_service`），这里收成一处；读旧值的口径（`bool(get(...))`
+        后取反）与落盘时机逐点不变。
+        """
+        self.config.set(key, not bool(self.config.get(key, False)))
         self.config.save()
-        self._sync_chime_service()
+        sync()
+
+    def toggle_voice_chime(self) -> None:
+        """「启用/关闭语音报时」开关（默认隐藏、菜单编辑器可加回）：翻转配置并同步服务启停。"""
+        self._toggle_flag("voice_chime_enabled", self._sync_chime_service)
 
     def trigger_festival_now(self) -> None:
-        """手动提醒「今日节日」：右键菜单入口。
+        """手动提醒「今日节日」：设置页「立即试听」与菜单编排加回的「今日节日」共用（该菜单项默认隐藏）。
 
         与语音报时的手动触发同语义——**无视总开关**，服务懒创建；当天没有
         节日/节气时给出明确文案，不做静默无反应。
@@ -2871,13 +2922,8 @@ class AppShell:
         service.remind_now()
 
     def toggle_festival_reminder(self) -> None:
-        """右键菜单「启用节日提醒」开关：翻转配置并同步服务启停。"""
-        self.config.set(
-            "festival_reminder_enabled",
-            not bool(self.config.get("festival_reminder_enabled", False)),
-        )
-        self.config.save()
-        self._sync_festival_service()
+        """「启用/关闭节日提醒」开关（默认隐藏、菜单编辑器可加回）：翻转配置并同步服务启停。"""
+        self._toggle_flag("festival_reminder_enabled", self._sync_festival_service)
 
     def system_notify(self, title: str, message: str, *, on_click=None, duration_ms: int = 5000) -> None:
         """Show a bottom-right desktop notification (self-drawn, tray-independent)."""

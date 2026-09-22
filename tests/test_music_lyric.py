@@ -632,30 +632,6 @@ class _FakeWin(QObject):
         return True
 
 
-def test_compose_bubble_text_two_lines():
-    """气泡文本 = 常驻标题一行 + 当前歌词一行。"""
-    from pet.music_lyric_controller import compose_bubble_text
-
-    assert compose_bubble_text("我在唱《夜曲》", "一群嗜血的蚂蚁") == (
-        "我在唱《夜曲》\n一群嗜血的蚂蚁"
-    )
-
-
-def test_compose_bubble_text_without_lyric():
-    """还没有歌词（取词中 / 无词歌）时只显示标题，不能留空。"""
-    from pet.music_lyric_controller import compose_bubble_text
-
-    assert compose_bubble_text("我在唱《夜曲》") == "我在唱《夜曲》"
-    assert compose_bubble_text("我在唱《夜曲》", "") == "我在唱《夜曲》"
-
-
-def test_compose_bubble_text_handles_missing_title():
-    from pet.music_lyric_controller import compose_bubble_text
-
-    assert compose_bubble_text("", "只有歌词") == "只有歌词"
-    assert compose_bubble_text("", "") == ""
-
-
 def test_title_shows_immediately_on_track_change():
     """切歌瞬间就出标题，不等取词——填上取词那几秒的空窗。"""
     from pet.music_lyric_controller import MusicLyricController

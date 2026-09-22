@@ -61,6 +61,7 @@ class TestWorkerLifecycle:
         received = []
         mon.state_event.connect(lambda ev: received.append(ev.state))
         polls = []
+        waits = []
         first_poll_done = threading.Event()
         orig_poll = mon._poll
         def tracked_poll(gen=None):
@@ -75,11 +76,20 @@ class TestWorkerLifecycle:
             # 先等 worker 完成首轮轮询（tailer backfill 跳到文件末尾），
             # 否则写入的事件会被 backfill 防护当成历史跳过
             assert wait_until(first_poll_done.is_set)
+            # 轮询周期计数：worker 每轮循环都经 _worker_stop.wait 醒一次并重查
+            # _paused。固定 sleep 赌「worker 已空转过一轮 pause」在慢 CI 上会
+            # 平凡变绿（worker 尚未轮询时 received==[] 恒真，pause 回归被放过）。
+            orig_wait = mon._worker_stop.wait
+            mon._worker_stop.wait = lambda timeout: (waits.append(1), orig_wait(timeout))[1]
             mon.pause()
-            time.sleep(0.15)  # 确保 worker 至少空转过了一轮 pause
+            # 等 worker 在 pause 状态下至少完成两个完整轮询周期（每周期都会
+            # 重查 _paused）——此后「不读取」的断言才有判别力。
+            paused_at = len(waits)
+            assert wait_until(lambda: len(waits) >= paused_at + 2)
             with open(mon.events_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"state": "working"}) + "\n")
-            time.sleep(0.15)
+            # 再给一个 pause 周期：worker 若没真 pause，这一轮就会把事件读走
+            assert wait_until(lambda: len(waits) >= paused_at + 3)
             assert received == []  # pause 期间不得读取/发射
             mon.resume()
             assert wait_until(lambda: received == ["working"])
@@ -203,12 +213,16 @@ class TestWorkerLifecycle:
         """worker 首轮先等一个周期：启动瞬间不抢读（直调 _poll 的测试 seam）。"""
         mon = _make_monitor(tmp_path)
         mon._POLL_INTERVAL_S = 0.2
+        # 固定 sleep 赌「尚未轮询」在 worker 未被调度时平凡为真（坏行为也绿）。
+        # 改为正向证据 + 时间窗：首轮轮询必须真实发生（worker 活着），且发生
+        # 时刻距 start 不得短于一个轮询周期（留 20% 余量防时钟/调度抖动）。
         polled = []
         orig_poll = mon._poll
         mon._poll = lambda gen=None: (polled.append(1), orig_poll(gen=gen))
+        t0 = time.monotonic()  # 含 start 内部开销：时间窗下界覆盖启动全程
         mon.start()
-        time.sleep(0.05)  # 短于首轮等待：不应有轮询发生
-        assert polled == []
+        assert wait_until(lambda: polled), "首轮轮询最终必须发生（worker 活着）"
+        assert time.monotonic() - t0 >= mon._POLL_INTERVAL_S * 0.8,             "首轮轮询必须先等一个周期（启动瞬间不抢读）"
         mon.stop()
 
 class TestDestroyedFallback:

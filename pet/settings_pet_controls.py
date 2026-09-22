@@ -40,7 +40,7 @@ from .config import (
 )
 from .context_menus.icons import vector_widget_icon
 from .fun_image_popup import oijingjing_image_path, resolve_fun_asset
-from .persona_phrases import PUBLIC_DIALOGUE_EVENTS, default_phrases, phrase_keys
+from .persona_phrases import PUBLIC_DIALOGUE_EVENTS, phrase_keys
 from .persona_template import build_persona_template
 from .report_gates import REPORT_GATE_DEFAULTS, REPORT_GATE_KEYS
 from .settings_widgets import (
@@ -321,6 +321,11 @@ def build_pet_controls(host) -> None:
     host.self_talk_image_scale_spin.setRange(50, 300)
     host.self_talk_image_scale_spin.setSuffix(" %")
     host.self_talk_image_scale_spin.setValue(int(host.config.get("self_talk_image_scale", 100)))
+    # 气泡文字大小：与配图大小并列的独立系数（气泡与字号一起等比放大）
+    host.bubble_text_scale_spin = BrowserSpinBox(host)
+    host.bubble_text_scale_spin.setRange(50, 300)
+    host.bubble_text_scale_spin.setSuffix(" %")
+    host.bubble_text_scale_spin.setValue(int(host.config.get("bubble_text_scale", 100)))
     host.click_talk_bindings_btn = QPushButton("编辑…", host)
     host.click_talk_bindings_btn.setObjectName("clickTalkBindingsButton")
     host.click_talk_bindings_btn.clicked.connect(host._open_click_talk_bindings)
@@ -696,15 +701,6 @@ def _export_dialogue_template(host) -> None:
         "模板已复制到剪贴板：可直接粘贴给 AI 依角色卡改写，"
         "或粘贴回「导入模板」输入框一键导回。",
     )
-
-
-def _import_dialogue_template(host) -> None:
-    """导入默认台词模板：将所有预设台词填充到自定义编辑框。"""
-    defaults = default_phrases()
-    for key, edit in host.dialogue_phrase_edits.items():
-        if key in defaults:
-            edit.setPlainText(defaults[key])
-    QMessageBox.information(host, "导入成功", "已导入全部默认台词模板。")
 
 
 def _import_dialogue_template_json(host) -> None:

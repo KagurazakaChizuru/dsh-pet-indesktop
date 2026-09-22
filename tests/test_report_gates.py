@@ -154,22 +154,3 @@ def test_gate_for_event_examples(event_key, gate):
     from pet.report_gates import gate_for_event
 
     assert gate_for_event(event_key) == gate
-
-
-@pytest.mark.parametrize("probability,roll,expected", [
-    (0.0, 0.0, False),      # 0 = 关闭
-    (0.0, 0.999, False),
-    (1.0, 0.0, True),       # 1 = 全报
-    (1.0, 0.999, True),
-    (0.6, 0.0, True),
-    (0.6, 0.59, True),
-    (0.6, 0.6, False),      # 边界取「小于」：等于概率不放行
-    (0.6, 0.99, False),
-    (0.25, 0.2, True),
-    (0.25, 0.3, False),
-])
-def test_should_report_uses_unit_probability(probability, roll, expected):
-    """判决按 0-1 概率：roll < probability 放行。"""
-    from pet.agent_link import should_report_activity
-
-    assert should_report_activity(probability, roll) is expected

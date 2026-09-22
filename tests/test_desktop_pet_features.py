@@ -471,7 +471,6 @@ def test_self_talk_image_scale_config_and_bubble_size(tmp_path):
 
 def test_self_talk_scheduling_and_random_talk_dispatch(tmp_path, monkeypatch):
     """自言自语调度间隔与随机图片/文本派发（原 test_self_talk_images... 的后半段）。"""
-    import random  # noqa: F401
     from pathlib import Path  # noqa: F401
 
     from PySide6.QtCore import QRect
@@ -887,11 +886,9 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     if sys.platform == "win32":
         expected_labels.append("主动识屏")  # 仅 Windows + 有聊天能力时显示
     expected_labels.append("待办提醒")  # 待办管理面板入口（所有平台）
+    # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
+    # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([
-        "立即报时",
-        "关闭语音报时",
-        "今日节日",
-        "启用节日提醒",  # 节日提醒总开关默认关闭，故菜单显示「启用」
         "桌宠设置",
         "退出",
     ])
@@ -958,7 +955,10 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
         return labels
 
     labels = labels_in(menu)
-    assert "启动 DeepSeek Harness" not in labels
+    # Harness 入口现为子菜单（标题 "DeepSeek Harness"），纯桌宠版整块不显示
+    assert "DeepSeek Harness" not in labels
+    assert "启动并打开页面" not in labels
+    assert "停止服务" not in labels
     assert "打开网页版 DeepSeek" in labels
     menu.close()
     app.processEvents()
@@ -1990,9 +1990,10 @@ def test_legacy_config_value_dispatches_legacy_layout(monkeypatch):
     window_mod._populate_context_menu(menu, Pet())
     labels = [action.text() for action in menu.actions() if not action.isSeparator()]
     # legacy 布局：无图标、无现代专属入口（看看屏幕/更新与帮助/生小肥鱼层级不同）
-    # Pet 无 on_open_chat，属于纯桌宠版：不显示 DeepSeek Harness，保留网页版
+    # Pet 无 on_open_chat，属于纯桌宠版：不显示 DeepSeek Harness 子菜单，保留网页版
     assert labels.index("生小肥鱼") == labels.index("开机自启") + 1
-    assert "启动 DeepSeek Harness" not in labels
+    assert "DeepSeek Harness" not in labels
+    assert "停止服务" not in labels
     assert "打开网页版 DeepSeek" in labels
     assert menu.styleSheet() == ""
     icon_actions = [action.text() for action in menu.actions() if not action.icon().isNull()]

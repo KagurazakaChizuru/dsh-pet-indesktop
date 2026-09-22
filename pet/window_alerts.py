@@ -46,14 +46,25 @@ def set_bubble_suppressed(host, suppressed: bool) -> None:
         if current is not None and alert_survives_suppression(
                 current.get("alertType", ""), sticky=bool(current.get("sticky")),
                 buttons=current.get("buttons"), priority=int(current.get("priority", 3))):
+            bubble = getattr(host, "_speech_bubble", None)
             if current.get("sticky"):
-                bubble = getattr(host, "_speech_bubble", None)
                 if bubble is not None:
                     bubble.show_text(
                         current["text"], window_placement.bubble_anchor_rect(host), 0,
                         pet_scale=host.scale, subtitle=current.get("subtitle", ""),
                         sticky=True, buttons=current.get("buttons"),
                     )
+            elif bubble is not None:
+                # 存活但非 sticky 的 current（task_complete/turn/balance 等）：
+                # 抑制期被隐藏且 hidden 链路被抑制守卫截断——不重挂则
+                # _alert_current 永不清除，pump_alerts 永久 early-return，
+                # 后续提醒全部被吞（队列死锁）。按原时长重挂，超时后走正常
+                # hidden → 清除 → 推进闭环。
+                bubble.show_text(
+                    current["text"], window_placement.bubble_anchor_rect(host),
+                    current.get("duration_ms") or 6000,
+                    pet_scale=host.scale, subtitle=current.get("subtitle", ""),
+                )
         elif current is None:
             pump = getattr(host, "_pump_alerts", None)
             if callable(pump):
@@ -71,12 +82,35 @@ def set_bubble_suppressed(host, suppressed: bool) -> None:
                 pump()
 
 
+def redirect_hidden_bubble(host, text: str, *, subtitle: str = "",
+                           duration_ms: int = 3200) -> bool:
+    """桌宠隐藏时的气泡改道：交给注入的灵动岛反馈面（AppShell 经
+    ``hidden_bubble_redirect`` 注入；island_chat 让岛在桌宠隐藏时代理交互面）。
+
+    返回是否已改道。无注入 / 岛不可用 / 注入方拒绝时返回 False，调用方
+    维持原丢弃行为。仅覆盖非交互反馈气泡；审批/问题等带按钮的交互气泡
+    需要桌宠可见（岛气泡暂不支持按钮），不走本改道。"""
+    redirect = getattr(host, "hidden_bubble_redirect", None)
+    if not callable(redirect):
+        return False
+    try:
+        return bool(redirect(str(text), subtitle=str(subtitle or ""), duration_ms=int(duration_ms)))
+    except Exception:
+        logging.getLogger("dsh-pet-standalone").exception("隐藏期气泡改道到灵动岛失败")
+        return False
+
+
 def show_alert(host, text: str, *, subtitle: str = "", duration_ms: int = 0,
                buttons: list[tuple[str, object]] | None = None,
                sticky: bool = True, alert_id: str = "", priority: int = 3,
                alert_type: str = "watchdog", metadata: dict | None = None) -> None:
     """提醒消息队列：需要用户注意的提醒统一入队，一次只展示一个。"""
     if not host.isVisible():
+        # 桌宠隐藏：非交互提醒（无按钮）改道灵动岛反馈面；交互气泡与
+        # 设置页抑制期维持原丢弃行为。
+        if not buttons and not getattr(host, "_bubble_suppressed", False) and redirect_hidden_bubble(
+                host, text, subtitle=subtitle, duration_ms=duration_ms or 3200):
+            return
         return
     if host._bubble_suppressed and not alert_survives_suppression(
             alert_type, sticky=sticky, buttons=buttons, priority=priority):

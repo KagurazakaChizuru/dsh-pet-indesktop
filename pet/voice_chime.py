@@ -92,9 +92,6 @@ VOICE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("en-GB-RyanNeural", "Ryan（英音男声）"),
 )
 
-# 向后兼容：旧文本提示列表（“音色名  中文标签”格式）由 VOICE_OPTIONS 派生。
-COMMON_VOICES = tuple(f"{value}  {label}" for value, label in VOICE_OPTIONS)
-
 _CUSTOM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _RATE_RE = re.compile(r"^[+-]?\d+$")
 _PITCH_RE = re.compile(r"^[+-]?\d+$")
@@ -119,7 +116,7 @@ _HOUR_CN = (
 def default_chime_config() -> dict:
     """语音报时配置默认值（config.py 顶层平铺键的镜像）。"""
     return {
-        "voice_chime_enabled": True,
+        "voice_chime_enabled": False,
         "voice_chime_schedule": "hourly",
         "voice_chime_custom_times": "",
         "voice_chime_voice": DEFAULT_VOICE,
@@ -228,7 +225,7 @@ def normalize_chime_config(config) -> dict:
     if config is None:
         config = {}
     return {
-        "enabled": bool(config.get("voice_chime_enabled", True)),
+        "enabled": bool(config.get("voice_chime_enabled", False)),
         "schedule": clean_schedule(config.get("voice_chime_schedule", "hourly")),
         "custom_times": clean_custom_times(config.get("voice_chime_custom_times", "")),
         "voice": clean_voice(config.get("voice_chime_voice", DEFAULT_VOICE)),

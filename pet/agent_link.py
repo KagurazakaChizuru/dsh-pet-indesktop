@@ -40,7 +40,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from . import agent_cost as agent_cost_mod
 from .click_sound import play_sound, resolve_builtin_sound
-from .report_gates import should_report, should_report_event
+from .report_gates import should_report_event
 from .agent_event_protocol import parse_agent_event
 from .agent_event_normalizer import normalize_event
 from .model_access_tracker import ModelAccessTracker
@@ -2261,21 +2261,6 @@ def other_instances_use_agent(config, agent_key: str) -> bool:
 
 
 # ----------------------------------------------------------------------
-# 汇报抽稀
-# ----------------------------------------------------------------------
-
-def should_report_activity(probability: float, roll: float) -> bool:
-    """事件汇报概率门判决：``roll`` ∈ [0, 1) 小于通过概率则放行。
-
-    量纲已随概率门统一为 0.0–1.0（旧版是 0-100 百分比）：0 永不汇报、1 全报；
-    边界取「小于」，故 0.6 时 roll=0.6 不汇报。只用于**出气泡的汇报路径**：
-    原始记录（raw_record → 卡住检测 / 行为识别 / 探索看门狗 / 对话记忆）
-    不经过这里。
-    """
-    return should_report(probability, roll)
-
-
-# ----------------------------------------------------------------------
 # Agent 联动总调度管理器
 # ----------------------------------------------------------------------
 
@@ -2834,11 +2819,14 @@ class AgentLinkManager(QObject):
                 elif hasattr(self.win, "hide_bubble"):
                     self.win.hide_bubble()
 
-        if not hasattr(self.win, "isVisible") or not self.win.isVisible():
-            return
+        # 桌宠隐藏：动画/声音不呈现，但状态簿记（_last_raw / 成本 / 完成确认
+        # 调度）照常推进——岛反馈面可用时气泡经 _show_link_bubble 改道灵动岛
+        # （无注入时维持丢弃）。此前整段 return 会连簿记一起丢，隐藏期间
+        # start/done 反馈气泡全部消失（岛反馈面引入后用户实测）。
+        hidden = not hasattr(self.win, "isVisible") or not self.win.isVisible()
 
         mark = getattr(self.win, "mark_activity", None)
-        if callable(mark):
+        if callable(mark) and not hidden:
             mark()
 
         now = self._clock()
@@ -2847,10 +2835,12 @@ class AgentLinkManager(QObject):
         prev_raw = self._last_raw.get(agent_key)
         self._last_raw[agent_key] = state
         if state in self._BUSY_STATES and prev_raw not in self._BUSY_STATES:
-            self._emit_sound("start", agent_key)
+            if not hidden:
+                self._emit_sound("start", agent_key)
             self._cost_note_start(agent_key)
         elif state == "error" and prev_raw != "error":
-            self._emit_sound("error", agent_key)
+            if not hidden:
+                self._emit_sound("error", agent_key)
         if state in self._BUSY_STATES:
             self._cancel_done_check(agent_key)
             self._saw_alert.discard(agent_key)
@@ -2883,9 +2873,10 @@ class AgentLinkManager(QObject):
         # 状态 -> 桌宠行为映射（手册 §8.2）
         if state in ("thinking", "working"):
             # busy 动作池轮换（写代码/吃Token 为主，每第 3 次插播短摸鱼），
-            # 经 request_link_anim 平滑衔接：正在播的一次性动作不被打断
+            # 经 request_link_anim 平滑衔接：正在播的一次性动作不被打断。
+            # 隐藏中不切动画（零功耗语义），气泡仍经改道上岛。
             anim = self._next_link_anim_rotation()
-            if anim and hasattr(self.win, "request_link_anim"):
+            if anim and not hidden and hasattr(self.win, "request_link_anim"):
                 self.win.request_link_anim(anim)
             self._maybe_notify_start(agent_key, prev_raw, state)
         elif state == "attention":
@@ -2899,11 +2890,12 @@ class AgentLinkManager(QObject):
                 name = self.AGENT_NAMES.get(agent_key, agent_key)
                 self._show_link_bubble(self._dialogue("agent.error", "Agent 执行好像遇到报错了…", agent_key=agent_key, name=name), important=True)
         elif state in ("sleeping", "idle"):
-            # 回到待机：一次性动作播完自然回，待机/移动中立即回
-            if hasattr(self.win, "request_link_idle"):
-                self.win.request_link_idle()
-            elif hasattr(self.win, "switch_clip") and getattr(self.win, "idles", None):
-                self.win.switch_clip(self.win.idles[0])
+            # 回到待机：一次性动作播完自然回，待机/移动中立即回（隐藏中不切）
+            if not hidden:
+                if hasattr(self.win, "request_link_idle"):
+                    self.win.request_link_idle()
+                elif hasattr(self.win, "switch_clip") and getattr(self.win, "idles", None):
+                    self.win.switch_clip(self.win.idles[0])
 
     # ------------------------------------------------------------------
     # 联动动作池（写代码/吃Token 交替为主，每第 3 次插播短摸鱼）
@@ -3826,15 +3818,13 @@ class AgentLinkManager(QObject):
     def _fire_done(self, agent_key: str) -> None:
         """800ms 稳定确认到期：期间回忙则不算完成；配置/冷却在弹出前再查。"""
         self._done_pending.pop(agent_key, None)
-        if not hasattr(self.win, "isVisible") or not self.win.isVisible():
-            # 隐藏中不弹不切（pause 已取消计时器，这里是兜底）。
-            # 消费统计的状态必须一并丢弃：否则 _busy 里会永远留着这个 agent，
-            # 下次开始干活时被误判成"并发"，金额后面永久挂「（含其他会话）」。
-            self._cost.abort(agent_key)
-            return
+        # 隐藏中：不切动画不出声，气泡改道灵动岛反馈面（岛反馈面可用时；
+        # pause_agent_link_for_hide 让监视器隐藏期保持运行，本兜底必须感知，
+        # 否则 done 气泡在隐藏期被静默吞掉）。
+        hidden = not hasattr(self.win, "isVisible") or not self.win.isVisible()
         if self._last_raw.get(agent_key) in self._BUSY_STATES:
             return
-        if agent_key not in self._saw_error:
+        if not hidden and agent_key not in self._saw_error:
             self._emit_sound("done", agent_key)
         agent_cfg = self.cfg.get("agent_link", {})
         if not self._report_allowed(agent_cfg, "done.success"):
@@ -3854,6 +3844,15 @@ class AgentLinkManager(QObject):
         else:
             text = self._dialogue("done.success", f"{name} 干完活啦，去看看成果吧～", agent_key=agent_key, name=name)
         self._saw_alert.discard(agent_key)
+        if hidden:
+            # 隐藏中：不切待机动画；气泡改道灵动岛反馈面（_show_link_bubble
+            # 内置改道；岛反馈面不可用时丢弃）。消费统计按 abort 收口（原隐藏
+            # 路径语义：防 _busy 永久滞留，下次开始干活被误判成"并发"）。
+            from . import window_alerts as _window_alerts
+
+            _window_alerts.redirect_hidden_bubble(self.win, text, duration_ms=4500)
+            self._cost.abort(agent_key)
+            return
         # 恢复待机动画：Claude 回合结束没有 idle 事件，不靠这步会一直停在干活动作。
         # 仅当没有其他 Agent 仍在忙时恢复（避免 A 完成顶掉 B 的工作动画）。
         # 必须走 request_link_idle（它会清 _link_anim_current 并尊重一次性动作），
@@ -4009,6 +4008,15 @@ class AgentLinkManager(QObject):
         （约 10s 窗口），仍被占才放弃——主动识屏长答复可能占位 15-20s。"""
         if not hasattr(self.win, "show_bubble"):
             return
+        # 桌宠隐藏时 show_bubble/show_alert 会静默丢弃：改道灵动岛反馈面
+        # （AppShell 经 hidden_bubble_redirect 注入；无注入/岛不可用维持丢弃）。
+        # 审批/问题等交互气泡不经本函数，仍需桌宠可见。
+        is_visible = getattr(self.win, "isVisible", None)
+        if callable(is_visible) and not is_visible():
+            from . import window_alerts as _window_alerts
+
+            if _window_alerts.redirect_hidden_bubble(self.win, text, duration_ms=duration_ms):
+                return
         # 提醒消息队列激活：任何其他弹窗（含重要气泡）都不覆盖提醒
         if getattr(self.win, "_alert_current", None) is not None or \
                 getattr(self.win, "_alert_queue", None):

@@ -8,7 +8,6 @@ from importlib import resources
 from PySide6.QtWidgets import QMenu
 
 from .context_menus import build_legacy_menu, build_modern_menu
-from .context_menus.icons import pet_avatar_menu_icon, vector_menu_icon
 from .context_menus.menu_styles import (
     apply_modern_menu_style,
     install_modern_check_indicators,
@@ -104,6 +103,4 @@ __all__ = [
     "load_menu_template",
     "normalize_template_id",
     "populate_context_menu",
-    "pet_avatar_menu_icon",
-    "vector_menu_icon",
 ]

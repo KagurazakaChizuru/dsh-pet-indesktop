@@ -149,6 +149,19 @@ def theme_names() -> list[tuple[str, str]]:
     return [(key, t['name']) for key, t in THEMES.items()]
 
 
+# 对话窗口风格标识 → 展示名，设置界面的唯一来源：主设置窗的风格下拉项、裁切行
+# 标签/编辑器标题、老聊天设置对话框的裁切入口都从这里派生，避免多处字面量走样。
+# 顺序即下拉框顺序（modern 在前，classic 在后）。
+CHAT_UI_STYLE_LABELS: dict[str, str] = {'modern': '肥鱼版 DeepSeek', 'classic': '肥鱼牌小手机'}
+
+# 对话窗口风格 → 裁切选区纵横比（宽/高），按各风格窗口默认尺寸取值（窗口可缩放，
+# 渲染端 cover 兜底）：
+# modern 现代窗默认 960x700（pet/chat/widgets.py:792），
+# classic 经典窗默认 430x780（pet/chat/legacy_widgets.py:262）。
+# 裁切编辑器据此选默认选区，保证选区形状与窗口里看到的取景一致。
+CHAT_UI_VIEW_ASPECT: dict[str, float] = {'modern': 960.0 / 700.0, 'classic': 430.0 / 780.0}
+
+
 def resolve_background_pixmap(config_value: str) -> QPixmap | None:
     """Resolve a built-in classic theme or an absolute custom image path."""
     value = str(config_value or '').strip()
@@ -234,3 +247,51 @@ def scale_background_pixmap(
 
 def scrim_rgba(theme: dict) -> tuple[int, int, int, int]:
     return theme.get('scrim', (253, 246, 236, 128))
+
+
+# 无主题（自定义图片背景）时的兜底取景框：画面中央竖条。
+DEFAULT_FOCUS = (0.25, 0.0, 0.5, 1.0)
+
+
+def background_focus_rect(theme: dict | None, crops, bg_value: str) -> tuple[float, float, float, float]:
+    """解析某张背景当前生效的取景框（归一化 x/y/w/h）。
+
+    用户在裁切编辑器里保存的自定义取景框（config['chat_bg_crops'][bg_value]）
+    优先于主题默认 focus；条目缺失或手改损坏时回退主题 focus，无主题回退
+    DEFAULT_FOCUS。
+    """
+    custom = crops.get(bg_value) if isinstance(crops, dict) else None
+    if isinstance(custom, (list, tuple)) and len(custom) == 4:
+        try:
+            return tuple(float(v) for v in custom)
+        except (TypeError, ValueError):
+            pass  # 手改坏的配置：回退主题默认取景
+    return tuple((theme or {}).get('focus', DEFAULT_FOCUS))
+
+
+def background_draw_offset(
+    target_x: float, target_y: float, target_w: float, target_h: float,
+    scaled_w: float, scaled_h: float,
+    focus: tuple[float, float, float, float], fill_mode: str = "cover",
+) -> tuple[int, int]:
+    """计算背景缩放图的绘制偏移，让取景框完整可见。
+
+    cover：满铺后平移，使 focus 框整体落在窗口内；框比窗口大则居中于主体，
+    并始终钳制在 cover 边界内（不留白边）。contain/stretch 无取景语义，居中。
+    """
+    if fill_mode != "cover":
+        return (
+            int(target_x + (target_w - scaled_w) // 2),
+            int(target_y + (target_h - scaled_h) // 2),
+        )
+    fx, fy, fw, fh = focus
+    sw, sh = scaled_w, scaled_h
+    x = target_x + target_w / 2.0 - (fx + fw / 2.0) * sw
+    y = target_y + target_h / 2.0 - (fy + fh / 2.0) * sh
+    if fw * sw <= target_w:
+        x = min(max(x, target_x + target_w - (fx + fw) * sw), target_x - fx * sw)
+    if fh * sh <= target_h:
+        y = min(max(y, target_y + target_h - (fy + fh) * sh), target_y - fy * sh)
+    x = min(max(x, target_x + target_w - sw), float(target_x))
+    y = min(max(y, target_y + target_h - sh), float(target_y))
+    return int(round(x)), int(round(y))

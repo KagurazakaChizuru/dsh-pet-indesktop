@@ -1383,6 +1383,143 @@ def test_enter_while_ime_composing_does_not_send():
     app.processEvents()
 
 
+def _settle(app, seconds: float = 0.6) -> None:
+    """泵事件到布局落定（贴底欠账靠 rangeChanged 追平，需要真的走几拍）。"""
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+
+
+def _drain_typewriter(win) -> None:
+    guard = 0
+    while win._pending_output and guard < 20000:
+        win._typewriter_tick()
+        guard += 1
+
+
+def test_sent_message_stays_visible_without_manual_scroll(tmp_path: Path):
+    """用户自己发的那条消息必须入视——回归：_add 只更新高度、从不贴底。
+
+    实机取证（probe-chat-baseline2.py，1180x720、单条超长用户消息）：
+    修复前 value=2433 max=5206 gap=2773 → 整条用户气泡落在视口下方，
+    用户必须先手动滚轮才看得见自己发的内容。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    window = ChatWindow(Config(tmp_path), "shenshen")
+    window.resize(1180, 720)
+    for index in range(12):
+        window._add("assistant", f"历史第 {index} 条。" * 40)
+    window.show()
+    app.processEvents()
+    _settle(app)
+
+    window._add("user", "这是一条非常长的用户输入。" * 120)
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert bar.maximum() > 0, "超长用户消息应让内容溢出（否则本用例失去意义）"
+    assert bar.value() >= bar.maximum() - 24, (
+        f"发出的消息必须可见：value={bar.value()} max={bar.maximum()}"
+    )
+
+    # 流式回复过程中持续贴底，回复完成也不需要再手动上滑
+    window._active_request_id = "sent-msg-req"
+    window._bubble = window._add("assistant", "")
+    window._text = ""
+    reply = "AI 的长回复内容。" * 120
+    for start in range(0, len(reply), 25):
+        window._delta("sent-msg-req", reply[start:start + 25])
+        _drain_typewriter(window)
+        app.processEvents()
+    window._finished("sent-msg-req", reply)
+    _drain_typewriter(window)
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert window._bubble.state == "normal"
+    assert bar.value() >= bar.maximum() - 24, (
+        f"回复完成后必须停在底部：value={bar.value()} max={bar.maximum()}"
+    )
+    window.close()
+    app.processEvents()
+
+
+def test_resize_keeps_following_reader_at_bottom(tmp_path: Path):
+    """改窗口尺寸导致气泡重新折行时，跟随中的读者仍停在最新消息。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    window = ChatWindow(Config(tmp_path), "shenshen")
+    window.resize(1180, 720)
+    for index in range(10):
+        window._add("assistant", f"第 {index} 段：" + "这是一段足够长的回复。" * 18)
+    window.show()
+    app.processEvents()
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert bar.maximum() > 0
+
+    window.resize(900, 620)
+    _settle(app)
+    bar = window.scroll.verticalScrollBar()
+    assert bar.value() >= bar.maximum() - 24, (
+        f"改尺寸后应仍贴底：value={bar.value()} max={bar.maximum()}"
+    )
+    window.close()
+    app.processEvents()
+
+
+def test_manual_scroll_up_is_not_yanked_back_by_streaming(tmp_path: Path):
+    """用户主动上翻读历史期间，流式输出不得把他拽回底部（跟随=用户意图）。
+
+    「用户自己发消息」是另一条口径（那条消息理应入视，_add(role="user") 会显式
+    恢复跟随）；这里守的是**被动到达**的内容：正在读旧消息时不许被拽走。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.widgets import ChatWindow
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    window = ChatWindow(Config(tmp_path), "shenshen")
+    window.resize(1180, 720)
+    for index in range(12):
+        window._add("assistant", f"历史第 {index} 条。" * 40)
+    window.show()
+    app.processEvents()
+    _settle(app)
+
+    bar = window.scroll.verticalScrollBar()
+    # 前置条件：内容溢出（有得滚），且此刻贴在底部（_add 会贴底）
+    assert bar.maximum() > 0
+    assert bar.value() >= bar.maximum() - 24
+    bar.setValue(0)  # 用户上翻到顶部
+    app.processEvents()
+    assert window._stream_follow_output is False
+
+    # 被动的流式输出（另一半在生成）到达：读者必须留在原地
+    reply = "被动到达的流式内容。" * 200
+    for start in range(0, len(reply), 30):
+        window._delta("scroll-up-req", reply[start:start + 30])
+        _drain_typewriter(window)
+        app.processEvents()
+    _settle(app)
+    assert bar.value() == 0, (
+        f"上翻阅读期间不许被拽回底部：value={bar.value()} max={bar.maximum()}"
+    )
+    window.close()
+    app.processEvents()
+
+
 def test_modern_chat_pauses_follow_when_user_scrolls_up(tmp_path: Path):
     """上翻阅读历史时暂停自动滚底；回到顶部/底部时按位置更新跟随状态。"""
     from PySide6.QtWidgets import QApplication
@@ -2346,6 +2483,47 @@ def test_chat_settings_dialog_persists_system_notification_toggle(tmp_path):
         _app.processEvents()
 
 
+def test_chat_settings_dialog_crop_entry_labels_classic_style(tmp_path):
+    """老聊天设置即存对话框只服务经典风格：裁切入口带风格名「肥鱼牌小手机」。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.settings_dialog import ChatSettingsDialog
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.save()
+    dlg = ChatSettingsDialog(Config(tmp_path))
+    try:
+        assert "肥鱼牌小手机" in dlg.crop_btn.text()
+        assert dlg.crop_btn.isHidden() is False
+    finally:
+        dlg.close()
+        app.processEvents()
+
+
+def test_chat_settings_dialog_crop_entry_hidden_when_fill_not_cover(tmp_path):
+    """经典风格 fill=contain/stretch 时取景框被忽略，裁切入口隐藏；cover 时可见。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.settings_dialog import ChatSettingsDialog
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    for fill, hidden in (("contain", True), ("stretch", True), ("cover", False)):
+        cfg = Config(tmp_path)
+        cfg.set("chat_background", "builtin:whale")
+        cfg.set("chat_background_fill", fill)
+        cfg.save()
+        dlg = ChatSettingsDialog(Config(tmp_path))
+        try:
+            assert dlg.crop_btn.isHidden() is hidden, f"fill={fill}"
+        finally:
+            dlg.close()
+            app.processEvents()
+
+
 def test_delete_current_session_during_streaming_resets_typewriter(tmp_path: Path, monkeypatch):
     """审查 DS-M6 回归（modern）：删除当前会话时停打字机并丢弃未排空输出，
     防幻影消息写入新加载的会话。"""
@@ -2476,4 +2654,728 @@ def test_send_message_resyncs_stale_session_from_disk(tmp_path: Path, monkeypatc
     assert "来自另一窗口" in texts
     assert "本窗发送" in texts
     window.close()
+    app.processEvents()
+
+
+def _make_ai_page(tmp_path, monkeypatch, *, modern_bg="builtin:whale"):
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    if modern_bg is not None:
+        cfg.set("modern_chat_background", modern_bg)
+    page = _AiSettingsPage(cfg)
+    return app, cfg, page
+
+
+def test_crop_entry_edits_buffer_and_persists_on_save(tmp_path, monkeypatch):
+    """主设置窗的裁切取景：编辑器结果记编辑集，save() 时按背景值合并写 config。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            assert pix is not None
+            self.initial = initial
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.1, 0.2, 0.5, 0.6)
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert page._bg_crop_edits["builtin:whale"] == [0.1, 0.2, 0.5, 0.6]
+    # 未保存前不落盘
+    from pet.config import Config
+    assert Config(tmp_path).get("chat_bg_crops", {}) == {}
+    page.save()
+    assert cfg.get("chat_bg_crops", {})["builtin:whale"] == [0.1, 0.2, 0.5, 0.6]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_entry_reset_removes_custom_crop(tmp_path, monkeypatch):
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:whale": [0.1, 0.2, 0.5, 0.6], "builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    other.save()  # 磁盘上的已有自定义裁切（编辑器打开时 reload 读磁盘最新）
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            # 已有自定义裁切时编辑器初始框应带上它
+            assert list(initial) == [0.1, 0.2, 0.5, 0.6]
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return True, None
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert page._bg_crop_edits["builtin:whale"] is None  # None = 重置删除标记
+    page.save()
+    cfg.save()
+    crops = Config(tmp_path).get("chat_bg_crops", {})
+    assert "builtin:whale" not in crops, "重置必须从落盘结果里删除该键"
+    assert crops["builtin:furina"] == [0.9, 0.0, 0.1, 1.0], "外部其他键必须保留"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_entry_initial_box_falls_back_to_theme_focus(tmp_path, monkeypatch):
+    """无自定义裁切时，编辑器初始框 = 主题默认 focus。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+    from pet.chat.themes import get_theme
+
+    seen = {}
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            seen["initial"] = initial
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert tuple(seen["initial"]) == tuple(get_theme("whale")["focus"])
+    page.close()
+    app.processEvents()
+
+
+def test_crop_entry_needs_a_background(tmp_path, monkeypatch):
+    """纯色（无背景）时不得打开编辑器。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch, modern_bg="")
+    import pet.chat.crop_dialog as crop_mod
+    opened = []
+    monkeypatch.setattr(crop_mod, "CropDialog", lambda *a: opened.append(1))
+    page._crop_background()
+    assert opened == []
+    page.close()
+    app.processEvents()
+
+
+def test_crop_row_visibility_follows_background(tmp_path, monkeypatch):
+    """裁切取景行：选了背景才可见，纯色隐藏。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_detail_rows[-1]  # 裁切取景是细节行组最后一行
+    page.background_select.setCurrentData("builtin:whale")
+    assert row.isVisibleTo(page) or not row.isHidden()
+    page.background_select.setCurrentData("")
+    assert row.isHidden()
+    page.close()
+    app.processEvents()
+
+
+def test_crop_row_label_refreshes_with_style(tmp_path, monkeypatch):
+    """裁切行标签随对话窗口风格刷新，accessibleName 同步；填充方式提示说明只有填充裁剪支持取景。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_crop_row
+    assert row.label.text() == "裁切取景（肥鱼版 DeepSeek）"
+    assert "肥鱼版 DeepSeek" in row.control.accessibleName()
+    assert row.control.accessibleName() == row.label.text(), "屏幕阅读器读到的风格必须与标签一致"
+    assert "仅「填充裁剪」支持自定义取景" in page._background_detail_rows[1].hint_label.text()
+    page.chat_ui_style.setCurrentData("classic")  # 风格切换即刷新，不用重开窗口
+    assert row.label.text() == "裁切取景（肥鱼牌小手机）"
+    assert "肥鱼牌小手机" in row.control.accessibleName()
+    assert row.control.accessibleName() == row.label.text()
+    page.chat_ui_style.setCurrentData("modern")
+    assert row.label.text() == "裁切取景（肥鱼版 DeepSeek）"
+    assert "肥鱼版 DeepSeek" in row.control.accessibleName()
+    assert row.control.accessibleName() == row.label.text()
+    assert row is rows[-2]  # 裁切取景是细节行组最后一行
+    page.close()
+    app.processEvents()
+
+
+def test_crop_row_hidden_when_fill_not_cover(tmp_path, monkeypatch):
+    """fill=contain/stretch 时取景框被渲染路径忽略，裁切行隐藏；切回 cover 重现。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_crop_row
+    assert not row.isHidden()
+    page.background_fill.setCurrentData("contain")  # 走真实信号链路评估可见性
+    assert row.isHidden()
+    page.background_fill.setCurrentData("stretch")
+    assert row.isHidden()
+    assert not page._background_detail_rows[0].isHidden(), "只隐藏裁切行，其余细节行仍在"
+    page.background_fill.setCurrentData("cover")
+    assert not row.isHidden()
+    assert row is rows[-2]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_row_visibility_reevaluated_on_style_switch(tmp_path):
+    """切换对话窗口风格后按新风格的 fill 重估裁切行：另一风格 contain 时隐藏，切回 cover 复现。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("modern_chat_background", "builtin:whale")
+    cfg.set("modern_chat_background_fill", "cover")
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("chat_background_fill", "contain")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    row = page._background_crop_row
+    try:
+        assert not row.isHidden(), "现代风格 fill=cover：裁切行可见"
+        page.chat_ui_style.setCurrentData("classic")  # 走到经典风格，其 fill=contain
+        assert page._background_style == "classic"
+        assert page.background_fill.currentData() == "contain"
+        assert row.isHidden(), "切风格后必须按新风格的 fill 重估（contain 隐藏）"
+        page.chat_ui_style.setCurrentData("modern")
+        assert page.background_fill.currentData() == "cover"
+        assert not row.isHidden(), "切回 cover 风格必须复现裁切行"
+        assert row is rows[-2]
+    finally:
+        page.close()
+        app.processEvents()
+
+
+def test_crop_editor_receives_current_style_name(tmp_path, monkeypatch):
+    """打开编辑器时把当前风格名传给 CropDialog（窗口标题据此区分风格）。"""
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("modern_chat_background", "builtin:whale")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    import pet.chat.crop_dialog as crop_mod
+
+    seen = {}
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            seen["style"] = style_name
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert seen["style"] == "肥鱼版 DeepSeek"
+    page.chat_ui_style.setCurrentData("classic")
+    page._crop_background()
+    assert seen["style"] == "肥鱼牌小手机"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_dialog_title_carries_style_name():
+    """编辑器窗口标题带调用方传入的风格名。"""
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.crop_dialog import CropDialog
+
+    app = QApplication.instance() or QApplication([])
+    dlg = CropDialog(QPixmap(40, 60), None, None, "肥鱼牌小手机")
+    try:
+        assert "肥鱼牌小手机" in dlg.windowTitle()
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
+
+
+def test_chat_ui_view_aspect_table_matches_window_defaults():
+    """比例表锚点：数值必须等于各风格窗口默认尺寸比，表值被改必红。"""
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    assert CHAT_UI_VIEW_ASPECT["modern"] == 960.0 / 700.0
+    assert CHAT_UI_VIEW_ASPECT["classic"] == 430.0 / 780.0
+
+
+def test_clamp_box_uses_passed_aspect():
+    """clamp_box 的保比由传入 aspect 决定；缺省退回经典窗比例（430/780）。"""
+    from pet.chat.crop_dialog import clamp_box
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    # 1:1 底图：选区像素 w/h 直接等于传入的 aspect
+    _x, _y, w, h = clamp_box(0.0, 0.0, 0.5, 1.0, CHAT_UI_VIEW_ASPECT["modern"])
+    assert w / h == pytest.approx(CHAT_UI_VIEW_ASPECT["modern"])
+    # 竖版比例在 1:1 底图上先顶满高，宽度由 clamp 反向收紧
+    _x, _y, w, h = clamp_box(0.0, 0.0, 1.0, 1.0, CHAT_UI_VIEW_ASPECT["classic"])
+    assert h == pytest.approx(1.0)
+    assert w / h == pytest.approx(CHAT_UI_VIEW_ASPECT["classic"])
+    # 不传 aspect 时行为与显式传经典比例一致（兼容旧调用）
+    assert clamp_box(0.35, 0.2, 0.4, 1.0) == clamp_box(
+        0.35, 0.2, 0.4, 1.0, CHAT_UI_VIEW_ASPECT["classic"]
+    )
+
+
+def test_clamp_box_falls_back_to_view_aspect_when_aspect_not_positive():
+    """aspect 非正数（0/负）时回退缺省比例，不得除零或产出负尺寸。"""
+    from pet.chat.crop_dialog import VIEW_ASPECT, clamp_box
+
+    expected = clamp_box(0.1, 0.2, 0.5, 1.0, VIEW_ASPECT)
+    assert clamp_box(0.1, 0.2, 0.5, 1.0, 0.0) == expected
+    assert clamp_box(0.1, 0.2, 0.5, 1.0, -VIEW_ASPECT) == expected
+
+
+def test_crop_dialog_normalizes_existing_box_to_view_aspect():
+    """既有框（另一风格存下的横版框）在当前风格打开时被归一到当前比例。"""
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.crop_dialog import CropDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    app = QApplication.instance() or QApplication([])
+    pix = QPixmap(400, 400)
+    stale = (0.05, 0.3, 0.9, 0.6562)  # modern 横版默认框，像素比例 ≈ 1.371
+    dlg = CropDialog(pix, stale, None, "肥鱼牌小手机", CHAT_UI_VIEW_ASPECT["classic"])
+    try:
+        x, y, w, h = dlg.canvas.box()
+        assert (w * pix.width()) / (h * pix.height()) == pytest.approx(
+            CHAT_UI_VIEW_ASPECT["classic"], rel=1e-9
+        )
+        assert (x, y, w, h) != stale
+        assert x >= 0.0 and y >= 0.0 and x + w <= 1.0 and y + h <= 1.0
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
+    # 已是当前比例的框再开一次保持不变（归一幂等）
+    same = (0.2244, 0.0, CHAT_UI_VIEW_ASPECT["classic"], 1.0)
+    again = CropDialog(pix, same, None, "", CHAT_UI_VIEW_ASPECT["classic"])
+    try:
+        assert again.canvas.box() == pytest.approx(same)
+    finally:
+        again.deleteLater()
+        app.processEvents()
+
+
+def test_crop_dialog_default_box_is_vertically_centered():
+    """默认框竖向居中（clamp 之后按最终 h 取 (1-h)/2），水平居中保持。"""
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.crop_dialog import CropDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    app = QApplication.instance() or QApplication([])
+    pix = QPixmap(400, 400)  # 1:1 底图 + modern：默认框不满高，居中可观测
+    dlg = CropDialog(pix, None, None, "肥鱼版 DeepSeek", CHAT_UI_VIEW_ASPECT["modern"])
+    try:
+        x, y, w, h = dlg.canvas.box()
+        assert h < 1.0
+        assert y == pytest.approx((1 - h) / 2)
+        assert y > 0.0
+        assert x == pytest.approx((1 - w) / 2)
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("style_id", "style_name", "landscape"),
+    [("modern", "肥鱼版 DeepSeek", True), ("classic", "肥鱼牌小手机", False)],
+)
+def test_crop_dialog_box_keeps_style_view_aspect(style_id, style_name, landscape):
+    """编辑器默认选区与滚轮缩放后的像素纵横比 = 当前风格窗口比例，方向也正确。"""
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QPixmap, QWheelEvent
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.crop_dialog import CropDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+
+    app = QApplication.instance() or QApplication([])
+    pix = QPixmap(400, 400)  # 1:1 底图：选区像素比例由 view_aspect 唯一决定
+    expected = CHAT_UI_VIEW_ASPECT[style_id]
+    assert (expected > 1.0) is landscape
+    dlg = CropDialog(pix, None, None, style_name, expected)
+    try:
+        dlg.canvas.resize(360, 480)
+        _x, _y, w, h = dlg.canvas.box()
+        assert (w * pix.width()) / (h * pix.height()) == pytest.approx(expected, rel=1e-9)
+        wheel = QWheelEvent(
+            QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, -120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        )
+        dlg.canvas.wheelEvent(wheel)
+        _x, _y, w, h = dlg.canvas.box()
+        assert (w * pix.width()) / (h * pix.height()) == pytest.approx(expected, rel=1e-9)
+    finally:
+        dlg.deleteLater()
+        app.processEvents()
+
+
+def test_crop_editor_receives_style_view_aspect(tmp_path, monkeypatch):
+    """两个调用方之一：主设置窗按当前编辑风格把窗口纵横比传给编辑器。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("modern_chat_background", "builtin:whale")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    import pet.chat.crop_dialog as crop_mod
+
+    seen = []
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            seen.append(view_aspect)
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    page.chat_ui_style.setCurrentData("classic")
+    page._crop_background()
+    assert seen == pytest.approx([CHAT_UI_VIEW_ASPECT["modern"], CHAT_UI_VIEW_ASPECT["classic"]])
+    page.close()
+    app.processEvents()
+
+
+def test_chat_settings_dialog_crop_uses_classic_aspect(tmp_path, monkeypatch):
+    """两个调用方之二：老聊天设置对话框固定服务经典窗，传经典纵横比。"""
+    from PySide6.QtWidgets import QApplication
+
+    from pet.chat.settings_dialog import ChatSettingsDialog
+    from pet.chat.themes import CHAT_UI_VIEW_ASPECT
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.save()
+    import pet.chat.crop_dialog as crop_mod
+
+    seen = []
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            seen.append((style_name, view_aspect))
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    dlg = ChatSettingsDialog(Config(tmp_path))
+    try:
+        dlg._crop_bg()
+    finally:
+        dlg.close()
+        app.processEvents()
+    assert len(seen) == 1
+    assert seen[0][0] == "肥鱼牌小手机"
+    assert seen[0][1] == pytest.approx(CHAT_UI_VIEW_ASPECT["classic"])
+
+
+def test_crop_entry_preserves_external_edits_when_untouched(tmp_path, monkeypatch):
+    """用户没动裁切编辑器时，save() 不得把构造期快照写回覆盖外部改动。
+
+    老聊天设置对话框是即存语义：主设置窗打开期间它改了 chat_bg_crops，
+    主设置窗保存时若无条件回写构造期快照，外部改动被静默回滚。
+    """
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:whale": [0.9, 0.0, 0.1, 1.0]})
+    other.save()  # 外部即存改动（磁盘；对本窗口内存不可见）
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 save（Config.save 整体写内存视图）
+    page.save()
+    cfg.save()
+    assert Config(tmp_path).get("chat_bg_crops") == {"builtin:whale": [0.9, 0.0, 0.1, 1.0]}
+    page.close()
+    app.processEvents()
+
+
+def test_crop_dialog_released_after_use(tmp_path, monkeypatch):
+    """裁切编辑器用完必须释放（deleteLater），不随使用次数累积泄漏。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    released = []
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            pass
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            released.append(1)
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert released == [1], "CropDialog 使用后必须 deleteLater"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_persists_through_disk_roundtrip(tmp_path, monkeypatch):
+    """保存链路落到磁盘：page.save() → config.save() → 新 Config 可读回。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            pass
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.3, 0.3, 0.4, 0.4)
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    page.save()
+    cfg.save()
+    from pet.config import Config
+    assert Config(tmp_path).get("chat_bg_crops", {})["builtin:whale"] == [0.3, 0.3, 0.4, 0.4]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_button_disabled_state_for_no_background(tmp_path, monkeypatch):
+    """纯色无可裁背景：按钮进入禁用态（不是仍可点的文案提示）。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch, modern_bg="")
+    page._crop_background()
+    assert page.background_crop_btn.isEnabled() is False
+    page.close()
+    app.processEvents()
+
+
+def test_crop_save_merges_only_edited_keys(tmp_path, monkeypatch):
+    """动过编辑器后，save() 只覆盖编辑/重置过的键，不得整字典回写快照。
+
+    主设置窗保存前先 config.reload()（磁盘最新），若整字典回写构造期
+    快照，打开期间外部对**其他背景**的即存裁切改动会被静默回滚。
+    """
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            pass
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.1, 0.1, 0.5, 0.5)
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()  # 编辑了 builtin:whale
+    # 外部（老聊天设置，即存）在主设置窗打开期间改了另一个背景的裁切
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    other.save()
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 ai_page.save()
+    page.save()
+    crops = cfg.get("chat_bg_crops", {})
+    assert crops["builtin:furina"] == [0.9, 0.0, 0.1, 1.0], "外部对其他背景的改动必须保留"
+    assert crops["builtin:whale"] == [0.1, 0.1, 0.5, 0.5], "本窗口编辑的键必须生效"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_editor_reads_fresh_crops_at_open(tmp_path, monkeypatch):
+    """编辑器初始框读打开时的磁盘最新配置，不是构造期/内存快照。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    import pet.chat.crop_dialog as crop_mod
+    from pet.config import Config
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:whale": [0.7, 0.0, 0.3, 1.0]})
+    other.save()  # 构造后外部写入磁盘——只有 reload 才看得见
+
+    seen = {}
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            seen["initial"] = initial
+
+        def exec(self):
+            return False
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()
+    assert list(seen["initial"]) == [0.7, 0.0, 0.3, 1.0]
+    page.close()
+    app.processEvents()
+
+
+def test_crop_merge_uses_disk_latest_via_host_reload(tmp_path, monkeypatch):
+    """走宿主 _write_config 的真实时序（reload → 各页写键 → ai_page.save()）：
+    对话框打开期间外部即存的其他背景裁切必须保留。宿主若丢掉 reload 时序，
+    合并读不到磁盘最新，本用例即红。"""
+    from PySide6.QtWidgets import QApplication
+    import pet.modern_settings_dialog as settings_mod
+    import pet.chat.crop_dialog as crop_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("modern_chat_background", "builtin:whale")
+    dialog = settings_mod.ModernSettingsDialog(cfg, include_ai=True)
+    page = dialog.ai_page
+
+    class FakeDlg:
+        def __init__(self, pix, initial, parent, style_name='', view_aspect=None):
+            pass
+
+        def exec(self):
+            return True
+
+        def result_box(self):
+            return False, (0.1, 0.1, 0.5, 0.5)
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr(crop_mod, "CropDialog", FakeDlg)
+    page._crop_background()  # 本窗口编辑 whale 的裁切
+    # 外部（老聊天设置，即存）在对话框打开期间改了另一个背景的裁切
+    other = Config(tmp_path)
+    other.set("chat_bg_crops", {"builtin:furina": [0.9, 0.0, 0.1, 1.0]})
+    other.save()
+    assert dialog._write_config() is True
+    crops = Config(tmp_path).get("chat_bg_crops", {})
+    assert crops["builtin:furina"] == [0.9, 0.0, 0.1, 1.0], "外部对其他背景的改动必须保留"
+    assert crops["builtin:whale"] == [0.1, 0.1, 0.5, 0.5], "本窗口编辑的键必须生效"
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_background_keys_merge_by_edited_style(tmp_path, monkeypatch):
+    """两种对话风格的背景键按脏标记落盘：没编辑过的风格不得回写构造期快照。
+
+    老聊天设置对话框即存：主设置窗打开期间它改了另一风格的背景，
+    主设置窗保存时若整体回写快照，外部改动被静默回滚。
+    """
+    from PySide6.QtWidgets import QApplication
+    from pet.chat.ai_settings_page import _AiSettingsPage
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    cfg = Config(tmp_path)
+    cfg.set("chat_background", "builtin:whale")
+    cfg.set("modern_chat_background", "builtin:furina")
+    cfg.save()
+    page = _AiSettingsPage(cfg)
+    # 外部（老聊天设置，即存）在主设置窗打开期间改了 classic 风格背景
+    other = Config(tmp_path)
+    other.set("chat_background", "builtin:external")
+    other.save()
+    # 本窗口只编辑 modern 风格的不透明度
+    page.background_opacity.setValue(42)
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 save（Config.save 整体写内存视图）
+    page.save()
+    cfg.save()
+    disk = Config(tmp_path)
+    assert disk.get("chat_background") == "builtin:external", "未编辑的风格不得回写构造期快照"
+    assert disk.get("modern_chat_background_opacity") == 42, "编辑过的风格键必须生效"
+    page.close()
+    app.processEvents()
+
+
+def test_crop_button_reenabled_after_background_fixed(tmp_path, monkeypatch):
+    """禁用态的裁切按钮：用户修好背景选择/路径后必须恢复可点（不用切走再切回）。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch, modern_bg="")
+    page._crop_background()  # 纯色 → 禁用
+    assert page.background_crop_btn.isEnabled() is False
+    rows = page.appearance_rows()  # 宿主（外观页）挂行时才构建行引用；持有防 GC 带走控件
+    page.background_select.setCurrentData("builtin:whale")
+    assert page.background_crop_btn.isEnabled() is True
+    # 自定义图片：路径为空禁用，用户手填路径后恢复可点
+    page.background_select.setCurrentData("custom")
+    page.background_picker.setText("")
+    page._crop_background()
+    assert page.background_crop_btn.isEnabled() is False
+    page.background_picker.edit.setText("C:/some/image.png")
+    assert page.background_crop_btn.isEnabled() is True
+    page.close()
+    app.processEvents()
+
+
+def test_system_notify_keeps_external_edit_when_untouched(tmp_path, monkeypatch):
+    """未拨动系统通知开关时，save() 不得回写构造期快照覆盖外部即存改动。
+
+    老聊天设置对话框即存（pet/chat/settings_dialog.py:437）会写同一键：
+    主设置窗打开期间外部把它改成 False，主设置窗保存时若无条件回写
+    构造期快照（True），外部改动被静默回滚。
+    """
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    from pet.config import Config
+    assert page.system_notify_check.isChecked() is True  # 构造期快照值
+    other = Config(tmp_path)
+    other.set("system_notifications_enabled", False)
+    other.save()  # 外部即存改动（磁盘；对本窗口内存不可见）
+    cfg.reload()  # 镜像宿主契约：_write_config 先 reload 再 save（Config.save 整体写内存视图）
+    page.save()
+    cfg.save()
+    assert Config(tmp_path).get("system_notifications_enabled") is False, "未触开关时外部值必须保留"
+    page.close()
+    app.processEvents()
+
+
+def test_system_notify_toggle_persists_on_save(tmp_path, monkeypatch):
+    """用户拨动系统通知开关（toggled 置脏）后，save() 新值必须落盘。"""
+    app, cfg, page = _make_ai_page(tmp_path, monkeypatch)
+    from pet.config import Config
+    page.system_notify_check.setChecked(False)  # 用户拨动 → toggled → 置脏
+    cfg.reload()  # 宿主 reload 发生在拨动之后：磁盘旧值不得压过用户新值
+    page.save()
+    cfg.save()
+    assert Config(tmp_path).get("system_notifications_enabled") is False, "拨动后的新值必须生效"
+    page.close()
     app.processEvents()

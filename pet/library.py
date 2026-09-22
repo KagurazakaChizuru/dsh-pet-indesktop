@@ -24,7 +24,7 @@ import threading
 import time
 import weakref
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QMovie
@@ -125,7 +125,6 @@ class MovieLibrary(QObject):
         *,
         character_id: str | None = None,
         asset_dir: Path | str | None = None,
-        manifest: Mapping[str, str] | None = None,
         prewarm_policy: str = "balanced",
         prewarm_enabled: bool = True,
     ) -> None:
@@ -138,7 +137,7 @@ class MovieLibrary(QObject):
             self._asset_dir = Path(asset_dir)
         else:
             self._asset_dir = catalog.resolve_character_video_dir(self.character_id)
-        self._manifest = None if manifest is None else dict(manifest)
+        self._manifest = None
         self.manifest = catalog.load_character_manifest(self.character_id, self._asset_dir)
         self.folder_map: dict[str, str] = {}
         self.folder_files: dict[str, list[str]] = {}
@@ -162,6 +161,7 @@ class MovieLibrary(QObject):
         self._interaction_holders = 0
         self._interaction_lock = threading.Lock()
         self._interaction_cond = threading.Condition(self._interaction_lock)
+        # 测试 seam：仅供测试注入，产品侧无调用
         self._interaction_active = threading.Event()  # 观测镜像：set=交互中
         # 预热代次：pause_warm（隐藏/切角色）时自增；在飞的旧代次预热线程
         # 据此放弃，保证旧角色（旧库）的预热不会在交互结束后"复活"。
@@ -187,6 +187,10 @@ class MovieLibrary(QObject):
         self.low_warm_batch_finished.connect(self._on_low_warm_batch_finished)
         self.media_type: str = 'webm'
         self.no_mirror: set[str] = self._load_no_mirror()
+        # move_strides.json 一次读取、一次遍历 → (步幅, 曲线) 两份结果：
+        # 此前两个加载器各读一遍文件、各遍历一遍 dict（重复 IO，且两套口径
+        # 有分叉风险）。加载器方法保留为公开接口（单测按口径直调）。
+        self.move_strides, self.move_curves = self._load_move_sidecar()
 
         self._load_all()
 
@@ -200,6 +204,86 @@ class MovieLibrary(QObject):
             return set()
         names = data.get('no_mirror', [])
         return {str(n) for n in names} if isinstance(names, list) else set()
+
+    def _load_move_sidecar(self) -> tuple[dict[str, float], dict[str, list[float]]]:
+        '''加载 move_strides.json：一次读取、一次遍历 → (步幅, 曲线)。
+
+        缺文件/解析失败 → ({}, {})，绝不抛异常；「_comment」等备注字段与其余
+        项静默忽略。两份结果共用同一份源数据，保证口径一致（此前两套读取器
+        各读一遍文件、各遍历一遍 dict）。
+        '''
+        data = self._read_move_strides_json()
+        strides: dict[str, float] = {}
+        curves: dict[str, list[float]] = {}
+        for k, v in data.items():
+            name = str(k)
+            stride = self._move_stride_of(v)
+            if stride is not None:
+                strides[name] = stride
+            curve = self._move_curve_of(v)
+            if curve is not None:
+                curves[name] = curve
+        return strides, curves
+
+    @staticmethod
+    def _move_stride_of(v) -> float | None:
+        '''单项步幅解析：数值项或 {'stride': 数值} 对象项，其余（含 bool）返回 None。'''
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, dict) and isinstance(v.get('stride'), (int, float)) \
+                and not isinstance(v.get('stride'), bool):
+            return float(v['stride'])
+        return None
+
+    @staticmethod
+    def _move_curve_of(v) -> list[float] | None:
+        '''单项曲线解析：校验不过（非列表/太短/越界/回退/首尾不符）返回 None。
+
+        curve[i] = 播到源帧 i 时圈内累计进度（0..1，单调不减，首 0 尾 1）。
+        动画静帧段曲线走平 → 窗口停住；动帧段匀速 → 动帧才动、静帧不动。
+        '''
+        if not isinstance(v, dict):
+            return None
+        curve = v.get('curve')
+        if not isinstance(curve, list) or len(curve) < 2:
+            return None
+        if any(isinstance(c, bool) or not isinstance(c, (int, float)) for c in curve):
+            return None
+        vals = [float(c) for c in curve]
+        if vals[0] != 0.0 or vals[-1] != 1.0:
+            return None
+        if any(c < 0.0 or c > 1.0 for c in vals):
+            return None
+        if any(b < a for a, b in zip(vals, vals[1:])):
+            return None
+        return vals
+
+    def _load_move_strides(self) -> dict[str, float]:
+        '''加载 move_strides.json：移动动画每圈（scale=1.0）地面位移像素数。
+
+        缺文件/解析失败 → 空 dict（窗口回退 catalog.MOVE_STRIDE_DEFAULT_PX），
+        绝不抛异常。只收数值项与 {'stride': 数值} 对象项："_comment" 等备注
+        字段与其余项静默忽略。
+        '''
+        return self._load_move_sidecar()[0]
+
+    def _load_move_curves(self) -> dict[str, list[float]]:
+        '''加载 move_strides.json 对象项里的 curve：圈内逐帧位移曲线。
+
+        校验不过（非列表/太短/越界/回退/首尾不符）静默跳过，绝不抛异常。
+        '''
+        return self._load_move_sidecar()[1]
+
+    def _read_move_strides_json(self) -> dict:
+        import json
+        path = self._asset_dir / 'move_strides.json'
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _load_all(self) -> None:
         if self._manifest is None:
@@ -272,7 +356,10 @@ class MovieLibrary(QObject):
         names = list(self._manifest)
         cats = catalog.build_categories(
             names,
-            None,
+            # 与运行分类（window.py 建 cats）同一 manifest 口径：外部角色包
+            # 以 manifest 声明分类时，预热若按无 manifest 分叉，点击/转向动画
+            # 进不了 pinned 高优，首次交互同步 ffmpeg 解码卡顿。
+            self.manifest,
             self.folder_map,
             self.folder_files,
         )
@@ -458,6 +545,7 @@ class MovieLibrary(QObject):
     @classmethod
     def _shutdown_live_for_tests(cls) -> None:
         """收口未由窗口持有的素材库，避免 reader 跨测试存活。"""
+        # 测试 seam：仅供测试注入，产品侧无调用
         for library in tuple(_LIVE_MOVIE_LIBRARIES):
             try:
                 library.shutdown()

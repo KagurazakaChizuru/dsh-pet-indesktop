@@ -2,7 +2,7 @@
 import json
 import re
 from pet.persona_phrases import phrase_keys
-from pet.persona_template import build_persona_template, template_json
+from pet.persona_template import build_persona_template
 
 
 def test_template_is_complete_and_safe():
@@ -12,7 +12,8 @@ def test_template_is_complete_and_safe():
     assert data["phrases"]["start"] == ["你好，{name}"]
     assert data["phrases"]["thinking"] == []
     assert data["variables"]["command"]
-    text = template_json({"dialogue_phrases": {"start": "中文\n\""}})
+    data2 = build_persona_template({"dialogue_phrases": {"start": "中文\n\""}})
+    text = json.dumps(data2, ensure_ascii=False)
     assert json.loads(text)["phrases"]["start"] == ["中文\n\""]
     assert "secret" not in text and "C:/secret" not in text
 

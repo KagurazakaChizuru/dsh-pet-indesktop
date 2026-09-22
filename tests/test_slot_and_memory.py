@@ -51,14 +51,27 @@ def test_slot_locks_sequential_competition_and_preferred_fail(tmp_path):
     """场景 1：三个真实子进程竞争同一临时配置根目录，依次获得 slot-0/1/2；指定槽竞争失败不降级，锁残留可复用。"""
     config_dir = tmp_path / APP_DIR_NAME
     config_dir.mkdir(parents=True, exist_ok=True)
+    release_flag = tmp_path / "release-slot-holders.flag"
 
-    # 启动第一个子进程获取首个空闲槽（应当是 0）并保持持锁 5 秒
+    # 启动第一个子进程获取首个空闲槽（应当是 0）并持锁到放行标记出现
     worker1_code = f"""
 from pet.slot_manager import acquire_pet_slot
+from pathlib import Path
 import time
 slot, handle = acquire_pet_slot({repr(str(config_dir))})
 print(f"WORKER1:{{slot}}", flush=True)
-time.sleep(4)
+# 持锁直到主进程落放行标记（最多 60s）——固定 sleep(4) 在慢 CI 上 python
+# 启动即可达秒级，p1 提前释放后 pfail 拿到 slot-0 → 整条竞争序列假红
+deadline = time.monotonic() + 60
+timed_out = True
+while time.monotonic() < deadline:
+    if Path({repr(str(release_flag))}).exists():
+        timed_out = False
+        break
+    time.sleep(0.05)
+if timed_out:
+    # 兜底自释放必须响亮：静默超时会伪装成产品故障（与产品缺陷不可区分）
+    print("HOLDER_TIMEOUT", flush=True)
 """
     p1 = _run_slot_worker_code(config_dir, worker1_code)
     line1 = p1.stdout.readline().strip()
@@ -67,10 +80,20 @@ time.sleep(4)
     # 启动第二个子进程获取下一个空闲槽（应当是 1）
     worker2_code = f"""
 from pet.slot_manager import acquire_pet_slot
+from pathlib import Path
 import time
 slot, handle = acquire_pet_slot({repr(str(config_dir))})
 print(f"WORKER2:{{slot}}", flush=True)
-time.sleep(4)
+deadline = time.monotonic() + 60
+timed_out = True
+while time.monotonic() < deadline:
+    if Path({repr(str(release_flag))}).exists():
+        timed_out = False
+        break
+    time.sleep(0.05)
+if timed_out:
+    # 兜底自释放必须响亮：静默超时会伪装成产品故障（与产品缺陷不可区分）
+    print("HOLDER_TIMEOUT", flush=True)
 """
     p2 = _run_slot_worker_code(config_dir, worker2_code)
     line2 = p2.stdout.readline().strip()
@@ -101,11 +124,12 @@ print(f"WORKER3:{{slot}}", flush=True)
     assert line3 == "WORKER3:2"
     p3.wait()
 
-    # 清理并等待 p1, p2
-    p1.terminate()
-    p2.terminate()
-    p1.wait()
-    p2.wait()
+    # 放行持锁进程：flag 文件落下后 p1/p2 自行退出（不再固定 sleep 赌窗口）
+    release_flag.touch()
+    p1.wait(timeout=30)
+    p2.wait(timeout=30)
+    assert "HOLDER_TIMEOUT" not in p1.stdout.read(), "p1 必须是放行退出而非超时兜底"
+    assert "HOLDER_TIMEOUT" not in p2.stdout.read(), "p2 必须是放行退出而非超时兜底"
     time.sleep(0.1)
 
     # 确认锁文件残留但之后仍可成功复用 slot-0，且大小固定为 16 字节，PID 在头部
@@ -414,9 +438,6 @@ def test_field_default_factory_and_individual_memory(tmp_path):
 def test_spawn_reuse_keeps_existing_slot_config(tmp_path, monkeypatch):
     """「生小肥鱼」复用已有存档的 slot 时不再顶掉原槽设置（回归：旧版
     DSH_PET_SPAWN_FRESH 强制重播种会把 slot-N 个体配置覆盖成主配置）。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
     master = Config(base=tmp_path)
     master.set("character", "shenshen")
     master.set("playback_speed", 2.0)
@@ -439,9 +460,6 @@ def test_spawn_reuse_keeps_existing_slot_config(tmp_path, monkeypatch):
 
 def test_normal_reopen_keeps_existing_slot_config(tmp_path, monkeypatch):
     """普通重启/复用 slot 时，已有个体配置不被主配置覆盖。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
     master = Config(base=tmp_path)
     master.set("character", "shenshen")
     master.save()

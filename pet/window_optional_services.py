@@ -26,6 +26,29 @@ class WindowFeatureGateMixin:
     agent_link_manager: Any = None
     _file_eater: Any = None
     _file_interpret: Any = None
+    # 桌宠隐藏时的气泡改道面（AppShell 注入 → 灵动岛反馈气泡），见
+    # window_alerts.redirect_hidden_bubble；None = 维持原丢弃行为。
+    hidden_bubble_redirect: Any = None
+    # 桌宠隐藏期间灵动岛反馈面是否可用（AppShell 注入 → _island_chat_available）。
+    island_feedback_available: Any = None
+
+    def pause_agent_link_for_hide(self) -> None:
+        """桌宠隐藏时的联动监视器处置（_pause_activity 委托）。
+
+        灵动岛反馈面可用（hidden_chat 开 + 岛在）时**不暂停**：隐藏期间岛是
+        交互面，DSH 联动事件仍需实时驱动岛反馈气泡（气泡经
+        hidden_bubble_redirect 改道）。否则照旧 pause() 省电（原行为）。"""
+        manager = getattr(self, "agent_link_manager", None)
+        if manager is None:
+            return
+        island_feedback = getattr(self, "island_feedback_available", None)
+        if callable(island_feedback):
+            try:
+                if island_feedback():
+                    return
+            except Exception:
+                pass
+        manager.pause()
     _broker_facade: Any = None
     _golden_spin: Any = None
     _edge_probe: Any = None
@@ -344,7 +367,3 @@ class WindowFeatureGateMixin:
         self._install_effect_services()
         self._edge_probe.set_enabled(bool(self.cfg.get("edge_probe_enabled", False)))
         self.sync_music_lyric()
-
-    def set_broker_facade(self, broker_facade: Any) -> None:
-        """替换窗口持有的 broker facade（app 层经公开 seam 注入，不碰私有面）。"""
-        self._broker_facade = broker_facade

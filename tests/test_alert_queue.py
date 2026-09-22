@@ -12,7 +12,10 @@ from PySide6.QtCore import QObject, QRect, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
+from collections import deque
+
 from pet import catalog
+from pet.window_alerts import show_alert
 from pet.config import Config
 from pet.window import PetWindow
 
@@ -383,3 +386,77 @@ def test_sticky_and_button_bubbles_still_return_true(win):
     win.show_alert("审批一", sticky=True)
     assert win.show_bubble("粘住", duration_ms=3000, sticky=True) is True
     assert win.show_bubble("按钮", duration_ms=3000, buttons=[("好", lambda: None)]) is True
+
+
+# ------------------------------------------------------ 隐藏期气泡改道（岛反馈面）
+
+
+class _HiddenRedirectHost:
+    """isVisible=False 的最小宿主：只实现 show_alert 的消费面。"""
+
+    def __init__(self, *, suppressed: bool = False, hook=None):
+        self._bubble_suppressed = suppressed
+        self._alert_current = None
+        self._alert_queue = deque()
+        self._sticky_bubble_active = False
+        self._speech_bubble = None
+        if hook is not None:
+            self.hidden_bubble_redirect = hook
+
+    def isVisible(self):
+        return False
+
+
+def test_hidden_host_redirects_noninteractive_alert():
+    """桌宠隐藏：无按钮提醒改道灵动岛反馈面，不入队不丢弃。"""
+    redirected = []
+
+    def hook(text, subtitle="", duration_ms=3200):
+        redirected.append((text, subtitle, duration_ms))
+        return True
+
+    host = _HiddenRedirectHost(hook=hook)
+    show_alert(host, "可能卡住了，去看一眼吧", duration_ms=8000, sticky=False,
+               alert_type="watchdog")
+
+    assert redirected == [("可能卡住了，去看一眼吧", "", 8000)]
+    assert host._alert_queue == deque() and host._alert_current is None
+
+
+def test_hidden_host_interactive_alert_not_redirected():
+    """带按钮的交互气泡（审批/问题）不改道：岛气泡暂不支持按钮，维持丢弃。"""
+    redirected = []
+    host = _HiddenRedirectHost(hook=lambda *a, **k: redirected.append(a) or True)
+    show_alert(host, "审批等待", sticky=True,
+               buttons=[("同意", lambda: None)], alert_type="approval")
+
+    assert redirected == []
+
+
+def test_hidden_host_without_hook_keeps_dropping():
+    """无注入（no-chat / 岛不可用）时维持原丢弃行为，不崩。"""
+    host = _HiddenRedirectHost()
+    show_alert(host, "随便一条提醒", duration_ms=6000, sticky=False)
+
+    assert host._alert_queue == deque()
+
+
+def test_unsuppress_reshows_surviving_nonsticky_current(win):
+    """存活且非 sticky 的 current（task_complete/turn/balance 等）在抑制解除后
+    必须重挂：否则 _alert_current 永不清除，pump_alerts 永久 early-return，
+    后续提醒全部被吞（队列死锁）。"""
+    win.show_alert("任务完成", duration_ms=6000, sticky=False, alert_type="task_complete")
+    assert win._alert_current is not None
+    shown_before = len(win._speech_bubble.shown)
+    win.set_bubble_suppressed(True)   # 抑制：气泡隐藏（hidden 链路被抑制守卫截断）
+    win.set_bubble_suppressed(False)  # 解除：存活提醒应按原时长重挂
+    assert len(win._speech_bubble.shown) > shown_before, \
+        "抑制解除后必须重挂存活的非 sticky 提醒（否则队列死锁）"
+    assert win._speech_bubble.shown[-1]["text"] == "任务完成"
+    assert win._speech_bubble.shown[-1]["duration_ms"] == 6000
+    assert win._alert_current is not None  # 由气泡超时 → hidden 链路正常清除
+    # 队列推进闭环：气泡超时隐藏后清除 current 并弹出下一条
+    win.show_alert("下一条", duration_ms=6000, sticky=False)
+    win._on_speech_bubble_hidden()
+    assert win._alert_current is not None
+    assert win._alert_current["text"] == "下一条"

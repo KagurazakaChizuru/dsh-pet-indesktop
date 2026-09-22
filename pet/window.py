@@ -7,17 +7,15 @@
   - 每个动画一次性播放，播完按概率选下一个：30% 待机 / 10% 转向 / 40% 动作 / 20% 移动；
   - 转向（东张西望）播完翻转朝向；facing=right 时水平镜像；
   - 点击回应 / 拖拽动画播完先回待机缓冲，待机播完再进随机链；
-  - 移动：动画只提供"走路姿态"（3 选 1），位置由 QTimer 驱动，
-    开头/结尾各 2s 不动，中间按播放进度插值；
+  - 移动：动画只提供"走路姿态"（3 选 1），位置由解码帧号驱动
+    （move_position_at_frame，支持角色包 move_strides.json 逐帧位移曲线），
+    位移按步态整圈量化、与动画步态同速不打滑；QTimer 仅作异常清场守卫；
   - 透明区域鼠标穿透：非 Windows 每帧按当前帧 alpha 生成窗口 mask；Windows 改走逐像素 WS_EX_TRANSPARENT（platform_win），mask 只用于算 _mask_bounds。
 """
 
 from __future__ import annotations
 
-import ctypes
-from ctypes import wintypes
 from collections import deque
-import json
 import logging
 import os
 import math
@@ -61,13 +59,8 @@ from PySide6.QtGui import (
 
 from PySide6.QtWidgets import (
     QApplication,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
     QInputDialog,
-    QLineEdit,
     QMenu,
-    QToolTip,
     QWidget,
 )
 
@@ -84,9 +77,9 @@ from .config import (
     _float_or_default,
 )
 from .library import MovieLibrary
+from .movement import body_reach, choose_move_direction, inward_facing, move_position_at_frame, quantize_move, wander_target_y
 from .predictive_prewarm import PredictivePrewarm, pick_from_pool, roll_next
 from .report_gates import REPORT_GATE_DEFAULTS
-from . import slot_manager as slot_manager_mod
 from . import window_placement
 from . import window_screen
 from . import window_alerts
@@ -102,23 +95,15 @@ from .click_sound import (
     play_press_sound, play_release_sound,
 )
 from .proactive import effective_proactive_config
-from .updater import QUARK_PAN_URL, REPO_URL
 from .window_optional_services import WindowFeatureGateMixin
 
 from . import platform_win
 from .platform_mac import _keep_macos_tool_window_visible, _mac_set_window_level
 from .platform_win import (
-    GWL_STYLE as GWL_STYLE,
     GWL_EXSTYLE as GWL_EXSTYLE,
-    _WS_CAPTION as _WS_CAPTION,
-    _WS_EX_TOPMOST as _WS_EX_TOPMOST,
-    _WS_EX_TRANSPARENT as _WS_EX_TRANSPARENT,
-    _WinRect as _WinRect,
-    _WinMonitorInfo as _WinMonitorInfo,
     _set_windows_click_through as _set_windows_click_through,
     _set_windows_no_activate as _set_windows_no_activate,
     WindowsPerPixelInputController as WindowsPerPixelInputController,
-    _FS_SKIP_CLASSES as _FS_SKIP_CLASSES,
     _fullscreen_geometry_hit as _fullscreen_geometry_hit,
     _fs_user_busy_state as _fs_user_busy_state,
     _fg_fullscreen_probe as _fg_fullscreen_probe,
@@ -155,7 +140,6 @@ def _resolve_self_talk_image_dir(raw: str) -> str:
 STREAM_CAPTURE_TITLE = 'dsh-pet 桌宠'
 
 IDLE = "IDLE"
-PRESS_CANDIDATE = "PRESS_CANDIDATE"
 DRAGGING = "DRAGGING"
 SLINGSHOT_AIMING = "SLINGSHOT_AIMING"
 THROWN = "THROWN"
@@ -328,23 +312,6 @@ def pick_context_menu_position(
     return best
 
 
-def wander_target_y(
-    start_y: float,
-    top: float,
-    bottom: float,
-    height: float,
-    margin: float,
-    rnd=random,
-) -> int:
-    """Pick a bounded vertical wander target; injectable RNG keeps it testable."""
-    y_lo = top + margin
-    y_hi = bottom - height - margin
-    if y_hi <= y_lo:
-        return int(start_y)
-    max_dy = max(40, int((y_hi - y_lo) * 0.25))
-    return int(max(y_lo, min(y_hi, start_y + rnd.randint(-max_dy, max_dy))))
-
-
 def _set_speech_bubble_interactive(pet) -> None:
     """按当前是否可打开快速对话，切换气泡鼠标穿透/可点击。"""
     setter = getattr(pet._speech_bubble, "set_interactive", None)
@@ -499,6 +466,13 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._self_talk_image_dir = str(config.get('self_talk_image_dir', '') or '')
         self._self_talk_images = list_self_talk_images(_resolve_self_talk_image_dir(self._self_talk_image_dir))
         self._self_talk_image_scale = max(0.5, min(3.0, float(config.get('self_talk_image_scale', 100)) / 100.0))
+        # 气泡文字大小（bubble_text_scale，百分比/100）：与配图大小并列的独立
+        # 系数，作用于文字气泡的列宽 + 字号 + 呼吸气泡画布（见 speech_bubble
+        # set_text_scale 的说明）。100% 时与旧版逐像素一致。
+        self._bubble_text_scale = max(0.5, min(3.0, float(config.get('bubble_text_scale', 100)) / 100.0))
+        _apply_text_scale = getattr(self._speech_bubble, 'set_text_scale', None)
+        if callable(_apply_text_scale):
+            _apply_text_scale(self._bubble_text_scale)
         self._self_talk_min_interval = max(5.0, float(config.get('self_talk_min_interval', DEFAULT_SELF_TALK_MIN_INTERVAL)))
         self._self_talk_max_interval = max(self._self_talk_min_interval, float(config.get('self_talk_max_interval', DEFAULT_SELF_TALK_MAX_INTERVAL)))
         self._self_talk_timer = QTimer(self)
@@ -663,7 +637,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # ---- 移动驱动 ----
         self._move_plan: dict | None = None
         self._move_timer = QTimer(self)
-        self._move_timer.setInterval(33)         # ~30fps 位置插值
+        self._move_timer.setInterval(33)         # ~30fps 移动守卫节拍（位移由 _on_frame 帧驱动）
         self._move_timer.timeout.connect(self._on_move_tick)
 
         # ---- 交互节拍跟随屏幕刷新率 ----
@@ -935,9 +909,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         """Compatibility delegation (window_placement.ensure_visible_after_restore)."""
         return window_placement.ensure_visible_after_restore(self, *args, **kwargs)
 
-    def _on_screen_added_restore(self, *args, **kwargs):
-        """Compatibility delegation (window_placement.on_screen_added_restore)."""
-        return window_placement.on_screen_added_restore(self, *args, **kwargs)
     def _apply_scale(self) -> None:
         """按缩放计算窗口尺寸：宽度 220×scale，高度 (124+落地偏移)×scale。"""
         self._w = max(1, int(round(catalog.CANVAS_W * self.scale)))
@@ -1063,10 +1034,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         """Compatibility wrapper; external patches remain effective."""
         return window_placement.pid_alive(pid)
 
-    def _runtime_marker_versioned(self) -> bool:
-        """Compatibility wrapper for the runtime-marker naming policy."""
-        return window_placement.runtime_marker_versioned(self)
-
     def _live_instance_rects(self) -> list[tuple[int, int, int, int]]:
         """Compatibility wrapper for live multi-instance rectangles."""
         return window_placement.live_instance_rects(self, pid_alive_fn=self._pid_alive)
@@ -1176,7 +1143,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         music_timer = getattr(self, "_music_sing_timer", None)
         if getattr(self, "_music_sing_enabled", False) and music_timer is not None and music_timer.isActive():
             QTimer.singleShot(0, self, self._check_music_sing)
-        self._restore_dock_icon_preference()
         self._effects_on_shown()
 
     def hide(self, *, notify: bool = True) -> None:
@@ -1243,7 +1209,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if hasattr(self, 'proactive_watcher') and self.proactive_watcher is not None:
             self.proactive_watcher.pause()
         if hasattr(self, 'agent_link_manager') and self.agent_link_manager is not None:
-            self.agent_link_manager.pause()
+            self.pause_agent_link_for_hide()
         if hasattr(self, 'lib') and self.lib is not None and hasattr(self.lib, 'pause_warm'):
             self.lib.pause_warm()
         # 交互让路闸门随隐藏对称释放（库侧 pause_warm 已换代清零时 end 是
@@ -1601,17 +1567,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._dock_reactivate_armed = False
         self.show()
 
-
-    def _restore_dock_icon_preference(self) -> None:
-        """macOS：桌宠恢复显示后按用户偏好还原 Dock 图标策略。"""
-        if sys.platform != 'darwin' or not getattr(self, "_dock_icon_forced", False):
-            return
-        self._dock_icon_forced = False
-        try:
-            from .app import _mac_set_dock_icon_visible
-            _mac_set_dock_icon_visible(bool(self.cfg.get('show_dock_icon', True)))
-        except Exception:
-            pass
     def set_no_move(self, on: bool) -> None:
         """切换「不移动」：禁用自动移动；勾选瞬间若正在移动则立即停下回待机。"""
         self.no_move = bool(on)
@@ -1918,7 +1873,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._pending_link_anim = None
 
     def _on_frame(self, name: str, n: int) -> None:
-        """媒体帧推进回调：重建画面；最后一帧触发播完处理。
+        """媒体帧推进回调：重建画面；移动计划按帧驱动位移；最后一帧触发播完处理。
 
         n = 素材源时间线上的 0-based 显示帧索引（WebMClip/GifClip 统一契约，
         由播放器按源时间线打标，队列满丢帧后仍一致——P1 复审）。降帧相位
@@ -1931,6 +1886,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if name != self.anim or self.movie is None:
             return
         is_last = n >= self.lib.frames(name) - 1  # n 是 0-based 源帧号：末帧判定不提前
+        plan = self._move_plan
+        if plan is not None and name == plan.get('anim') and 'total_frames' in plan:
+            self._move_window_towards(*move_position_at_frame(plan, plan['loops_done'] * plan['frames_per_loop'] + n))  # 帧驱动位移：与墙钟解耦
         reduced = self._idle_reduction_active()
         # 批11 解码节流联动：把当前门控状态推给 movie（WebMClip 消费端
         # interval ×divisor + reader 背压阻塞，解码速率 ≈半帧率）。推送先于
@@ -1947,16 +1905,51 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             # 帧号锚定（显示帧索引 = 源时间线）在两路径都不变。
             # 末帧的动画链推进绝不能因跳帧而丢（否则停在最后一帧）。
             if is_last and not self._ended_fired:
-                self._ended_fired = True
-                self.movie.stop()
-                self._on_anim_ended(name)
+                self._end_move_or_anim(name)
             return
         self._rebuild_frame()
         self.update()
         if is_last and not self._ended_fired:
-            self._ended_fired = True
-            self.movie.stop()  # 停在最后一帧，等 _on_anim_ended 切走
-            self._on_anim_ended(name)
+            self._end_move_or_anim(name)
+
+    def _restart_current_clip(self, name: str) -> bool:
+        """当前 clip 原地续播的唯一出口：清驻留态 + 回首帧 + 复位末帧标志 + 起播。
+
+        拖拽续播 / 弹射飞行续播 / 多圈移动中间圈续圈三处共用。此前各处各抄一份，
+        P0-1 正是「三份拷贝漏了一份」：漏复位 `_ended_fired` 会让续圈后的末帧收口
+        被永久挡住。返回 False = `start()` 被拒，调用方按各自场景降级。
+        """
+        movie = self.movie
+        movie._soft_parked = False  # 清圈末软停驻留，保证 start() 走 fresh start
+        self._push_recycle(movie)   # 批11-B1 P2-2：不经 _switch 的重启要补推回收阈值
+        movie.jumpToFrame(0)
+        self._ended_fired = False   # 末帧收口已置位；不复位则下一圈末帧被挡住
+        if movie.start() is False:
+            return False
+        if self._pending_switch == name:  # 只清「正是本动画」的待重试（B7 R2）
+            self._pending_switch = None
+            self._pending_switch_link = False
+            self._switch_retry_count = 0
+            self._switch_retry_timer.stop()
+        return True
+
+    def _end_move_or_anim(self, name: str) -> None:
+        """末帧收口：多圈移动中间圈续圈（不推链），末圈/非移动走正常播完。"""
+        plan = self._move_plan
+        if plan is not None and name == plan.get('anim') and 'loops' in plan:
+            if plan['loops_done'] + 1 < plan['loops']:
+                # 圈数递增必须先于续圈：GifClip(QMovie) 的 jumpToFrame(0) 同步发
+                # frameChanged，_on_frame 按 loops_done 定位——先回首帧再递增会让
+                # 圈边界位置按旧圈数瞬态回退一个步幅（GLM 终审 F-2）。续圈被拒
+                # 随即 _cancel_move() 弃计划，位置口径无残留（同步回调里
+                # _predict_prewarm 可能按新圈数提前掷骰，与 #165 前旧实现同语义）。
+                plan['loops_done'] += 1
+                if self._restart_current_clip(name):
+                    return  # 续圈成功：链推进留给末圈（start 被拒则落播完降级）
+            self._cancel_move()  # 末圈播完：progress 已到 1，清计划走播完链
+        self._ended_fired = True
+        self.movie.stop()  # 停在最后一帧，等 _on_anim_ended 切走
+        self._on_anim_ended(name)
 
     def _frame_signature(self, frame_n: int | None, dpr: float) -> tuple:
         """帧内容签名：素材路径+mtime+大小+内容弱指纹、帧号、朝向、动画名、scale、DPR。
@@ -2287,9 +2280,23 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             perfstats.time('rebuild.mask', perfstats.clock() - _mask_t0)
 
     def collision_content_rect(self) -> QRect:
-        """碰撞用的稳定可见区域（全局坐标）：取当前动画各帧包围盒的并集，
-        避免圆链随帧跳动；尚无并集时回退当前帧区域。"""
+        """碰撞用的角色区域（全局坐标）。
+
+        优先取角色声明的稳定身体框（manifest body_box，与摆放/贴边钳制同一个
+        锚，按 alpha≥128 量出，即"看得见的身体"）；未声明的角色包回退"当前动画
+        各帧包围盒的并集"（改造前口径），尚无并集时再回退当前帧区域。
+
+        为什么不一律用并集：并集把动画里走过的位移也并进来，而且按动画缓存、
+        只增不减——实测「左转奔跑」并集 294px vs 可见身体 184px（scale 0.85），
+        两鱼都在这条动画时可见之间还留 105px 空隙就判碰撞（待机体 15px），表现
+        为"没碰到却被挤动、碰撞体积时大时小"。
+        """
         frame_rect = self.frameGeometry()
+        character = str(self.cfg.get('character', '') or '')
+        if catalog.character_body_box(character) is not None:
+            sbr = self._stable_body_local_rect()
+            if not sbr.isEmpty():
+                return QRect(frame_rect.topLeft() + sbr.topLeft(), sbr.size())
         local = self._collision_local_bounds
         if local is not None and not local.isEmpty():
             return QRect(frame_rect.topLeft() + local.topLeft(), local.size())
@@ -2387,7 +2394,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                     trajectory = physics_mod.slingshot_trajectory(vx, vy)
                     painter.setPen(Qt.PenStyle.NoPen)
                     trajectory = self._slingshot_trajectory_preview(
-                        trajectory, anchor, QRect(0, 0, self._w, self._h), self.scale,
+                        trajectory, anchor,
                     )
                     for index, (tx, ty) in enumerate(trajectory):
                         fade = 1.0 - index / max(1, len(trajectory) - 1)
@@ -2575,23 +2582,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 return
             self._music_sing_active = False
         if name == self.drag and self._dragging:
-            self._push_recycle(self.movie)  # 批11-B1 P2-2：拖拽重启不经 _switch，补推送
-            self.movie.jumpToFrame(0)
-            self._ended_fired = False
-            if self.movie.start() is False:
+            if not self._restart_current_clip(name):
                 # 拖拽动画也被拒（退役池卡死）：回退可播放动画并安排重试，
                 # 不让拖拽状态停在"无动画在播"（B7 审查 P1-1）
                 self._fallback_playable_idle(name)
                 self._schedule_switch_retry(name)
-                return
-            # 拖拽动画直接重启成功：仅当待重试的正是本动画时清除待重试
-            # （与 _switch 同一身份绑定语义，B7 复审 R2——无关动画的
-            # 成功启动不得吞掉其他动画的待重试）。
-            if self._pending_switch == name:
-                self._pending_switch = None
-                self._pending_switch_link = False
-                self._switch_retry_count = 0
-                self._switch_retry_timer.stop()
             return
         # 弹射飞行途中不推进随机动画链（实测定案：弹射切换是事件驱动，
         # 预测式预热覆盖不到——拖拽打断早已作废预测代次，松手/半空的现场
@@ -2615,18 +2610,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             if flight is not None and name != flight:
                 self._switch(flight)
                 return
-            self._push_recycle(self.movie)  # 同拖拽重启：不经 _switch，补推送
-            self.movie.jumpToFrame(0)
-            self._ended_fired = False
-            if self.movie.start() is False:
+            # 飞行途中原地循环当前 clip（同拖拽：不经 _switch，出口补推回收阈值）
+            if not self._restart_current_clip(name):
                 self._fallback_playable_idle(name)
                 self._schedule_switch_retry(name)
-                return
-            if self._pending_switch == name:
-                self._pending_switch = None
-                self._pending_switch_link = False
-                self._switch_retry_count = 0
-                self._switch_retry_timer.stop()
             return
         # Agent 联动：待播动作优先接上（平滑衔接，不打断刚播完的动作）
         if self._pending_link_anim:
@@ -2692,9 +2679,14 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._play_animation_gap_step()
 
     def _play_animation_gap_step(self) -> None:
-        pool = self.idles + self.turns
+        # 同名素材可同时进 idle/turn 与 move 池（catalog 支持的双分类包）：
+        # gap 是待机氛围步，移动素材滤出池——否则 _play_roll 走移动分支，
+        # gap 步带来意外窗口位移（acts 为空时甚至动画链停摆）。
+        pool = [n for n in self.idles + self.turns if n not in self.moves]
         if pool:
-            self._switch(self._pick(pool, exclude=self.anim))
+            # 走 _play_roll 的朝向闸门：掷中转向但无需纠正时降级待机，
+            # 朝向绝不由随机数翻转（与动画链一致）。
+            self._play_roll(self._pick(pool, exclude=self.anim))
 
     def _on_animation_gap_timeout(self) -> None:
         # 超时只结束 gap 状态：正在播的 gap step（待机/转向）让其自然播完，
@@ -2731,12 +2723,26 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._play_roll(name)
 
     def _play_roll(self, name: str) -> None:
-        """执行掷骰结果：非移动名直接切换；移动名走 _try_move（含位移计划，失败/不移动回退动作池）。"""
+        """执行掷骰结果：移动名走 _try_move（失败/不移动回退动作池）；待机/转向按
+        中线滞回夹紧朝向（朝向只跟随移动目标与屏幕位置，绝不由随机数翻转）：
+        朝外掷中待机 → 换成一次转向，由播完逻辑翻转朝向（边缘探头冻结朝向时
+        不换）；无需纠正（中线滞回带内或已朝内）掷中转向 → 降级为待机。
+        """
         if name in self.moves:
             if self.no_move or not self._try_move(name):
                 self._switch(self._pick(self.acts, exclude=self.anim))
-        else:
-            self._switch(name)
+            return
+        sp = self._move_space() if (name in self.idles or name in self.turns) else None
+        want = None if sp is None else inward_facing(sp.cx, sp.left, sp.right)
+        if name in self.idles:
+            if want is not None and want != self.facing and self.turns \
+                    and not self._effects_skip_turn_facing():
+                self._switch(self._pick(self.turns, exclude=self.anim))
+                return
+        elif name in self.turns and self.idles and (want is None or want == self.facing):
+            self._switch(self._pick(self.idles, exclude=self.anim))
+            return
+        self._switch(name)
 
     def _roll_next(self, exclude: str | None = None) -> str | None:
         """掷骰纯函数（与预测共用同一份概率逻辑）：返回下一动画候选名。"""
@@ -2748,6 +2754,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         pp = getattr(self, 'predictive_prewarm', None)
         if pp is None or not self.acts or self._animation_gap_active:
             return
+        plan = self._move_plan or {}
+        if name == plan.get('anim') and plan.get('loops', 1) - plan.get('loops_done', 0) > 1:
+            return  # 多圈移动非末圈不预热：圈末提前掷骰会逐圈重掷预测
         frames = self.lib.frames(name)
         dur = self.lib.duration(name)
         pp.on_frame(
@@ -2771,14 +2780,32 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         return pick_from_pool(pool, exclude)
 
     # ================================================================ 移动
-    def _try_move(self, name: str | None = None) -> bool:
-        """计划一次朝 facing 方向的移动；返回 False 表示未建立移动计划。
+    def _move_space(self):
+        """漫游空间（虚拟窗口坐标）：avail/sbr/vp + 身体框中心与左右可达界。
 
-        name 给定时使用指定动画（手动触发），否则随机选一个移动姿态。
-        边缘探头会话激活时直接返回 False（不建立位移计划，防止挂着探头
-        姿态被平移出屏幕边缘）。返回 False 的两种情况：屏幕空间不够（目标
-        动画未尝试）；或移动动画 start() 被拒——此时 _switch 已回退到可播放
-        动画并安排重试，移动计划绝不建立（B7 审查 P1-1 / 复审 R2）。
+        可达界口径见 movement.body_reach（纯函数，含边界语义与单测）。
+        """
+        scr = self._screen_available()
+        if scr is None:
+            return None
+        avail = scr.availableGeometry()
+        sbr = self._stable_body_local_rect()
+        vp = self._virtual_pos()
+        cx, left, right = body_reach(avail.left(), avail.right(), vp.x() + sbr.x(),
+                                     sbr.width(), catalog.MOVE_MARGIN)
+        return SimpleNamespace(avail=avail, sbr=sbr, vp=vp,
+                               cx=cx, left=left, right=right)
+
+    def _try_move(self, name: str | None = None) -> bool:
+        """计划一次移动；返回 False 表示未建立移动计划。
+
+        目标先于朝向：方向由 choose_move_direction 按边缘可达性挑（两侧都够得着
+        才掷骰），朝向据此设定——朝向绝不凭空翻转。name 给定时使用指定动画（手动
+        触发），否则随机选一个移动姿态。边缘探头会话激活时直接返回 False（不建立
+        位移计划，防止挂着探头姿态被平移出屏幕边缘）。返回 False 的三种情况：屏幕
+        取不到；两侧空间都不足 MOVE_MIN_PX（目标动画未尝试）；或移动动画 start()
+        被拒——此时 _switch 已回退到可播放动画并安排重试，移动计划绝不建立
+        （B7 审查 P1-1 / 复审 R2）。
         """
         if (self._physics_mode is not None
                 or self._interaction_state in (THROWN, DRAGGING)):
@@ -2791,95 +2818,70 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             return False
         if self._move_plan is not None:
             return True  # 已在移动/已计划
-        scr = self._screen_available()
-        if scr is None:
+        sp = self._move_space()
+        if sp is None or not self.moves:
             return False
-        avail = scr.availableGeometry()
-        dir_sign = 1 if self.facing == 'right' else -1
-        # 漫游空间按角色身体框算（虚拟窗口坐标）：身体不越出工作区，
-        # 不再依赖"窗口中心 + _w/2"这类画布经验值。
-        sbr = self._stable_body_local_rect()
-        vp = self._virtual_pos()
-        cx = vp.x() + sbr.x() + sbr.width() / 2
-        distance = random.randint(catalog.MOVE_MIN_PX, catalog.MOVE_MAX_PX)
-        target_cx = cx + dir_sign * distance
-        half_w = sbr.width() / 2
-        left_bound = avail.left() + catalog.MOVE_MARGIN + half_w
-        right_bound = avail.right() - catalog.MOVE_MARGIN - half_w
-        if target_cx < left_bound or target_cx > right_bound:
+        dir_sign = choose_move_direction(sp.cx, sp.left, sp.right, catalog.MOVE_MIN_PX)
+        if dir_sign is None:
             return False
-        if not self.moves:
-            return False
+        room = (sp.cx - sp.left) if dir_sign < 0 else (sp.right - sp.cx)
+        distance = random.randint(catalog.MOVE_MIN_PX, min(catalog.MOVE_MAX_PX, int(room)))
         move_name = name or self._pick(self.moves)
-        duration = self.lib.duration(move_name)
+        stride = (getattr(self.lib, 'move_strides', None) or {}).get(move_name, catalog.MOVE_STRIDE_DEFAULT_PX) * self.scale
+        # 步幅量化：位移锁到步态整圈（位置帧驱动后速度恒等于动画步态，不打滑）
+        loops, distance, duration = quantize_move(distance, stride, room, self.lib.duration(move_name))
+        target_cx = sp.cx + dir_sign * distance
         if not self._switch(move_name):
             # 切换被拒：_switch 已回退到上一动画/待机并安排重试（B7 审查
             # P1-1 / 复审 R2）。绝不能按失败移动动画建立移动计划——否则
             # 回退动画播放时仍按失败移动的 duration/坐标位移，画面、动画、
             # 窗口位移三者不一致。
             return False
+        # 目标先于朝向：移动动画确认开播后才提交朝向，避免切换被拒时
+        # 朝向凭空翻转（朝向只跟随实际发生的移动）。朝向翻转时立即按新
+        # 朝向重建首帧——_switch 内已按旧朝向预渲染，不重建则首帧镜像
+        # 错误要挂到 frameChanged(0) 异步纠正（复审 P1-1）。
+        new_facing = 'right' if dir_sign > 0 else 'left'
+        if new_facing != self.facing:
+            self.facing = new_facing
+            self._rebuild_frame()
         self._move_plan = {
-            'start_x': vp.x(),
-            'target_x': int(round(target_cx - half_w)) - sbr.x(),
-            'start_y': vp.y(),
+            'anim': move_name,
+            'start_x': sp.vp.x(),
+            'target_x': int(round(target_cx - sp.sbr.width() / 2)) - sp.sbr.x(),
+            'start_y': sp.vp.y(),
             'target_y': wander_target_y(
-                vp.y() + sbr.y(), avail.top(), avail.bottom(), sbr.height(),
-                catalog.MOVE_MARGIN
-            ) - sbr.y(),
+                sp.vp.y() + sp.sbr.y(), sp.avail.top(), sp.avail.bottom(),
+                sp.sbr.height(), catalog.MOVE_MARGIN
+            ) - sp.sbr.y(),
             'duration': duration,
+            'loops': loops,
+            'loops_done': 0,
+            'frames_per_loop': self.lib.frames(move_name),
+            'total_frames': loops * self.lib.frames(move_name),
+            # 圈内逐帧位移曲线（动帧才动、静帧不动）；无曲线时帧驱动线性插值
+            'curve': (getattr(self.lib, 'move_curves', None) or {}).get(move_name),
         }
         self._move_timer.start()
         return True
 
     def _trigger_move(self, name: str) -> None:
-        """手动触发移动（右键菜单）：先打断当前移动，再朝 facing 方向走动；
-        屏幕空间不足则原地播放走路姿态（不位移）。"""
+        """手动触发移动（右键菜单）：打断当前移动后按边缘可达性走动；空间不足（或无屏幕）则不建立位移计划，也不再原地播放走路姿态。"""
         self._cancel_move()
         self._cancel_animation_gap()
-        if self._try_move(name):
-            return
-        # _try_move 失败两种原因：
-        # 1) 空间不足/无移动姿态（目标动画尚未尝试）→ 原地播放走路姿态；
-        # 2) 切换被拒 → _switch 已回退到可播放动画并安排重试，绝不能再次
-        #    _switch（双重降级/重复重试计数）。以「待重试登记正是该动画且
-        #    计时器在跑」区分两种失败（B7 复审 R2）。
-        if not (self._pending_switch == name and self._switch_retry_timer.isActive()):
-            self._switch(name)  # 贴边放不下：原地播放走路姿态，不位移
+        self._try_move(name)
 
     def trigger_move(self, name: str) -> None:
         """公开转发：手动触发移动（等价 _trigger_move）。"""
         self._trigger_move(name)
 
     def _on_move_tick(self) -> None:
-        """位置驱动：跟随动画播放进度插值（前后各 2s 不动，中间走完全程）。"""
+        """位移守卫：位置由 _on_frame 帧驱动，这里只做异常清场（物理接管/动画丢失）。"""
         if self._physics_mode is not None:
-            self._move_timer.stop()
-            self._move_plan = None
+            self._cancel_move()
             return
-        plan = self._move_plan
-        if not plan or self.movie is None:
+        if not self._move_plan or self.movie is None:
             self._move_timer.stop()
-            return
-        t = self.movie.currentTimeSeconds()
-        lead, tail = catalog.MOVE_LEAD_SEC, catalog.MOVE_TAIL_SEC
-        dur = plan['duration']
-        if t <= lead:
-            x = plan['start_x']
-            y = plan['start_y']
-        elif t >= dur - tail:
-            x = plan['target_x']
-            y = plan['target_y']
-        else:
-            progress = (t - lead) / max(0.1, dur - lead - tail)
-            x = plan['start_x'] + (plan['target_x'] - plan['start_x']) * progress
-            y = plan['start_y'] + (plan['target_y'] - plan['start_y']) * progress
-        self._move_window_towards(x, y)
-        if t >= dur - tail:
-            # 到位：提交终点，动画自然播完后续链。
-            # 不把自动移动的终点写入记忆位置，否则重启后桌宠会停在
-            # 上次随机游走的位置，而不是用户手动放置的位置。
-            self._move_timer.stop()
-            self._move_plan = None
 
     def _cancel_move(self) -> None:
         self._move_timer.stop()
@@ -2926,8 +2928,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
 
     @staticmethod
     def _slingshot_trajectory_preview(
-        trajectory: list[tuple[float, float]], center: QPointF, bounds: QRect,
-        scale: float,
+        trajectory: list[tuple[float, float]], center: QPointF,
     ) -> list[tuple[float, float]]:
         """Translate physical samples from the character edge without distorting the arc."""
         if not trajectory:
@@ -3737,7 +3738,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 menu.deleteLater()
                 return
             if any(not pool.waitForDone(0) for pool in pools):
-                QTimer.singleShot(50, lambda: delete_when_idle(_attempts + 1))
+                # 绑定 menu 为 context：窗口/菜单在轮询途中销毁时定时器随
+                # context 失效被丢弃，否则回调会对已删 C++ 对象 deleteLater
+                #（GUI 线程 RuntimeError）。
+                QTimer.singleShot(50, menu, lambda: delete_when_idle(_attempts + 1))
                 return
             menu.deleteLater()
 
@@ -3981,6 +3985,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._self_talk_image_dir = str(self.cfg.get('self_talk_image_dir', '') or '')
         self._self_talk_images = list_self_talk_images(_resolve_self_talk_image_dir(self._self_talk_image_dir))
         self._self_talk_image_scale = max(0.5, min(3.0, float(self.cfg.get('self_talk_image_scale', 100)) / 100.0))
+        self._bubble_text_scale = max(0.5, min(3.0, float(self.cfg.get('bubble_text_scale', 100)) / 100.0))
+        _apply_text_scale = getattr(self._speech_bubble, 'set_text_scale', None)
+        if callable(_apply_text_scale):
+            _apply_text_scale(self._bubble_text_scale)
         self._self_talk_min_interval = max(5.0, float(self.cfg.get('self_talk_min_interval', DEFAULT_SELF_TALK_MIN_INTERVAL)))
         self._self_talk_max_interval = max(self._self_talk_min_interval, float(self.cfg.get('self_talk_max_interval', DEFAULT_SELF_TALK_MAX_INTERVAL)))
         self._throw_speed_cap = physics_mod.throw_speed_cap(self.cfg.get('throw_strength'))
@@ -4254,7 +4262,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
 
     def _enter_physics_mode(self, mode: str) -> None:
         """进入物理模式（'drag'/'throw'）：统一取消自主移动计划与动画间隔，
-        避免移动插值与物理位移双写位置（画面在两个位置间闪现）。"""
+        避免自主移动（帧驱动位移）与物理位移双写位置（画面在两个位置间闪现）。"""
         self._cancel_move()
         self._cancel_animation_gap()
         self._physics_mode = mode

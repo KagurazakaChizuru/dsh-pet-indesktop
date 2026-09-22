@@ -108,7 +108,13 @@ def player_process_running(exe_name: str) -> bool:
 
 
 def available() -> bool:
-    """SMTC 是否可用（winrt 是否装得上）。供设置页决定是否禁用开关。"""
+    """SMTC 是否可用（winrt 是否装得上）。供设置页/菜单决定是否禁用歌词开关。
+
+    上游 #162 死代码清理把它一并删了（上游那侧确实没有调用方），但本仓库的
+    歌词门控在 `settings_pet_controls.build_pet_controls` 与
+    `context_menus.registry._callback_available` 两处依赖它：没有它，用户能打开
+    一个静默无效的歌词开关，且菜单构建会直接抛 AttributeError。故保留。
+    """
     if sys.platform != "win32":
         return False
     return _import_winrt() is not None
@@ -280,6 +286,8 @@ def toggle_play_pause() -> bool:
     """暂停/恢复当前播放器。返回是否成功（无会话或不支持时为 False）。"""
     if sys.platform != "win32":
         return False
+    # 走 _run_bounded：WinRT 会话在播放器卡死时会挂住调用，裸 asyncio.run 会把
+    # GUI 线程拖成 AppHang（见本模块顶部说明与 .scratch/now-playing-gui-hang/spec.md）。
     return bool(_run_bounded(lambda: asyncio.run(_play_pause_async()), False))
 
 

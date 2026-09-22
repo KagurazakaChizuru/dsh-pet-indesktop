@@ -34,7 +34,6 @@ DEFAULT_SELF_TALK_TEXTS = [
     "\u518d\u966a\u4f60\u4e00\u4f1a\u513f\u3002",
 ]
 DEFAULT_SELF_TALK_BUBBLE_STYLE = "classic_top"
-DIALOGUE_MODES = {"legacy", "whale_maid", "custom"}
 DEFAULT_DIALOGUE_PHRASES = {}
 DEFAULT_COLLISION_SETTINGS = {
     "collision_enabled": True,
@@ -677,6 +676,7 @@ class Config:
             "self_talk_max_interval": DEFAULT_SELF_TALK_MAX_INTERVAL,
             "self_talk_duration_seconds": DEFAULT_SELF_TALK_DURATION_SECONDS,
             "self_talk_image_scale": 100,  # 气泡配图显示尺寸百分比（50~300，100 = 默认）
+            "bubble_text_scale": 100,  # 气泡文字显示尺寸百分比（50~300，100 = 默认；气泡与字号一起放大）
             "self_talk_texts": list(DEFAULT_SELF_TALK_TEXTS),
             "self_talk_image_dir": "assets/big_blue_fat_fish",
             "self_talk_bubble_style": DEFAULT_SELF_TALK_BUBBLE_STYLE,
@@ -750,7 +750,7 @@ class Config:
             "todo_reminder_enabled": True,  # 待办提醒总开关
             "todo_reminder_lead_minutes": 5,  # 待办提前提醒分钟数（0~60，0=不提前）
             # 语音报时（edge-tts 在线 TTS + 台词/歌词按 8 小时整体换批、批内轮换）
-            "voice_chime_enabled": True,  # 语音报时总开关
+            "voice_chime_enabled": False,  # 语音报时总开关（默认关闭：主动打扰型功能，用户显式开启）
             "voice_chime_schedule": "hourly",  # hourly / every_30 / every_15 / every_5 / every_minute / custom
             "voice_chime_custom_times": "",  # 自定义时间点（HH:MM 逗号分隔，custom 模式生效）
             "voice_chime_voice": "zh-CN-XiaoxiaoNeural",  # edge-tts 音色
@@ -946,6 +946,7 @@ class Config:
             "self_talk_duration_seconds",
             "self_talk_image_dir",
             "self_talk_image_scale",
+            "bubble_text_scale",
             "self_talk_bubble_style",
             "mouse_through",
             "cursor_hidden_passthrough",
@@ -1242,6 +1243,7 @@ class Config:
         )
         self.data["self_talk_image_dir"] = str(self.data.get("self_talk_image_dir") or "").strip()[:500]
         self.data["self_talk_image_scale"] = int(_float_or_default(self.data.get("self_talk_image_scale"), 100.0, 50.0, 300.0))
+        self.data["bubble_text_scale"] = int(_float_or_default(self.data.get("bubble_text_scale"), 100.0, 50.0, 300.0))
         self.data["self_talk_enabled"] = bool(self.data.get("self_talk_enabled", False))
         self.data["cursor_hidden_passthrough"] = _bool_or_default(self.data.get("cursor_hidden_passthrough"), True)
         self.data["spawn_inherit_size"] = _bool_or_default(self.data.get("spawn_inherit_size"), True)
@@ -1443,6 +1445,7 @@ class Config:
             "self_talk_duration_seconds",
             "self_talk_image_dir",
             "self_talk_image_scale",
+            "bubble_text_scale",
             "self_talk_bubble_style",
             "context_menu_appearance",
             "context_menu_layout",

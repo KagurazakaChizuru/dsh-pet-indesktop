@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QLineEdit,
     QVBoxLayout,
@@ -66,8 +65,6 @@ class WatchdogSettingsPage(QWidget):
       4. 卡住检测 (stuck_detector)
       5. 行为重复检测 (behavior_detector)
     """
-
-    settings_saved = Signal()
 
     def __init__(self, config, agent_link_cfg: dict, parent: QWidget | None = None):
         super().__init__(parent)
@@ -279,31 +276,4 @@ class WatchdogSettingsPage(QWidget):
         updated["pattern_min_steps_between"] = self.pattern_min_steps_between_spin.value()
         updated["pattern_cooldown_seconds"] = self.pattern_cooldown_seconds_spin.value()
         return updated
-
-    def refresh_from_config(self, agent_link_cfg: dict) -> None:
-        """Re-read values from the live config (e.g. after external change)."""
-        self._agent_cfg = dict(agent_link_cfg)
-        self.enabled_check.setChecked(bool(self._agent_cfg.get("exploration_watchdog_enabled", True)))
-        self.warning_spin.setValue(int(self._agent_cfg.get("exploration_watchdog_warning_threshold", 3)))
-        self.control_spin.setValue(int(self._agent_cfg.get("exploration_watchdog_control_threshold", 5)))
-        self.cooldown_spin.setValue(int(self._agent_cfg.get("exploration_watchdog_cooldown_steps", 3)))
-        self.grace_spin.setValue(int(self._agent_cfg.get("exploration_watchdog_early_grace_minutes", 5)))
-        self.long_run_spin.setValue(int(self._agent_cfg.get("exploration_watchdog_long_run_minutes", 10)))
-        self.long_think_spin.setValue(int(self._agent_cfg.get("exploration_watchdog_long_think_seconds", 120)))
-        self.stuck_enabled_check.setChecked(bool(self._agent_cfg.get("stuck_detect", True)))
-        self.stuck_worried_spin.setValue(int(self._agent_cfg.get("stuck_worried_threshold", 3)))
-        self.stuck_intervene_spin.setValue(int(self._agent_cfg.get("stuck_intervene_threshold", 5)))
-        self.stuck_window_spin.setValue(int(self._agent_cfg.get("stuck_window_seconds", 90)))
-        self.stuck_cooldown_spin.setValue(int(self._agent_cfg.get("stuck_cooldown_seconds", 300)))
-        self.stuck_reminder_edit.setText(str(self._agent_cfg.get("stuck_reminder_text", "") or ""))
-        self.pattern_enabled_check.setChecked(bool(self._agent_cfg.get("pattern_detect", True)))
-        self.pattern_w6_control_spin.setValue(int(self._agent_cfg.get("pattern_w6_control", 3)))
-        self.pattern_w10_warn_spin.setValue(int(self._agent_cfg.get("pattern_w10_warn", 3)))
-        self.pattern_w10_control_spin.setValue(int(self._agent_cfg.get("pattern_w10_control", 4)))
-        self.pattern_macro_w6_explore_spin.setValue(int(self._agent_cfg.get("pattern_macro_w6_explore", 5)))
-        self.pattern_macro_w6_action_spin.setValue(int(self._agent_cfg.get("pattern_macro_w6_action", 0)))
-        self.pattern_macro_w10_explore_spin.setValue(int(self._agent_cfg.get("pattern_macro_w10_explore", 7)))
-        self.pattern_macro_w10_action_spin.setValue(int(self._agent_cfg.get("pattern_macro_w10_action", 1)))
-        self.pattern_min_steps_between_spin.setValue(int(self._agent_cfg.get("pattern_min_steps_between", 3)))
-        self.pattern_cooldown_seconds_spin.setValue(int(self._agent_cfg.get("pattern_cooldown_seconds", 60)))
 

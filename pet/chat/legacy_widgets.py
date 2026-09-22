@@ -54,9 +54,6 @@ def _initial(character_id: str) -> str:
 class ChatTitleBar(QFrame):
     """独立聊天窗的自绘标题栏。"""
 
-    close_requested = Signal()
-    minimize_requested = Signal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("chat-title-bar")
@@ -463,7 +460,6 @@ class ChatWindow(QDialog):
         context_top.addWidget(self.status)
         self.provider_label = QLabel(self.settings.active_config.name)
         self.provider_label.setObjectName("provider-label")
-        self.provider = self.provider_label
         context_top.addWidget(self.provider_label)
         context_top.addStretch(1)
         self.follow_button = QToolButton()
@@ -631,8 +627,13 @@ class ChatWindow(QDialog):
                 self._bg_pixmap, target.width(), target.height(), self._bg_fill,
             )
             self._bg_scaled_size = target.size()
-        x = target.x() + (target.width() - self._bg_scaled.width()) // 2
-        y = target.y() + (target.height() - self._bg_scaled.height()) // 2
+        focus = chat_themes.background_focus_rect(
+            self._bg_theme, self.config.get('chat_bg_crops', {}), self._bg_value,
+        )
+        x, y = chat_themes.background_draw_offset(
+            target.x(), target.y(), target.width(), target.height(),
+            self._bg_scaled.width(), self._bg_scaled.height(), focus, self._bg_fill,
+        )
         painter.setOpacity(self._bg_opacity)
         painter.drawPixmap(x, y, self._bg_scaled)
         painter.setOpacity(1.0)

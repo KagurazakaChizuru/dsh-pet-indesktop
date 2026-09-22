@@ -198,6 +198,8 @@ class VoiceChimeService:
         self._bridge: _AudioBridge | None = None
         self._player = None
         self._audio_out = None
+        # 合成在飞时被 busy 门拦下的待补播报（_fire 排队，_on_synthesized 补播）
+        self._queued_fire: tuple | None = None
         self._timer = QTimer()
         self._timer.setInterval(self.TICK_INTERVAL_MS)
         self._timer.timeout.connect(self._on_tick)
@@ -213,6 +215,7 @@ class VoiceChimeService:
         self._stopped = True
         # 待播队列同样作废：关掉开关/退出后不该再补播一条排队的语音。
         self._pending_speech = None
+        self._queued_fire = None
         # 自我播报登记也要撤：残留会让音乐自动唱歌被永久屏蔽。
         music_detect.clear_self_speaking()
         self._timer.stop()
@@ -426,7 +429,11 @@ class VoiceChimeService:
                 self._play_only(str(out_path))
             return
         if self._busy:
-            logger.info("语音报时仍在合成中，跳过本次：%s", sentence[:20])
+            # 合成在飞（多为本次报时的预合成）：排队待补，不得直接丢弃——
+            # 到点回退即时合成正经此路径（_on_tick 在预合成未完成时调 _fire，
+            # 被 busy 门挡死曾导致到点静默丢报时且 _last_slot 已盖戳不再重试）。
+            self._queued_fire = (sentence, now, bubble_text, show_bubble, role)
+            logger.info("语音报时合成在飞，排队待补：%s", sentence[:20])
             return
         self._busy = True
         self._busy_since = time.monotonic()
@@ -453,6 +460,24 @@ class VoiceChimeService:
         role = self._synthesis_role
         self._synthesis_role = "play"
         self._busy = False
+        try:
+            self._handle_synthesized(role, path, text, error)
+        finally:
+            # 任何结局（完成/失败/已停止）都必须结算排队项：_stopped 时
+            # _drain 内部丢弃，其余情况补播——不能让到点报时静默消失。
+            self._drain_queued_fire()
+
+    def _drain_queued_fire(self) -> None:
+        """补播被 busy 门拦下的排队播报（若有）；stop() 后一律丢弃。"""
+        # getattr 守卫：object.__new__ 构造的测试替身没有 __init__ 属性
+        queued = getattr(self, "_queued_fire", None)
+        self._queued_fire = None
+        if queued is None or self._stopped:
+            return
+        sentence, now, bubble_text, show_bubble, role = queued
+        self._fire(sentence, now, bubble_text, show_bubble=show_bubble, role=role)
+
+    def _handle_synthesized(self, role: str, path: str, text: str, error: str) -> None:
         if self._stopped:
             # stop()（关闭开关 / 应用退出）之后才回来的结果：不再回放/气泡——
             # 否则「关掉语音报时之后又响一声」，退出路径上还可能触碰正在析构的窗口。
@@ -643,6 +668,8 @@ class VoiceChimeService:
         logger.warning("语音合成超时未回调，复位合成锁（%.0fs）", _SYNTH_TIMEOUT_S)
         self._busy = False
         self._synthesis_role = "play"
+        # 合成锁复位后结算排队项：挂死的合成不会再来回调，到点报时靠这里补。
+        self._drain_queued_fire()
 
     # ------------------------------------------------------------ 缓存维护
     def _prune_cache(self) -> None:

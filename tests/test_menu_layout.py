@@ -367,13 +367,15 @@ def test_missing_user_layout_resolves_versioned_default():
         "agent_link",
         "proactive_screen",
         "todo_panel",
-        "voice_chime_now",
-        "voice_chime_toggle",
-        "festival_now",
-        "festival_toggle",
         "modern_settings",
         "quit",
     ]
+    # 报时/节日四项在默认模板里 visible: false（2026-09-19 起默认不上菜单，
+    # 用户可在菜单编辑器自行加回），resolve 后被过滤，不出现在渲染结果里。
+    assert all(
+        item not in {node.get("id") for node in result.nodes}
+        for item in ("voice_chime_now", "voice_chime_toggle", "festival_now", "festival_toggle")
+    )
 
 
 def test_config_persists_menu_layout_override_without_copying_default(tmp_path):
@@ -490,16 +492,9 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     if sys.platform == "win32":
         expected_root.insert(-2, "主动识屏")
         expected_root.insert(-2, "待办提醒")
-        expected_root.insert(-2, "立即报时")
-        expected_root.insert(-2, "关闭语音报时")
-        expected_root.insert(-2, "今日节日")
-        expected_root.insert(-2, "启用节日提醒")
     else:
         expected_root.insert(-2, "待办提醒")
-        expected_root.insert(-2, "立即报时")
-        expected_root.insert(-2, "关闭语音报时")
-        expected_root.insert(-2, "今日节日")
-        expected_root.insert(-2, "启用节日提醒")
+    # 报时/节日四项默认不在菜单上（模板 visible: false，2026-09-19 起）
     assert root == expected_root
     rendered = ["|" if action.isSeparator() else action.text() for action in menu.actions()]
     expected_rendered = [
@@ -512,13 +507,9 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     ]
     if sys.platform == "win32":
         expected_rendered.insert(-3, "主动识屏")
-    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 立即报时 关闭语音报时
-    # 今日节日 启用节日提醒 | 桌宠设置 退出
+    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 | 桌宠设置 退出
+    # （报时/节日四项默认 visible: false，不渲染）
     expected_rendered.insert(-3, "待办提醒")
-    expected_rendered.insert(-3, "立即报时")
-    expected_rendered.insert(-3, "关闭语音报时")
-    expected_rendered.insert(-3, "今日节日")
-    expected_rendered.insert(-3, "启用节日提醒")
     assert rendered == expected_rendered
     pet_controls = next(action.menu() for action in menu.actions() if action.text() == "桌宠控制")
     assert [action.text() for action in pet_controls.actions() if not action.isSeparator()] == [
@@ -538,7 +529,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     tools = next(action.menu() for action in menu.actions() if action.text() == "工具与帮助")
     expected_tools = [
         "DeepSeek 余额",
-        "启动 DeepSeek Harness",
+        "DeepSeek Harness",
         "打开网页版 DeepSeek",
         "检查更新",
         "GitHub 项目页",
@@ -546,6 +537,18 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     if sys.platform == "win32":
         expected_tools.append("夸克网盘下载")
     assert [action.text() for action in tools.actions() if not action.isSeparator()] == expected_tools
+    # Harness 现在是子菜单（挂在既有 harness id 上，用户老布局无需迁移）：
+    # 启动 / 重启 / 停止三件套必须齐全——「停止」是用户关掉静默常驻服务的唯一入口。
+    harness_action = next(
+        action for action in tools.actions() if action.text() == "DeepSeek Harness"
+    )
+    harness_menu = harness_action.menu()
+    assert harness_menu is not None
+    assert [action.text() for action in harness_menu.actions()] == [
+        "启动并打开页面",
+        "重启服务",
+        "停止服务",
+    ]
     menu.close()
     app.processEvents()
 

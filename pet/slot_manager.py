@@ -602,11 +602,10 @@ def write_runtime_marker(config_dir: Path | str, instance_id: str,
     return path
 
 
-def delete_runtime_marker(config_dir: Path | str, instance_id: str = "",
-                          *, versioned: bool = True) -> None:
+def delete_runtime_marker(config_dir: Path | str, instance_id: str = "") -> None:
     """删除本窗 runtime 标记（「退出这只」必须显式删，否则活 pid 的陈旧
     标记永久虚增计数/避让错乱）。新旧两种命名都尝试删（跨格式迁移兜底）。"""
-    for ver in (bool(versioned), not bool(versioned)):
+    for ver in (True, False):
         try:
             path = runtime_marker_path(config_dir, instance_id, versioned=ver)
             if path.exists():

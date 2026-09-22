@@ -165,22 +165,39 @@ def _build_voice_chime_now(menu, pet):
     return add_action(menu, "立即报时", "chat", pet.on_voice_chime_now, close_on_trigger=True)
 
 
-def _build_voice_chime_toggle(menu, pet):
-    cfg = getattr(pet, "cfg", None)
-    enabled = bool(cfg.get("voice_chime_enabled", True)) if cfg is not None else True
-    label = "关闭语音报时" if enabled else "启用语音报时"
-    return add_action(menu, label, "chat", pet.on_toggle_voice_chime, close_on_trigger=True)
+def _flag_toggle_spec(key: str, on_label: str, off_label: str, icon: str,
+                      callback: str):
+    """布尔开关菜单项的规约工厂：按配置当前值翻转标签，点击回回调。
+
+    语音报时开关与节日提醒开关此前逐字同构，这里把「读配置 → 选标签 →
+    add_action」收成一处；标签翻转、图标、回调与 close_on_trigger 语义逐点
+    不变。注意 `enabled` 只影响展示标签，不影响回调可用性（可用性仍由
+    `MenuActionSpec.available` 的 `_callback_available` 判定）。
+    """
+    def _build(menu, pet):
+        cfg = getattr(pet, "cfg", None)
+        enabled = bool(cfg.get(key, False)) if cfg is not None else False
+        return add_action(
+            menu, on_label if enabled else off_label, icon,
+            getattr(pet, callback), close_on_trigger=True,
+        )
+
+    return _build
+
+
+_build_voice_chime_toggle = _flag_toggle_spec(
+    "voice_chime_enabled", "关闭语音报时", "启用语音报时", "chat",
+    "on_toggle_voice_chime",
+)
+
+_build_festival_toggle = _flag_toggle_spec(
+    "festival_reminder_enabled", "关闭节日提醒", "启用节日提醒", "todo",
+    "on_toggle_festival",
+)
 
 
 def _build_festival_now(menu, pet):
     return add_action(menu, "今日节日", "todo", pet.on_festival_now, close_on_trigger=True)
-
-
-def _build_festival_toggle(menu, pet):
-    cfg = getattr(pet, "cfg", None)
-    enabled = bool(cfg.get("festival_reminder_enabled", False)) if cfg is not None else False
-    label = "关闭节日提醒" if enabled else "启用节日提醒"
-    return add_action(menu, label, "todo", pet.on_toggle_festival, close_on_trigger=True)
 
 
 def _build_check_update(menu, pet):

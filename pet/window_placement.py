@@ -93,6 +93,12 @@ def move_window_towards(host, x: float, y: float,
     # 1. 身体框（= 虚拟位置 + 局部偏移）钳进工作区
     xi = clamp_span(xi + sbr.x(), bounds.left(), bounds.right(), sbr.width()) - sbr.x()
     yi = clamp_span(yi + sbr.y(), bounds.top(), bounds.bottom(), sbr.height()) - sbr.y()
+    # 1b. 灵动岛同步硬墙（可选）：身体框不得进入岛碰撞区（像屏幕边界一样
+    #     同步钳制，杜绝 30Hz 采样下"钻进区→被弹→再钻回"的抽搐）。hook 由
+    #     岛碰撞体注册（IslandCollisionBody.start），无岛时是 no-op。
+    island_clamp = getattr(host, "_island_clamp_body", None)
+    if callable(island_clamp):
+        xi, yi = island_clamp(host, xi, yi, sbr)
     # 2. 窗口钳进工作区
     wx = clamp_span(xi, avail.left(), avail.right(), host._w)
     wy = clamp_span(yi, avail.top(), avail.bottom(), host._h)
@@ -205,7 +211,6 @@ def remove_runtime_marker(host: Any) -> None:
     slot_manager_mod.delete_runtime_marker(
         host.cfg.dir,
         host.cfg.instance_id,
-        versioned=runtime_marker_versioned(host),
     )
 
 
@@ -280,10 +285,6 @@ def ensure_visible_after_restore(host) -> None:
     if not host.isVisible():
         host.show()
 
-
-def on_screen_added_restore(host, screen) -> None:
-    """兼容入口：新屏幕上线 → 立即触发一次检查。"""
-    host._screen_retry_tick()
 
 # ================================================================ 尺寸
 

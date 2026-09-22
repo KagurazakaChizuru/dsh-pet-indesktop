@@ -2,6 +2,7 @@
 """灵动岛重生：四边停靠/滑出、展开卡片、事件动效、配置清洗。"""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
@@ -13,6 +14,7 @@ from pet.dynamic_island import (
     DynamicIsland,
     _CAPSULE_HEIGHT,
     _CAPSULE_INSET,
+    _STRIP_SIDE,
     _STRIP_THICKNESS,
     dock_edge_for,
     spring_step,
@@ -70,6 +72,19 @@ def _click(widget) -> None:
                buttons=Qt.MouseButton.NoButton))
 
 
+def _drive_anim(widget, max_ticks: int = 60) -> None:
+    """按真实定时器节奏驱动几何动画到结束（含 _geo_t>=1 的收尾重算）。
+
+    _finish_animations 是从"动画起点几何"直接跳终点，掩盖不了收尾重算
+    在窗口已落位细条后的再 derivation；这里逐 tick 推进才等价实机路径。
+    """
+    for _ in range(max_ticks):
+        if not widget._anim_timer.isActive():
+            return
+        widget._anim_last = time.monotonic() - 0.05  # 强制 dt=50ms/帧
+        widget._on_anim_tick()
+
+
 # ------------------------------------------------------------ 纯函数
 def test_spring_step_converges_and_overshoots():
     value, velocity = 1.0, 6.0  # 事件冲量
@@ -101,6 +116,11 @@ def test_strip_rect_shapes():
     assert bottom.bottom() == available.bottom() and bottom.height() == _STRIP_THICKNESS
     left = strip_rect_for(capsule, "left", available)
     assert left.x() == 0 and left.width() == _STRIP_THICKNESS
+    # 左右竖条按胶囊真实几何中心（top + height//2）居中：QRect::center()
+    # 对偶数尺寸向下取整差 1px，会让滑出/收回每循环漂 1px
+    capsule = QRect(900, 300, 200, 44)
+    assert strip_rect_for(capsule, "left", available).y() == \
+        300 + _CAPSULE_HEIGHT // 2 - 32
     right = strip_rect_for(capsule, "right", available)
     assert right.right() == available.right() and right.width() == _STRIP_THICKNESS
     assert strip_rect_for(capsule, "none", available) == capsule
@@ -139,6 +159,49 @@ def test_drag_to_edge_docks_and_hover_peeks(tmp_path):
         assert island._debug_state()["mode"] == "normal"
         assert island._debug_state()["dock_edge"] == "none"
         assert island.height() == 44
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_left_edge_hover_cycles_do_not_drift(tmp_path):
+    """左右停靠细条在 滑出→收回 循环后必须原地不动（回归：每次收回动画
+    结束细条上窜 ~11px≈2.6mm 反复累计）。
+
+    根因一：动画收尾重算（_on_anim_tick 到位后调 _target_rect）时窗口已
+    落成 64 高细条，旧代码按"细条左上角 + 胶囊尺寸"拼参考矩形，中心凭空
+    上移半个高度差；根因二：strip_rect_for 用 QRect::center()（偶数尺寸
+    向下取整差 1px），与滑出方向的整数居中公式不对称。
+    """
+    _qapp()
+    island = _island(tmp_path)
+    try:
+        island.show()
+        available = _avail()
+        # 拖到左边缘 → 停靠成竖条（逐 tick 驱动，覆盖真实收尾重算路径）
+        _drag_to(island, QPoint(available.left() + 4, island.geometry().center().y()))
+        release_center_y = island.y() + island.height() // 2  # 松手时胶囊中心
+        _drive_anim(island)
+        assert island._debug_state()["dock_edge"] == "left"
+        strip0 = island.geometry()
+        # 停靠瞬间不跳：细条以松手时胶囊真实中心居中
+        assert strip0.width() == _STRIP_THICKNESS
+        assert strip0.y() + _STRIP_SIDE // 2 == release_center_y
+        # 已停靠状态下 _target_rect 必须幂等（收尾重算/显示恢复都靠它）
+        assert island._target_rect() == strip0
+
+        for _ in range(3):
+            island.enterEvent(None)
+            _drive_anim(island)
+            # 滑出的胶囊与细条同心（真实几何中心，不用 floor 的 center()）
+            assert island.height() == _CAPSULE_HEIGHT
+            assert island.y() + island.height() // 2 == \
+                strip0.y() + strip0.height() // 2
+            island.leaveEvent(None)
+            island._dock_back()
+            _drive_anim(island)
+            # 收回后细条分毫不差（不向上窜）
+            assert island.geometry() == strip0
     finally:
         island.hide()
         island.deleteLater()

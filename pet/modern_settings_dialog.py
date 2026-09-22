@@ -238,8 +238,6 @@ def dialogue_params_hint(key: str) -> str:
 class ModernSettingsDialog(QDialog):
     """Settings window matching Modern's sidebar and rounded-card hierarchy."""
 
-    settings_saved = Signal()
-
     def __init__(self, config, parent=None, *, include_ai: bool = True,
                  standalone: bool = False):
         super().__init__(parent)
@@ -820,6 +818,13 @@ class ModernSettingsDialog(QDialog):
                 "桌宠显示",
                 [
                     SettingRow("scale", "桌宠大小", "调整桌宠在桌面上的显示尺寸。", self.scale_combo),
+                    SettingRow(
+                        "bubble_text_scale",
+                        "气泡文字大小",
+                        "气泡里文字的显示尺寸：气泡与字号一起等比放大（100% 为默认）。"
+                        "大屏上嫌气泡字小时调大；审批/提问气泡为固定布局，不随本项变化。",
+                        self.bubble_text_scale_spin,
+                    ),
                     SettingRow("pet_opacity", "不透明度", "调整桌宠窗口的整体透明度；100% 为完全不透明。", self.pet_opacity_spin),
                     SettingRow(
                         "self_talk_bubble_style",
@@ -1452,10 +1457,6 @@ class ModernSettingsDialog(QDialog):
             vol = float(self.agent_sound_volume_spin.value()) / 100.0
             play_sound(target, volume=vol)
 
-    def _import_dialogue_template(self) -> None:
-        """导入默认台词模板（逻辑 host 在 settings_pet_controls）。"""
-        settings_pet_controls._import_dialogue_template(self)
-
     def _import_dialogue_template_json(self) -> None:
         """Import a complete persona template from the inline JSON editor."""
         settings_pet_controls._import_dialogue_template_json(self)
@@ -1712,7 +1713,7 @@ class ModernSettingsDialog(QDialog):
         )
         pet = page_content(
             [
-                ("显示", claim("scale", "pet_opacity")),
+                ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
                 ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead")),
                 ("拖拽与弹射", claim("drag_physics", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
@@ -1795,7 +1796,7 @@ class ModernSettingsDialog(QDialog):
         if self.ai_page is not None:
             balance_rows = claim_prefix("balance_")
             appearance_rows = claim(
-                "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "modern_chat_card_opacity"
+                "chat_ui_style", "chat_background", "chat_background_file", "chat_background_opacity", "chat_background_fill", "chat_bg_crops", "modern_chat_card_opacity"
             )
             ai_sections = page_content(
                 [
@@ -2050,10 +2051,6 @@ class ModernSettingsDialog(QDialog):
         for control in self.findChildren(ToggleSwitch):
             control.update()
 
-    def _stylesheet(self) -> str:
-        theme = self.menu_theme_select.currentData() if hasattr(self, "menu_theme_select") else "system"
-        return _settings_stylesheet(str(theme or "system"))
-
     def _apply_autostart(self) -> None:
         """应用「开机自启」开关：仅在实际改动时写入系统登录项。
 
@@ -2075,7 +2072,6 @@ class ModernSettingsDialog(QDialog):
             return
         self._saved_via_button = True
         self._apply_autostart()
-        self.settings_saved.emit()
         self.accept()
 
     def _write_config(self) -> bool:
@@ -2212,6 +2208,7 @@ class ModernSettingsDialog(QDialog):
         self.config.set("self_talk_texts", texts or list(DEFAULT_SELF_TALK_TEXTS))
         self.config.set("self_talk_image_dir", self.self_talk_image_dir_picker.text())
         self.config.set("self_talk_image_scale", self.self_talk_image_scale_spin.value())
+        self.config.set("bubble_text_scale", self.bubble_text_scale_spin.value())
         # Agent 联动：自定义 thinking 文案与音效（合并写回，不覆盖 agent_link 其他开关）
         self.config.set("dialogue_mode", str(self.dialogue_mode_select.currentData() or "legacy"))
         # 统一预设：编辑区当前层 flush 后，global 层 + agents delta 分层写回

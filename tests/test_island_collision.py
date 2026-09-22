@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""果冻墙（灵动岛本进程直连碰撞）：FLAG_STATIC 弹性规则 + 本地检测/结算。"""
+"""灵动岛碰撞（本进程直连版，同步硬墙）。
+
+30Hz 检测/结算已整体移除（issue #146 实机教训）：岛改为屏幕边界式位置硬墙，
+在统一位置出口 move_window_towwards 里同步钳制，杜绝采样间隙导致的抽搐。
+"""
 from __future__ import annotations
 
 import math
@@ -7,14 +11,16 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QApplication
 
 from pet import collision
+from pet import physics as physics_mod
+from pet import window_placement
 from pet.collision_ipc import _KNOWN_FLAGS_MASK
 from pet.config import Config
 from pet.dynamic_island import DynamicIsland
-from pet.island_collision import IslandCollisionBody, _segment_circle_entry
+from pet.island_collision import IslandCollisionBody
 
 
 def _qapp() -> QApplication:
@@ -66,15 +72,21 @@ def test_static_flag_in_known_mask():
     assert _KNOWN_FLAGS_MASK & collision.FLAG_STATIC == collision.FLAG_STATIC
 
 
-def test_segment_circle_entry_swept():
-    """扫掠 TOI：线段进入圆返回最早时刻；未进入返回 None。"""
-    assert _segment_circle_entry((0.0, 0.0), (100.0, 0.0), (50.0, 0.0), 10.0) == 0.4
-    assert _segment_circle_entry((0.0, 0.0), (100.0, 0.0), (50.0, 8.0), 10.0) is not None
-    assert _segment_circle_entry((0.0, 0.0), (100.0, 0.0), (50.0, 30.0), 10.0) is None
-    assert _segment_circle_entry((5.0, 5.0), (5.0, 5.0), (5.0, 5.0), 3.0) == 0.0  # 起点在内
+# ------------------------------------------------------------ 同步硬墙（屏幕边界式位置钳制）
+class _ClampScreen:
+    def __init__(self, w: int = 3840, h: int = 2160):
+        self._w, self._h = w, h
+
+    def name(self):
+        return "big"
+
+    def availableGeometry(self):
+        return QRect(0, 0, self._w, self._h)
+
+    def devicePixelRatio(self):
+        return 1.0
 
 
-# ------------------------------------------------------------ 本地碰撞体
 class FakePhysicsTimer:
     def __init__(self):
         self.started = False
@@ -83,35 +95,49 @@ class FakePhysicsTimer:
         self.started = True
 
 
-class FakeWin:
-    """最小桌宠窗口桩：本地结算触及的全部属性/方法。"""
+class WallWin:
+    """同步墙的窗口桩：全窗口即身体（无 body_box），带虚拟坐标/物理状态。
 
-    def __init__(self, x: float, y: float, vx: float = 0.0, vy: float = 0.0,
-                 size: int = 120, visible: bool = True):
-        self._x, self._y = x, y
-        self._size = size
+    _move_window_towwards 走真实统一出口（window_placement.move_window_towards），
+    供"落窗即钳制 / 抛掷反射 / submit 推挤 / 撞岛业务链"端到端断言使用。
+    """
+
+    def __init__(self, x: float, y: float, w: int, h: int, *,
+                 physics_mode: str = "", vx: float = 0.0, vy: float = 0.0,
+                 visible: bool = True, screen_w: int = 3840, screen_h: int = 2160):
+        self._x, self._y = float(x), float(y)
+        self._w, self._h = w, h
+        self.scale = 1.0
+        self._capture_headroom = 0
+        self._draw_delta = QPoint(0, 0)
+        self._collision_local_bounds = None
         self._visible = visible
+        self.cfg = SimpleNamespace(get=lambda k, d=None: d)
+        self._screen = _ClampScreen(screen_w, screen_h)
+        self._physics_mode = physics_mode
         self._phys_vel = [vx, vy]
-        self._phys_pos = [x, y]
+        self._phys_pos = [float(x), float(y)]
+        self._hidden_paused = False
         self._interaction_state = "IDLE"
-        self._physics_mode = ""
-        self._physics_timer = FakePhysicsTimer()
         self._throw_speed_cap = 4800.0
         self._throw_egg = None
         self._edge_probe = None
         self._squash_active = False
-        self._hidden_paused = False
+        self._just_dragged = False
         self._last_physics_tick_time = None
-        self.cfg = SimpleNamespace(get=lambda k, d=None: d)
+        self._physics_timer = FakePhysicsTimer()
         self.sounds = 0
         self.squashes = 0
         self.entered_modes = []
 
-    def isVisible(self):
-        return self._visible
+    def _screen_available(self, *_a, **_k):
+        return self._screen
 
-    def collision_content_rect(self) -> QRect:
-        return QRect(int(self._x), int(self._y), self._size, self._size)
+    def pos(self):
+        return QPoint(int(self._x), int(self._y))
+
+    def move(self, x, y):
+        self._x, self._y = float(x), float(y)
 
     def x(self):
         return int(self._x)
@@ -119,13 +145,18 @@ class FakeWin:
     def y(self):
         return int(self._y)
 
-    def move(self, x, y):
-        self._x, self._y = float(x), float(y)
+    def isVisible(self):
+        return self._visible
 
-    def _collision_clamp_pos(self, x, y):
-        x = 0.0 if x == float("-inf") else (2560.0 if x == float("inf") else x)
-        y = 0.0 if y == float("-inf") else (1440.0 if y == float("inf") else y)
-        return x, y
+    def _stable_body_local_rect(self):
+        return QRect(0, 0, self._w, self._h)
+
+    def _virtual_pos(self):
+        return QPoint(int(self._x) + self._draw_delta.x(),
+                      int(self._y) + self._draw_delta.y())
+
+    def _move_window_towards(self, x, y, body_bounds=None):
+        window_placement.move_window_towards(self, x, y, body_bounds=body_bounds)
 
     def _cancel_move(self):
         pass
@@ -143,6 +174,18 @@ class FakeWin:
     def _start_squash(self):
         self.squashes += 1
 
+    def _sync_mask(self):
+        pass
+
+    def update(self):
+        pass
+
+    def _schedule_position_sync(self):
+        pass
+
+    def _submit_collision_state(self, *_a, **_k):
+        pass
+
 
 def _make_body(tmp_path: Path, pets=()):
     cfg = Config(base=tmp_path)
@@ -152,310 +195,411 @@ def _make_body(tmp_path: Path, pets=()):
     return island, body
 
 
+def _assert_body_out_of_stadium(win, body, msg=""):
+    """断言身体框（全窗口）中心到岛轴的距离 >= 矩形径向半径 + 岛半径 + 1。"""
+    stadium = body._island_stadium()
+    ax0, ax1, ay, rr, _h = stadium
+    center_x = win.x() + win._draw_delta.x() + win._w / 2.0
+    center_y = win.y() + win._draw_delta.y() + win._h / 2.0
+    closest_x = min(max(center_x, ax0), ax1)
+    dx, dy = center_x - closest_x, center_y - ay
+    dist = math.hypot(dx, dy)
+    assert dist > 1e-9, f"身体中心不应恰好落在岛轴上：{msg}"
+    nx, ny = dx / dist, dy / dist
+    radial = min((win._w / 2) / max(abs(nx), 1e-9),
+                 (win._h / 2) / max(abs(ny), 1e-9))
+    assert dist >= radial + rr + 1.0 - 1e-6, (
+        f"身体框未被钳出岛区：中心距轴 {dist:.1f} < 径向 {radial:.1f} + 岛半径 {rr} + 1（{msg}）"
+    )
+
+
 def test_body_start_stop_lifecycle(tmp_path):
+    """start 给桌宠挂同步硬墙 hook 并置 running；stop 清除（岛碰撞关闭后不设墙）。"""
     _qapp()
-    island, body = _make_body(tmp_path)
+    win = WallWin(1000, 1000, 200, 100)
+    island, body = _make_body(tmp_path, pets=[win])
     try:
         island.show()
+        assert getattr(win, "_island_clamp_body", None) is None
         body.start()
-        assert body._running and body._timer.isActive()
+        assert body._running
+        # 绑定方法每次访问是新对象，比 __func__
+        assert win._island_clamp_body.__func__ is body._clamp_body.__func__
         body.stop()
-        assert not body._running and not body._timer.isActive()
+        assert not body._running
+        assert win._island_clamp_body is None
     finally:
         island.hide()
         island.deleteLater()
 
 
-def test_fast_pet_bounces_off_island(tmp_path):
-    """高速撞岛：本地结算 e=1.3 弹回 + 进抛掷物理 + 音效 + 岛播 bump。"""
-    _qapp()
-    # 岛在 (400,300)（体育场轴 [422,634], y=322, r=22）；肥鱼贴岛左缘向右撞
-    win = FakeWin(x=300.0, y=260.0, vx=600.0)
-    island, body = _make_body(tmp_path, pets=[win])
-    try:
-        island.show()
-        bumps = []
-        island.bump = lambda *args: bumps.append(args)
-        body._running = True
-        now = time.monotonic()
-        # 注入上帧：50ms 前在 (330,320) → 实测速度 600px/s 向右
-        body._pet_prev[id(win)] = (330.0, 320.0)
-        body._pet_prev_ts[id(win)] = now - 0.05
-        body._tick()
-        assert win._phys_vel[0] < 0.0  # 被弹回左侧
-        # e=1.3 加速：末速率 = 600*1.3
-        assert abs(win._phys_vel[0]) > 600.0
-        assert win._interaction_state == "THROWN"
-        assert "throw" in win.entered_modes
-        assert win.sounds == 1
-        assert len(bumps) == 1
-        _strength, dir_x, _dir_y = bumps[0]
-        assert dir_x > 0.0  # 岛被向右顶
-    finally:
-        island.hide()
-        island.deleteLater()
+def test_synchronous_clamp_keeps_body_out_of_island(tmp_path):
+    """同步硬墙：统一位置出口在每次落窗前把身体框钳出岛碰撞区（像屏幕边界墙）。
 
-
-def test_swept_hit_catches_tunneling_pet(tmp_path):
-    """上一帧还在岛左侧远处、这一帧已在岛右侧：扫掠仍判定命中（防隧道），
-    且被放回来路一侧。"""
-    _qapp()
-    win = FakeWin(x=700.0, y=260.0, vx=4800.0)  # 岛在 400,300；这帧已穿过
-    island, body = _make_body(tmp_path, pets=[win])
-    try:
-        island.show()
-        body._running = True
-        now = time.monotonic()
-        # 100ms 前在岛左侧 (260,320)：合法高速甩出（4800px/s）不被瞬移守卫误杀
-        body._pet_prev[id(win)] = (260.0, 320.0)
-        body._pet_prev_ts[id(win)] = now - 0.1
-        body._tick()
-        assert win._interaction_state == "THROWN"  # 被拦下结算
-        assert win._phys_vel[0] < 0.0  # 弹回来路
-        # TOI 放回：位于岛体左侧（来路一侧），不在右侧
-        assert win.collision_content_rect().center().x() < 400
-    finally:
-        island.hide()
-        island.deleteLater()
-
-
-def test_slow_contact_separates_without_bounce(tmp_path):
-    """低速贴上（相对接近 <20px/s）：只推出不弹飞、不进抛掷、不响。"""
-    _qapp()
-    win = FakeWin(x=340.0, y=285.0, vx=5.0)  # 与岛左缘轻贴
-    island, body = _make_body(tmp_path, pets=[win])
-    try:
-        island.show()
-        body._running = True
-        bumps = []
-        island.bump = lambda *args: bumps.append(args)
-        now = time.monotonic()
-        # 上帧同位（50ms 无位移）→ 实测速度 0
-        rect = win.collision_content_rect()
-        body._pet_prev[id(win)] = (float(rect.center().x()), float(rect.center().y()))
-        body._pet_prev_ts[id(win)] = now - 0.05
-        old_x = win._x
-        body._tick()
-        assert win._interaction_state == "IDLE"  # 不弹飞
-        assert win.sounds == 0
-        assert bumps == []
-        assert win._x != old_x  # 但被推出重叠区
-    finally:
-        island.hide()
-        island.deleteLater()
-
-
-def test_dragged_pet_and_hidden_pet_skipped(tmp_path):
-    """拖拽中的桌宠（用户在摆放）与隐藏的桌宠不参与结算。"""
-    _qapp()
-    dragged = FakeWin(x=340.0, y=285.0, vx=600.0)
-    dragged._physics_mode = "drag"
-    hidden = FakeWin(x=340.0, y=285.0, vx=600.0, visible=False)
-    island, body = _make_body(tmp_path, pets=[dragged, hidden])
-    try:
-        island.show()
-        body._running = True
-        body._tick()
-        assert dragged._interaction_state == "IDLE"
-        assert hidden._interaction_state == "IDLE"
-    finally:
-        island.hide()
-        island.deleteLater()
-
-
-def test_hit_cooldown_per_pet(tmp_path):
-    """0.15s 命中冷却：同一只桌宠连着两次接近只结算一次。"""
-    _qapp()
-    win = FakeWin(x=300.0, y=260.0, vx=600.0)
-    island, body = _make_body(tmp_path, pets=[win])
-    try:
-        island.show()
-        body._running = True
-        now = time.monotonic()
-        body._pet_prev[id(win)] = (330.0, 320.0)
-        body._pet_prev_ts[id(win)] = now - 0.05
-        body._tick()
-        first_v = win._phys_vel[0]
-        # 冷却内再来一次接近（重新注入接近轨迹）
-        body._pet_prev[id(win)] = (330.0, 320.0)
-        body._pet_prev_ts[id(win)] = time.monotonic() - 0.05
-        win._x, win._y = 300.0, 260.0
-        body._tick()
-        assert win._phys_vel[0] == first_v
-    finally:
-        island.hide()
-        island.deleteLater()
-
-
-def test_dragging_island_slaps_stationary_pet(tmp_path):
-    """拖着岛扫鱼：岛速参与相对速度，静止的鱼被拍飞（深度重叠按相对运动解围）。"""
-    _qapp()
-    win = FakeWin(x=560.0, y=285.0, vx=0.0)  # 静止在岛右端上方
-    island, body = _make_body(tmp_path, pets=[win])
-    try:
-        island.show()
-        body._running = True
-        # 模拟岛正被向右拖（速度 800px/s）；鱼静止（实测位移 0）
-        body._vx, body._vy = 800.0, 0.0
-        now = time.monotonic()
-        rect = win.collision_content_rect()
-        body._pet_prev[id(win)] = (float(rect.center().x()), float(rect.center().y()))
-        body._pet_prev_ts[id(win)] = now - 0.05
-        body._check_pet(win, body._island_stadium(), island.geometry(), now, set())
-        assert win._phys_vel[0] > 0.0  # 向右飞出去
-        assert win._interaction_state == "THROWN"
-    finally:
-        island.hide()
-        island.deleteLater()
-
-
-def test_island_velocity_estimate_zero_when_still(tmp_path):
-    """岛不动时速度估计为 0（静止噪声不拍鱼）。"""
-    _qapp()
-    island, body = _make_body(tmp_path)
-    try:
-        island.show()
-        body._update_motion()
-        body._update_motion()
-        assert body._vx == 0.0 and body._vy == 0.0
-    finally:
-        island.hide()
-        island.deleteLater()
-
-
-def test_island_velocity_survives_high_freq_submit(tmp_path):
-    """拖拽中高频几何回调（dt<0.01）不再把岛速清零（实机回归）。
-
-    旧逻辑在 dt<0.01 时清零并刷新采样点：拖拽的 mouseMove 频率远超
-    30Hz，岛速被反复清零，"拖岛拍鱼"退化成只推挤不弹飞。
+    30Hz 判定有采样间隙（帧间可钻进区→被弹→速度不足离区→再判定→抽搐）；
+    同步钳制在 move_window_towwards 里逐次落窗，身体框根本不进入岛区，从源头
+    杜绝穿透与抽搐。这里目标位置让身体中心落在岛轴上，应被钳到岛外。
     """
     _qapp()
     island, body = _make_body(tmp_path)
     try:
         island.show()
-        rect = island.geometry()
-        now = time.monotonic()
-        # 上一次有效采样：50ms 前、中心靠左 40px → 拖拽速度约 800px/s
-        body._last_center = (float(rect.center().x()) - 40.0,
-                             float(rect.center().y()))
-        body._last_motion_ts = now - 0.05
-        body._update_motion()
-        assert math.isclose(body._vx, 800.0, rel_tol=0.05)
-        sampled_ts = body._last_motion_ts
-        # 紧跟一波高频回调（间隔远小于 10ms）：速度保留、采样点不刷新
-        for _ in range(5):
-            body._update_motion()
-        assert math.isclose(body._vx, 800.0, rel_tol=0.05)
-        assert body._last_motion_ts == sampled_ts
+        body._running = True
+        win = WallWin(1000, 1000, 200, 100)
+        win._island_clamp_body = body._clamp_body
+        stadium = body._island_stadium()
+        ax0, ax1, ay, rr, _h = stadium
+        target_cx = (ax0 + ax1) / 2.0
+        window_placement.move_window_towards(
+            win, target_cx - win._w / 2.0, ay - win._h / 2.0)
+        _assert_body_out_of_stadium(win, body, "落点恰在岛轴")
     finally:
         island.hide()
         island.deleteLater()
 
 
-def test_docked_strip_skips_collision(tmp_path):
-    """停靠细条态不结算碰撞：16×64 竖条与 stadium 水平轴假设不符（幻影墙），
-    且贴屏边细条碰撞价值低；悬停滑出恢复胶囊后照常结算。"""
+def test_no_island_clamp_without_hook(tmp_path):
+    """无 hook（岛碰撞关闭）时 move_window_towards 不钳制——行为与改造前一致。"""
     _qapp()
-    win = FakeWin(x=60.0, y=478.0, vx=-600.0)
-    island, body = _make_body(tmp_path, pets=[win])
+    island, body = _make_body(tmp_path)
     try:
+        island.show()
+        body._running = True
+        win = WallWin(1000, 1000, 200, 100)
+        stadium = body._island_stadium()
+        ax0, ax1, ay, _rr, _h = stadium
+        target_cx = (ax0 + ax1) / 2.0
+        window_placement.move_window_towards(
+            win, target_cx - win._w / 2.0, ay - win._h / 2.0)
+        center_x = win.x() + win._draw_delta.x() + win._w / 2.0
+        center_y = win.y() + win._draw_delta.y() + win._h / 2.0
+        # 统一出口对坐标取整（int(round)），容差放 1px
+        assert abs(center_x - target_cx) < 1.0
+        assert abs(center_y - ay) < 1.0
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_clamp_noop_when_body_already_outside(tmp_path):
+    """远处落点不动墙：身体框未越界时 _clamp_body 原样返回（逐像素落窗）。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        win = WallWin(100, 100, 120, 120)
+        win._island_clamp_body = body._clamp_body
+        window_placement.move_window_towards(win, 100.0, 100.0)
+        assert win.x() == 100 and win.y() == 100
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_wall_inactive_when_stopped_hidden_or_docked(tmp_path):
+    """墙在 未运行/岛隐藏/细条态/几何动画 时不钳制（原样落窗，不设幻影墙）。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        win = WallWin(1000, 1000, 200, 100)
+        win._island_clamp_body = body._clamp_body
+        stadium = body._island_stadium()
+        ax0, ax1, ay, _rr, _h = stadium
+        tx = (ax0 + ax1) / 2.0 - win._w / 2.0
+        ty = ay - win._h / 2.0
+
+        def center_on_axis():
+            window_placement.move_window_towards(win, tx, ty)
+            center_x = win.x() + win._w / 2.0
+            return abs(center_x - (ax0 + ax1) / 2.0) < 1.0
+
+        assert center_on_axis(), "未运行时墙应失效"
+        body._running = True
+        island.hide()
+        assert center_on_axis(), "岛隐藏时墙应失效"
         island.show()
         island._mode = "docked"
         island._hover_peek = False
-        body._running = True
-        body._tick()
-        assert win._interaction_state == "IDLE"  # 细条态不结算
-        # 悬停滑出（几何动画进行中）同样不结算
-        island._hover_peek = True
-        island._geo_to = QRect(16, 440, 260, 44)
-        body._tick()
-        assert win._interaction_state == "IDLE"
+        assert center_on_axis(), "细条态墙应失效"
+        island._mode = "normal"
+        island._geo_to = QRect(400, 300, 340, 44)
+        assert center_on_axis(), "几何动画中墙应失效"
     finally:
         island.hide()
         island.deleteLater()
 
 
-def test_island_teleport_does_not_launch_pet(tmp_path):
-    """岛瞬移（配置变更/换屏/夹回屏幕）不产生拍鱼速度（跳变守卫）。"""
+def test_tall_pet_side_wall_uses_half_width(tmp_path):
+    """高瘦桌宠贴岛侧壁：同步墙按横向半宽推出（矩形口径），不再按身高的一半。"""
     _qapp()
     island, body = _make_body(tmp_path)
     try:
         island.show()
-        body._update_motion()          # 建立采样基线
-        body._last_motion_ts -= 0.1    # 模拟 100ms 间隔
-        island.move(island.x() + 800, island.y())  # 瞬移 800px
-        body._update_motion()
-        assert body._vx == 0.0 and body._vy == 0.0
-        # 守卫只重置采样点：下一次正常拖拽估计不受影响
-        body._last_motion_ts -= 0.1
-        island.move(island.x() + 30, island.y())   # 30px/100ms = 300px/s
-        body._update_motion()
-        assert math.isclose(body._vx, 300.0, rel_tol=0.2)
+        body._running = True
+        win = WallWin(1000, 1000, 156, 194)  # 高瘦：横向半宽 78、纵向半高 97
+        win._island_clamp_body = body._clamp_body
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        # 目标：身体中心与岛轴同高、位于左端帽左侧 90px（90 < 78+22 会越界），
+        # 纯横向分离，按横向半宽推出
+        window_placement.move_window_towards(
+            win, ax0 - 90.0 - 156.0 / 2.0, ay - 194.0 / 2.0)
+        center_x = win.x() + win._w / 2.0
+        assert abs(center_x - (ax0 - (78.0 + rr + 1.0))) < 2.0
     finally:
         island.hide()
         island.deleteLater()
 
 
-def test_separation_cancels_pet_move_plan(tmp_path):
-    """岛推出桌宠前取消其自主移动计划（否则 33ms 后移动插值覆盖分离位置）。"""
+def test_wall_geometry_independent_of_screen_size(tmp_path):
+    """不同分辨率屏幕：同步墙只依赖岛几何 + 身体矩形（与屏幕尺寸无关）。"""
     _qapp()
-    win = FakeWin(x=560.0, y=285.0, vx=0.0)  # 静止贴在岛右端
-    island, body = _make_body(tmp_path, pets=[win])
-    cancels = {"move": 0, "gap": 0}
-    win._cancel_move = lambda: cancels.__setitem__("move", cancels["move"] + 1)
-    win._cancel_animation_gap = lambda: cancels.__setitem__("gap", cancels["gap"] + 1)
+    for screen_w, screen_h in ((1024, 768), (1920, 1080), (3840, 2160)):
+        island, body = _make_body(tmp_path)
+        try:
+            island.show()
+            body._running = True
+            win = WallWin(1000, 1000, 200, 100, screen_w=screen_w, screen_h=screen_h)
+            win._island_clamp_body = body._clamp_body
+            stadium = body._island_stadium()
+            ax0, ax1, ay, rr, _h = stadium
+            window_placement.move_window_towards(
+                win, (ax0 + ax1) / 2.0 - win._w / 2.0, ay - win._h / 2.0)
+            _assert_body_out_of_stadium(win, body, f"屏幕 {screen_w}x{screen_h}")
+        finally:
+            island.hide()
+            island.deleteLater()
+
+
+def test_throw_mode_pet_reflects_off_island_wall(tmp_path):
+    """抛掷中撞岛：速度沿墙法线反射（e=RESTITUTION）+ 物理位置钉在钳制点。
+
+    像撞屏幕边缘一样弹开；纯钳制只挡位置会让物理空间穿过岛、视觉被钉在墙上
+    直到落体结束——反射后物理/视觉一致。真撞附带命中反馈（音效/挤压/岛弹跳）。
+    """
+    _qapp()
+    island, body = _make_body(tmp_path)
     try:
         island.show()
         body._running = True
-        now = time.monotonic()
-        rect = win.collision_content_rect()
-        body._pet_prev[id(win)] = (float(rect.center().x()), float(rect.center().y()))
-        body._pet_prev_ts[id(win)] = now - 0.05
-        body._check_pet(win, body._island_stadium(), island.geometry(), now, set())
-        assert cancels["move"] >= 1 and cancels["gap"] >= 1
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
+        # 岛左端帽 (ax0, ay)；身体 120×120 中心放 ax0-80（距轴 80 < 60+22），
+        # 向右 600px/s 高速接近 → 应反射成 -600*RESTITUTION 向左弹开
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        win = WallWin(ax0 - 140.0, ay - 60.0, 120, 120,
+                      physics_mode="throw", vx=600.0, vy=0.0)
+        win._island_clamp_body = body._clamp_body
+        win._move_window_towards(win._virtual_pos().x(), win._virtual_pos().y())
+        assert win._phys_vel[0] < 0.0  # 弹回来路
+        assert abs(win._phys_vel[0] - (-600.0 * physics_mod.RESTITUTION)) < 1e-6
+        assert win._phys_vel[1] == 0.0
+        # 物理位置钉在虚拟钳制点（= 落窗后的虚拟坐标），下一帧从此起跳
+        vp = win._virtual_pos()
+        assert abs(win._phys_pos[0] - vp.x()) < 1e-6
+        assert abs(win._phys_pos[1] - vp.y()) < 1e-6
+        _assert_body_out_of_stadium(win, body, "抛掷反射")
+        # 命中反馈：音效/挤压/岛弹跳（不重进 throw——已处于抛掷中）
+        assert win.sounds == 1
+        assert win.squashes == 1
+        assert len(bumps) == 1
+        assert win._physics_mode == "throw"
     finally:
         island.hide()
         island.deleteLater()
 
 
-def test_island_hit_ignores_pet_global_collision_switch(tmp_path):
-    """桌宠全局碰撞开关（多开桌宠之间碰撞）不否决果冻墙——岛只由自己的开关管。"""
+def test_fast_roaming_pet_flings_off_island_with_feedback(tmp_path):
+    """漫游高速撞岛（原有业务）：冲量 + 进抛掷物理 + 音效/挤压/岛弹跳，事件驱动。
+
+    与 30Hz 检测无关：墙在落窗时按接触跟踪测得的接近速度判真撞，走 _apply_hit
+    业务链（撞岛像撞弹床 e=STATIC_RESTITUTION）。
+    """
     _qapp()
-    win = FakeWin(x=560.0, y=285.0, vx=-600.0)
-    win.cfg = SimpleNamespace(
-        get=lambda k, d=None: False if k == "collision_enabled" else d)
-    island, body = _make_body(tmp_path, pets=[win])
+    island, body = _make_body(tmp_path)
     try:
         island.show()
         body._running = True
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
+        # 身体 120×120 中心在岛左端帽左侧 80px（越界 80 < 60+22）
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        win = WallWin(ax0 - 140.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
         now = time.monotonic()
-        rect = win.collision_content_rect()
-        body._pet_prev[id(win)] = (float(rect.center().x()) + 40.0,
-                                   float(rect.center().y()))
-        body._pet_prev_ts[id(win)] = now - 0.05
-        body._check_pet(win, body._island_stadium(), island.geometry(), now, set())
+        # 模拟漫游接近：上一帧在更左 12px（30ms 前）→ 接触跟踪测得 400px/s
+        body._contact[id(win)] = (ax0 - 152.0, ay - 60.0, now - 0.03)
+        win._move_window_towards(win._virtual_pos().x(), win._virtual_pos().y())
+        assert win._physics_mode == "throw"  # 进抛掷物理（被拍飞）
         assert win._interaction_state == "THROWN"
+        assert win._phys_vel[0] < 0.0  # 弹回左侧
+        assert abs(win._phys_vel[0]) > 400.0 * 1.3  # e=1.3 加速反弹
+        assert win.sounds == 1
+        assert win.squashes == 1
+        assert len(bumps) == 1
+        _assert_body_out_of_stadium(win, body, "漫游真撞")
     finally:
         island.hide()
         island.deleteLater()
 
 
-def test_island_resize_does_not_inject_phantom_speed(tmp_path):
-    """窗口尺寸变化（展开/收起卡片等）只重置采样点——窗口中心平移不是岛速。"""
+def test_slow_roaming_pet_is_pushed_without_feedback(tmp_path):
+    """慢速贴岛（轻贴）：只推出不撞——不响、不挤、不弹、不进抛掷物理。"""
     _qapp()
     island, body = _make_body(tmp_path)
     try:
         island.show()
-        body._update_motion()           # 建立基线（含尺寸）
-        body._last_motion_ts -= 0.05
-        # 岛处于 setFixedSize 状态，先解锁再 resize（否则 resize 是 no-op，
-        # 测试空转——判别力：删掉 size 守卫后，中心平移 +40px/50ms=800px/s
-        # 会让 _vx 非零，断言判红）
-        island.setMinimumSize(0, 0)
-        island.setMaximumSize(16777215, 16777215)
-        island.resize(island.width() + 80, island.height())  # 纯 resize
-        body._update_motion()
-        assert body._vx == 0.0 and body._vy == 0.0
+        body._running = True
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        win = WallWin(ax0 - 140.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
+        now = time.monotonic()
+        # 30ms 前同位 → 接触测得接近速度 ~0（轻贴）
+        body._contact[id(win)] = (ax0 - 140.0, ay - 60.0, now - 0.03)
+        win._move_window_towards(win._virtual_pos().x(), win._virtual_pos().y())
+        assert win._physics_mode != "throw"
+        assert win._interaction_state == "IDLE"
+        assert win.sounds == 0
+        assert win.squashes == 0
+        assert bumps == []
+        _assert_body_out_of_stadium(win, body, "轻贴推出")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_submit_flings_pet_when_island_swept_onto_it(tmp_path):
+    """拖岛拍鱼（原有业务）：岛被快速拖向静止桌宠，桌宠沿相对运动方向被拍飞
+    + 反馈（岛速参与结算，submit 事件驱动，无定时器）。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        bumps = []
+        island.bump = lambda *a: bumps.append(a)
+        # 让岛速采样基线暗示"正以 800px/s 向右拖"
+        rect = island.geometry()
+        body._last_size = (rect.width(), rect.height())
+        body._last_center = (float(rect.center().x()) - 40.0,
+                             float(rect.center().y()))
+        body._last_motion_ts = time.monotonic() - 0.05
+        # 静止桌宠中心在岛右端帽外侧 20px（身体已越界，会被推出并判真撞）
+        stadium = body._island_stadium()
+        ax0, ax1, ay, rr, _h = stadium
+        win = WallWin(ax1 + 20.0 - 60.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
+        body._pets_provider = lambda: [win]
+        island.on_geometry_changed = body.submit
+        island.on_geometry_changed()
+        assert win._physics_mode == "throw"  # 被拍飞进抛掷物理
+        assert win._phys_vel[0] > 0.0  # 沿岛运动方向（向右）飞出
+        assert win.sounds == 1
+        assert win.squashes == 1
+        assert len(bumps) == 1
+        _assert_body_out_of_stadium(win, body, "拖岛拍鱼")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_light_contact_cancels_pet_move_plan(tmp_path):
+    """轻贴推出取消桌宠自主移动计划（与旧分离同口径）——避免漫游原地踏步顶墙。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        stadium = body._island_stadium()
+        ax0, _ax1, ay, rr, _h = stadium
+        win = WallWin(ax0 - 140.0, ay - 60.0, 120, 120, vx=0.0)
+        win._island_clamp_body = body._clamp_body
+        cancels = {"move": 0, "gap": 0}
+        win._cancel_move = lambda: cancels.__setitem__("move", cancels["move"] + 1)
+        win._cancel_animation_gap = lambda: cancels.__setitem__("gap", cancels["gap"] + 1)
+        win._move_window_towards(win._virtual_pos().x(), win._virtual_pos().y())
+        assert cancels["move"] >= 1 and cancels["gap"] >= 1
+        _assert_body_out_of_stadium(win, body, "轻贴取消移动计划")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_submit_pushes_out_resting_pet_when_island_moved_onto_it(tmp_path):
+    """岛被拖到静止桌宠身上：submit 事件驱动把桌宠推出（岛动桌宠没动也挡）。"""
+    _qapp()
+    island, body = _make_body(tmp_path)
+    try:
+        island.show()
+        body._running = True
+        stadium = body._island_stadium()
+        ax0, ax1, ay, _rr, _h = stadium
+        win = WallWin(1000, 1000, 200, 100)
+        # 让身体中心恰在岛轴上（模拟岛拖过来盖住静止桌宠）
+        win._x, win._y = (ax0 + ax1) / 2.0 - win._w / 2.0, ay - win._h / 2.0
+        win._island_clamp_body = body._clamp_body
+        body._pets_provider = lambda: [win]
+        island.on_geometry_changed = body.submit  # 接线与 app.py 一致
+        island.on_geometry_changed()
+        _assert_body_out_of_stadium(win, body, "岛拖到静止桌宠身上")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+
+def test_wall_hook_covers_pet_window_created_after_start(tmp_path):
+    """启动之后新生的桌宠（生小肥鱼）也必须受硬墙约束。
+
+    回归背景：硬墙 hook 只在 start() 挂到当时已存在的窗口上；本进程 spawn
+    出来的新窗不在那一刻的列表里，且 start() 二次调用直接 return——新鱼于是
+    可以整个走进岛里（30Hz 时代由每帧遍历 pets_provider 自动覆盖，无此缺口）。
+    管线：spawn → body.refresh_hooks() → 新窗同样被钳出岛区。
+    """
+    _qapp()
+    pets = [WallWin(1000, 900, 200, 300)]
+    island, body = _make_body(tmp_path, pets)
+    try:
+        island.show()
+        body.start()
+        assert callable(getattr(pets[0], "_island_clamp_body", None)), "启动时已存在的窗应有钩子"
+
+        late = WallWin(1000, 1500, 200, 300)  # 启动之后才入列（spawn_in_process_window）
+        pets.append(late)
+        body.refresh_hooks()
+
+        assert callable(getattr(late, "_island_clamp_body", None)), (
+            "启动后新生的桌宠未挂上硬墙钩子——它会直接穿过灵动岛")
+        stadium = body._island_stadium()
+        ax0, ax1, ay, _rr, _h = stadium
+        late._move_window_towards((ax0 + ax1) / 2.0 - late._w / 2.0, ay - late._h / 2.0)
+        _assert_body_out_of_stadium(late, body, "启动后新生的桌宠")
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+def test_refresh_hooks_is_noop_when_stopped(tmp_path):
+    """碰撞体已停（果冻墙关掉）时刷新钩子不得把墙偷偷挂回来。"""
+    _qapp()
+    pets = [WallWin(1000, 900, 200, 300)]
+    island, body = _make_body(tmp_path, pets)
+    try:
+        island.show()
+        body.start()
+        body.stop()
+        late = WallWin(1000, 1500, 200, 300)
+        pets.append(late)
+        body.refresh_hooks()
+        assert getattr(late, "_island_clamp_body", None) is None, "停用状态下不该挂墙"
+        assert getattr(pets[0], "_island_clamp_body", None) is None, "停用状态下旧的钩子应已清掉"
     finally:
         island.hide()
         island.deleteLater()

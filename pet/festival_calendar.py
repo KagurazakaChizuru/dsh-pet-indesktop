@@ -71,19 +71,6 @@ def solar_term_on(day: _dt.date) -> str:
     return str(Solar.fromYmd(day.year, day.month, day.day).getLunar().getJieQi() or "")
 
 
-def solar_terms_of_year(year: int) -> dict[str, _dt.date]:
-    """返回某公历年全部 24 个节气 -> 公历日期（逐日扫描，一年 24 次命中）。"""
-    found: dict[str, _dt.date] = {}
-    cursor = _dt.date(int(year), 1, 1)
-    end = _dt.date(int(year), 12, 31)
-    while cursor <= end:
-        name = solar_term_on(cursor)
-        if name and name not in found:
-            found[name] = cursor
-        cursor += _dt.timedelta(days=1)
-    return found
-
-
 def spring_festival(lunar_year: int) -> _dt.date:
     """农历某年的正月初一（春节）对应的公历日期。
 

@@ -235,7 +235,7 @@ def write_pcm16_wav(clip: WavClip, dest: str | Path) -> bool:
 class WinmmApi:
     """winmm.dll 的薄封装：句柄与 WAVEHDR 的生命周期都在这一层。
 
-    测试替身只需实现同名方法（device_count/open/close/write/pending_count/
+    测试替身只需实现同名方法（open/close/write/pending_count/
     reap/reset/set_volume），整条产品路径即可在无音频设备的环境下验证。
     """
 
@@ -287,9 +287,6 @@ class WinmmApi:
     @staticmethod
     def _handle_ref(handle: int) -> ctypes.c_void_p:
         return ctypes.c_void_p(handle)
-
-    def device_count(self) -> int:
-        return int(self._dll.waveOutGetNumDevs())
 
     def open(self, channels: int, sample_rate: int, bits: int = 16) -> int:
         fmt = WAVEFORMATEX()

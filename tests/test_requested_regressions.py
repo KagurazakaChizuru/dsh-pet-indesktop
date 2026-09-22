@@ -61,6 +61,34 @@ def test_modern_chat_header_uses_current_pet_image(tmp_path):
     app.processEvents()
 
 
+def test_bubble_text_scale_row_persists(tmp_path, monkeypatch):
+    """「气泡文字大小」设置行：默认 100%，改值保存并持久化，越界被配置清洗钳位。"""
+    from PySide6.QtWidgets import QApplication
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    config = Config(tmp_path)
+    assert config.get("bubble_text_scale") == 100
+
+    dialog = settings_mod.ModernSettingsDialog(config, include_ai=True)
+    try:
+        assert dialog.bubble_text_scale_spin.value() == 100
+        assert dialog.bubble_text_scale_spin.minimum() == 50
+        assert dialog.bubble_text_scale_spin.maximum() == 300
+        assert dialog.findChild(
+            settings_mod.SettingRow, "settingRow_bubble_text_scale"
+        ) is not None, "设置页必须有可发现的「气泡文字大小」行"
+        dialog.bubble_text_scale_spin.setValue(180)
+        assert dialog._write_config() is True
+    finally:
+        dialog.close()
+        app.processEvents()
+    assert Config(tmp_path).get("bubble_text_scale") == 180
+
+
 def test_harness_autostart_toggle_persisted(tmp_path, monkeypatch):
     """「随桌宠启动 dsh 服务」开关：默认关，开启后保存并持久化。"""
     from PySide6.QtWidgets import QApplication
