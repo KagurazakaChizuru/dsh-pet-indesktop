@@ -4,6 +4,11 @@
 模块顶部为纯函数与纯数据，可在无 GUI 环境直接导入测试；语音合成与播放
 由 pet/voice_chime_service.py 承担（后台线程 + QtMultimedia）。
 
+**合成后端已接口化**（``pet/tts/`` 注册表）：本模块只负责「调度 + 文本 + 选哪条
+后端链 + 缓存键」，具体后端（音色/参数/请求体/响应解析）由 provider 自己声明。
+接入新 TTS 见 ``pet/tts/base.py`` 的模块文档；本模块按历史名再导出 edge 的音色与
+参数工具，外部 import 点零改动。
+
 职责：
 - 配置默认值与逐项清洗（与 config.py 平铺键对应）；
 - 报时调度判定（整点 / 每30分钟 / 每15分钟 / 每5分钟 / 每分钟 / 自定义
@@ -12,7 +17,7 @@
   两套文本解耦生成；
 - 台词/歌词轮换：库按 8 小时周期整体换批，同一周期内按序轮换取不同条目；
 - 自定义台词/歌词解析（留空回退内置库）；
-- edge-tts 参数格式化（rate / pitch）。
+- 合成尝试链（主后端 → 后备后端）与缓存键（含后端，按 provider 的 flavor）。
 """
 
 from __future__ import annotations
@@ -20,6 +25,9 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
+from . import tts
+from .tts import edge as _edge_provider
+from .tts import mimo as _mimo_provider
 from .voice_chime_quotes import CHINESE_QUOTES, ENGLISH_QUOTES
 
 # 调度模式键（设置页 ModernSelect 的 data 与此对应）。
@@ -40,9 +48,38 @@ SCHEDULE_LABELS = {
     "custom": "自定义时间点",
 }
 
-DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
-DEFAULT_RATE = 0  # 语速偏移（%），edge-tts 范围约 -100 ~ +100
-DEFAULT_PITCH = 0  # 音调偏移（Hz），edge-tts 范围约 -50 ~ +50
+# edge-tts 的音色/参数常量与清洗函数现在住在 pet/tts/edge.py：
+# 这里按历史名再导出，既有 import 点（设置页、测试、文档）零改动。
+DEFAULT_VOICE = _edge_provider.DEFAULT_VOICE
+DEFAULT_RATE = _edge_provider.DEFAULT_RATE
+DEFAULT_PITCH = _edge_provider.DEFAULT_PITCH
+VOICE_OPTIONS = _edge_provider.VOICE_OPTIONS
+clean_voice = _edge_provider.clean_voice
+clean_rate = _edge_provider.clean_rate
+clean_pitch = _edge_provider.clean_pitch
+edge_rate_arg = _edge_provider.edge_rate_arg
+edge_pitch_arg = _edge_provider.edge_pitch_arg
+
+# 小米 MiMo 的常量/纯函数同样在 pet/tts/mimo.py，按历史名再导出。
+MIMO_BASE_URL = _mimo_provider.MIMO_BASE_URL
+MIMO_CHAT_PATH = _mimo_provider.MIMO_CHAT_PATH
+MIMO_MODEL = _mimo_provider.MIMO_MODEL
+MIMO_MODEL_VOICE_DESIGN = _mimo_provider.MIMO_MODEL_VOICE_DESIGN
+MIMO_MODELS = _mimo_provider.MIMO_MODELS
+DEFAULT_MIMO_MODEL = _mimo_provider.DEFAULT_MIMO_MODEL
+MIMO_VOICE_OPTIONS = _mimo_provider.MIMO_VOICE_OPTIONS
+DEFAULT_MIMO_VOICE = _mimo_provider.DEFAULT_MIMO_VOICE
+DEFAULT_MIMO_STYLE = _mimo_provider.DEFAULT_MIMO_STYLE
+MIMO_STYLE_MAX_LEN = _mimo_provider.MIMO_STYLE_MAX_LEN
+MIMO_AUDIO_FORMAT = _mimo_provider.MIMO_AUDIO_FORMAT
+MIMO_TIMEOUT_S = _mimo_provider.MIMO_TIMEOUT_S
+clean_mimo_model = _mimo_provider.clean_mimo_model
+clean_mimo_voice = _mimo_provider.clean_mimo_voice
+clean_mimo_style = _mimo_provider.clean_mimo_style
+mimo_messages = _mimo_provider.mimo_messages
+mimo_payload = _mimo_provider.mimo_payload
+parse_mimo_audio = _mimo_provider.parse_mimo_audio
+
 DEFAULT_VOLUME = 80  # 播放音量（0-100）
 DEFAULT_SHOW_BUBBLE = True  # 报时气泡开关
 DEFAULT_SHOW_QUOTE = True  # 台词/歌词开关
@@ -57,85 +94,19 @@ _QUOTE_SLOTS_PER_DAY = 24 // QUOTE_ROTATION_HOURS
 _QUOTE_BATCHES_PER_DAY = _QUOTE_SLOTS_PER_DAY  # 台词库均分批数（一天 3 个周期 = 3 批）
 _MAX_CUSTOM_QUOTE_LEN = 120  # 自定义单条台词长度上限（超长截断，防误粘长文）
 
-# edge-tts 中英文音色下拉列表（value=音色名，label=友好中文标签）。
-VOICE_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("zh-CN-XiaoxiaoNeural", "晓晓（女 · 自然）"),
-    ("zh-CN-XiaoyiNeural", "晓伊（女 · 活泼）"),
-    ("zh-CN-YunjianNeural", "云健（男 · 浑厚）"),
-    ("zh-CN-YunxiNeural", "云希（男 · 阳光）"),
-    ("zh-CN-YunyangNeural", "云扬（男 · 新闻播报）"),
-    ("zh-CN-XiaochenNeural", "晓辰（女 · 电台）"),
-    ("zh-CN-XiaohanNeural", "晓涵（女 · 温柔）"),
-    ("zh-CN-XiaomengNeural", "晓梦（女 · 甜美）"),
-    ("zh-CN-XiaomoNeural", "晓墨（女 · 知性）"),
-    ("zh-CN-XiaoqiuNeural", "晓秋（女 · 柔和）"),
-    ("zh-CN-XiaoruiNeural", "晓睿（女 · 老人音）"),
-    ("zh-CN-XiaoshuangNeural", "晓双（女 · 童声）"),
-    ("zh-CN-XiaoxuanNeural", "晓萱（女 · 甜妹）"),
-    ("zh-CN-XiaoyanNeural", "晓颜（女 · 儿童）"),
-    ("zh-CN-XiaoyouNeural", "晓悠（女 · 童声）"),
-    ("zh-CN-liaoning-XiaobeiNeural", "晓北（女 · 东北腔）"),
-    ("zh-CN-shaanxi-XiaoniNeural", "晓妮（女 · 陕西腔）"),
-    ("zh-TW-HsiaoChenNeural", "曉臻（女 · 台灣腔）"),
-    ("zh-TW-YunJheNeural", "雲哲（男 · 台灣腔）"),
-    ("zh-HK-HiuGaaiNeural", "曉佳（女 · 粵語）"),
-    ("zh-HK-HiuMaanNeural", "曉文（女 · 粵語）"),
-    ("en-US-AriaNeural", "Aria（英文女声 · 自然）"),
-    ("en-US-JennyNeural", "Jenny（英文女声 · 甜美）"),
-    ("en-US-GuyNeural", "Guy（英文男声 · 沉稳）"),
-    ("en-US-AnaNeural", "Ana（英文女声 · 童声）"),
-    ("en-US-MichelleNeural", "Michelle（英文女声 · 温暖）"),
-    ("en-US-ChristopherNeural", "Christopher（英文男声 · 沉稳）"),
-    ("en-US-EricNeural", "Eric（英文男声 · 年轻）"),
-    ("en-US-RogerNeural", "Roger（英文男声 · 成熟）"),
-    ("en-GB-SoniaNeural", "Sonia（英音女声）"),
-    ("en-GB-RyanNeural", "Ryan（英音男声）"),
-)
-
 # ---------------------------------------------------------------- 合成后端
-# 本模块是纯逻辑层：只存「后端名 / 参数 / 请求体构造 / 响应解析」，不 import
-# 任何网络或 TTS 库——真正的 HTTP 在 pet/voice_chime_service.py 的后台线程里做。
-BACKEND_EDGE = "edge"  # edge-tts（微软在线，免 Key）
-BACKEND_MIMO = "mimo"  # 小米 MiMo TTS（OpenAI 兼容接口，需 API Key）
-BACKENDS: tuple[str, ...] = (BACKEND_EDGE, BACKEND_MIMO)
-BACKEND_LABELS = {
-    BACKEND_EDGE: "edge-tts（微软 · 免 Key）",
-    BACKEND_MIMO: "小米 MiMo（需 API Key）",
-}
-# 默认走小米（用户点名要的），失败时按 voice_chime_tts_fallback 自动回退 edge。
+# 后端清单/标签来自注册表（pet/tts）：新增 provider 后这里自动跟着变，不需要改本文件。
+# 本模块仍是纯逻辑层：只看「后端名 + 参数 + 合成计划」，不 import 任何网络或 TTS 库——
+# 真正的合成在 provider.synth() 里，由 pet/voice_chime_service.py 的后台线程调用。
+BACKEND_EDGE = _edge_provider.PROVIDER.id
+BACKEND_MIMO = _mimo_provider.PROVIDER.id
+BACKENDS: tuple[str, ...] = tts.provider_ids()
+BACKEND_LABELS = tts.labels()
+# 默认走小米（用户点名要的），失败时按 voice_chime_tts_fallback 回退带 is_fallback 的后端。
 DEFAULT_BACKEND = BACKEND_MIMO
 DEFAULT_TTS_FALLBACK = True
 
-MIMO_BASE_URL = "https://api.xiaomimimo.com"
-MIMO_CHAT_PATH = "/v1/chat/completions"
-MIMO_MODEL = "mimo-v2.5-tts"  # 内置音色
-MIMO_MODEL_VOICE_DESIGN = "mimo-v2.5-tts-voicedesign"  # 用文字描述生成音色
-MIMO_MODELS: tuple[tuple[str, str], ...] = (
-    (MIMO_MODEL, "内置音色（8 款）"),
-    (MIMO_MODEL_VOICE_DESIGN, "音色设计（用文字描述音色）"),
-)
-DEFAULT_MIMO_MODEL = MIMO_MODEL
-# 内置音色 id 就是中文/英文名本身（见官方文档的音色表）
-MIMO_VOICE_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("冰糖", "冰糖（女 · 中文默认）"),
-    ("茉莉", "茉莉（女 · 中文）"),
-    ("苏打", "苏打（男 · 中文）"),
-    ("白桦", "白桦（男 · 中文）"),
-    ("Mia", "Mia（女 · 英文）"),
-    ("Chloe", "Chloe（女 · 英文）"),
-    ("Milo", "Milo（男 · 英文）"),
-    ("Dean", "Dean（男 · 英文）"),
-)
-DEFAULT_MIMO_VOICE = "冰糖"
-# 风格指令（user 消息）：自然语言描述语气/情绪/节奏；空则不发该条消息。
-DEFAULT_MIMO_STYLE = ""
-MIMO_STYLE_MAX_LEN = 300
-MIMO_AUDIO_FORMAT = "wav"  # 非流式请求的音色输出格式（服务据此决定缓存扩展名）
-MIMO_TIMEOUT_S = 30.0
-
 _CUSTOM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
-_RATE_RE = re.compile(r"^[+-]?\d+$")
-_PITCH_RE = re.compile(r"^[+-]?\d+$")
 
 # 中文时刻文本（12 小时制）。
 _HOUR_CN = (
@@ -155,25 +126,30 @@ _HOUR_CN = (
 
 
 def default_chime_config() -> dict:
-    """语音报时配置默认值（config.py 顶层平铺键的镜像）。"""
-    return {
+    """语音报时配置默认值（config.py 顶层平铺键的镜像）。
+
+    合成后端那几项由 provider 自己声明（``pet/tts`` 的 ``fields``），这里遍历生成——
+    接入新 TTS 不需要改本函数，也不会漏登记。
+    """
+    config = {
         "voice_chime_enabled": False,
         "voice_chime_schedule": "hourly",
         "voice_chime_custom_times": "",
-        "voice_chime_voice": DEFAULT_VOICE,
-        "voice_chime_rate": DEFAULT_RATE,
-        "voice_chime_pitch": DEFAULT_PITCH,
         "voice_chime_volume": DEFAULT_VOLUME,
         "voice_chime_show_bubble": DEFAULT_SHOW_BUBBLE,
         "voice_chime_show_quote": DEFAULT_SHOW_QUOTE,
         "voice_chime_custom_quotes_zh": "",  # 自定义中文台词/歌词（一行一条，留空用内置库）
         "voice_chime_custom_quotes_en": "",  # 自定义英文台词/歌词（一行一条，留空用内置库）
-        "voice_chime_tts_backend": DEFAULT_BACKEND,  # edge / mimo
-        "voice_chime_tts_fallback": DEFAULT_TTS_FALLBACK,  # 主后端失败时自动回退 edge
-        "voice_chime_mimo_model": DEFAULT_MIMO_MODEL,
-        "voice_chime_mimo_voice": DEFAULT_MIMO_VOICE,
-        "voice_chime_mimo_style": DEFAULT_MIMO_STYLE,
+        "voice_chime_tts_backend": DEFAULT_BACKEND,  # 主后端（注册表里的 provider id）
+        "voice_chime_tts_fallback": DEFAULT_TTS_FALLBACK,  # 主后端失败自动回退后备后端
     }
+    for provider in tts.providers():
+        for spec in provider.fields:
+            if spec.kind == "secret":
+                continue  # 凭据存系统钥匙串，不进 config
+            config[spec.key] = spec.default
+    return config
+
 
 
 def clean_flag(value, default: bool = True) -> bool:
@@ -209,128 +185,47 @@ def clean_custom_times(value) -> frozenset[str]:
     return frozenset(times)
 
 
-def clean_voice(value) -> str:
-    """清洗音色名：仅保留可见字符，超长截断。"""
-    text = str(value or "").strip()
-    return text[:64] if text else DEFAULT_VOICE
-
-
 def clean_backend(value) -> str:
-    """清洗合成后端名；非法回落默认后端。"""
+    """清洗合成后端 id：必须是已注册的 provider，非法值回落默认后端。"""
     text = str(value or "").strip().lower()
-    return text if text in BACKENDS else DEFAULT_BACKEND
-
-
-def clean_mimo_model(value) -> str:
-    """清洗 MiMo 模型 id；非法回落内置音色模型。"""
-    text = str(value or "").strip()
-    return text if text in {model for model, _ in MIMO_MODELS} else DEFAULT_MIMO_MODEL
-
-
-def clean_mimo_voice(value) -> str:
-    """清洗 MiMo 音色 id（内置音色名就是 id 本身）；空值回落默认音色。"""
-    text = str(value or "").strip()
-    return text[:64] if text else DEFAULT_MIMO_VOICE
-
-
-def clean_mimo_style(value) -> str:
-    """清洗风格指令（user 消息）：去控制字符、压掉换行、超长截断。"""
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(value or ""))
-    text = re.sub(r"\s*\r?\n\s*", " ", text).strip()
-    return text[:MIMO_STYLE_MAX_LEN]
+    return text if text in tts.provider_ids() else DEFAULT_BACKEND
 
 
 def synth_ext(backend) -> str:
-    """该后端的合成产物扩展名（缓存文件名用）：edge→mp3，mimo→wav。"""
-    return "wav" if clean_backend(backend) == BACKEND_MIMO else "mp3"
+    """该后端产物的扩展名（缓存文件名用）：由 provider 的合成计划给出。"""
+    provider = tts.get(clean_backend(backend))
+    if provider is None:
+        return "mp3"
+    return str(provider.plan(provider.values({})).get("ext") or "mp3")
 
 
-def synth_attempts(cfg: dict) -> tuple[dict, ...]:
-    """按配置给出合成尝试序列（主后端优先，可回退 edge）。
+def synth_attempts(cfg: dict, secrets: dict | None = None) -> tuple[tts.TtsAttempt, ...]:
+    """按配置给出合成尝试序列（主后端优先，再回退带 ``is_fallback`` 的后端）。
 
-    每项是一个自足的「怎么合成」描述，服务层照着执行：
-      {"backend": "mimo", "model":..., "voice":..., "style":..., "ext": "wav"}
-      {"backend": "edge", "voice":..., "rate": "+0%", "pitch": "+0Hz", "ext": "mp3"}
-    纯函数：不探测环境、不读凭据——「这个后端现在能不能用」由服务层判定，
-    这样单测不需要网络/钥匙串。
+    每项是 :class:`pet.tts.TtsAttempt`（``provider`` / ``values`` / ``plan``）。
+    纯函数：不探测环境、不读凭据——「现在能不能用」由 ``provider.availability`` 判定，
+    密钥由调用方经 ``secrets[provider_id][字段名]`` 注入，因此单测不需要网络与钥匙串。
     """
     backend = clean_backend(cfg.get("backend", DEFAULT_BACKEND))
     order = [backend]
-    fallback = clean_flag(cfg.get("fallback", DEFAULT_TTS_FALLBACK), DEFAULT_TTS_FALLBACK)
-    if fallback and backend != BACKEND_EDGE:
-        order.append(BACKEND_EDGE)
-    attempts: list[dict] = []
-    for name in order:
-        if name == BACKEND_MIMO:
-            attempts.append({
-                "backend": BACKEND_MIMO,
-                "model": clean_mimo_model(cfg.get("mimo_model", DEFAULT_MIMO_MODEL)),
-                "voice": clean_mimo_voice(cfg.get("mimo_voice", DEFAULT_MIMO_VOICE)),
-                "style": clean_mimo_style(cfg.get("mimo_style", DEFAULT_MIMO_STYLE)),
-                "ext": synth_ext(BACKEND_MIMO),
-            })
-        else:
-            attempts.append({
-                "backend": BACKEND_EDGE,
-                "voice": clean_voice(cfg.get("voice", DEFAULT_VOICE)),
-                "rate": edge_rate_arg(cfg.get("rate", DEFAULT_RATE)),
-                "pitch": edge_pitch_arg(cfg.get("pitch", DEFAULT_PITCH)),
-                "ext": synth_ext(BACKEND_EDGE),
-            })
+    if clean_flag(cfg.get("fallback", DEFAULT_TTS_FALLBACK), DEFAULT_TTS_FALLBACK):
+        order.extend(tts.fallback_ids(exclude=backend))
+    values_map = cfg.get("providers") or {}
+    secret_map = secrets or {}
+    attempts: list[tts.TtsAttempt] = []
+    for provider_id in order:
+        provider = tts.get(provider_id)
+        if provider is None:
+            continue
+        values = dict(values_map.get(provider_id) or provider.values({}))
+        injected = secret_map.get(provider_id) or {}
+        for spec in tts.secret_fields(provider):
+            values[spec.name] = str(injected.get(spec.name) or "")
+        attempts.append(
+            tts.TtsAttempt(provider=provider_id, values=values, plan=provider.plan(values))
+        )
     return tuple(attempts)
 
-
-def mimo_messages(text: str, attempt: dict) -> list[dict]:
-    """构造 MiMo TTS 的 messages。
-
-    官方约定：**待合成文本必须放在 assistant 消息**；user 消息是可选的风格指令
-    （音色设计模型下 user 消息就是音色描述，必填）。风格为空时不发 user 消息。
-    """
-    messages: list[dict] = []
-    style = clean_mimo_style(attempt.get("style", ""))
-    if style:
-        messages.append({"role": "user", "content": style})
-    messages.append({"role": "assistant", "content": str(text or "")})
-    return messages
-
-
-def mimo_payload(text: str, attempt: dict) -> dict:
-    """MiMo TTS 非流式请求体。内置音色模型才发 voice；音色设计模型不发。"""
-    audio: dict = {"format": MIMO_AUDIO_FORMAT}
-    if clean_mimo_model(attempt.get("model")) != MIMO_MODEL_VOICE_DESIGN:
-        audio["voice"] = clean_mimo_voice(attempt.get("voice"))
-    return {
-        "model": clean_mimo_model(attempt.get("model")),
-        "messages": mimo_messages(text, attempt),
-        "audio": audio,
-        "stream": False,
-    }
-
-
-def parse_mimo_audio(payload) -> bytes:
-    """从 MiMo 响应里解出音频字节（base64）。
-
-    只接受官方文档记录的结构 ``choices[0].message.audio.data``；解不出就抛
-    ``ValueError`` 并带上可读原因（服务层把异常文本回给气泡，用户至少知道
-    发生了什么，而不是「合成失败」四个字）。
-    """
-    import base64
-
-    if not isinstance(payload, dict):
-        raise ValueError("响应不是 JSON 对象")
-    choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        message = payload.get("error") or payload.get("message") or "响应里没有 choices"
-        raise ValueError(str(message)[:120])
-    message = choices[0].get("message") if isinstance(choices[0], dict) else None
-    audio = message.get("audio") if isinstance(message, dict) else None
-    data = audio.get("data") if isinstance(audio, dict) else None
-    if not data:
-        raise ValueError("响应里没有音频数据")
-    try:
-        return base64.b64decode(str(data))
-    except Exception as exc:  # noqa: BLE001 —— 统一转成可读错误
-        raise ValueError(f"音频数据解码失败：{exc}") from exc
 
 
 def clean_custom_quotes(value) -> tuple[str, ...]:
@@ -357,24 +252,6 @@ def clean_custom_quotes(value) -> tuple[str, ...]:
     return tuple(quotes)
 
 
-def clean_rate(value) -> int:
-    """清洗语速偏移（%）：钳制到 [-100, 100]。"""
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_RATE
-    return max(-100, min(100, number))
-
-
-def clean_pitch(value) -> int:
-    """清洗音调偏移（Hz）：钳制到 [-50, 50]。"""
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return DEFAULT_PITCH
-    return max(-50, min(50, number))
-
-
 def clean_volume(value) -> int:
     """清洗音量（0-100）。"""
     try:
@@ -385,29 +262,49 @@ def clean_volume(value) -> int:
 
 
 def normalize_chime_config(config) -> dict:
-    """从 config 对象读取并清洗语音报时全部键（config 缺失字段用默认值）。"""
+    """从 config 对象读取并清洗语音报时全部键（config 缺失字段用默认值）。
+
+    ``providers`` 是各后端的字段值表（密钥留空，服务层按需注入）；``voice`` /
+    ``rate`` / ``pitch`` / ``mimo_*`` 是历史平铺键，供既有调用点与设置页读取，
+    值取自同一张表，两套名字不会分叉。
+    """
     if config is None:
         config = {}
+    providers: dict[str, dict] = {}
+    for provider in tts.providers():
+        values = provider.values(config)
+        for spec in tts.secret_fields(provider):
+            values[spec.name] = ""  # 凭据不由纯逻辑层读
+        providers[provider.id] = values
+    edge_values = providers.get(BACKEND_EDGE, {})
+    mimo_values = providers.get(BACKEND_MIMO, {})
     return {
         "enabled": bool(config.get("voice_chime_enabled", False)),
         "schedule": clean_schedule(config.get("voice_chime_schedule", "hourly")),
         "custom_times": clean_custom_times(config.get("voice_chime_custom_times", "")),
-        "voice": clean_voice(config.get("voice_chime_voice", DEFAULT_VOICE)),
-        "rate": clean_rate(config.get("voice_chime_rate", DEFAULT_RATE)),
-        "pitch": clean_pitch(config.get("voice_chime_pitch", DEFAULT_PITCH)),
         "volume": clean_volume(config.get("voice_chime_volume", DEFAULT_VOLUME)),
-        "show_bubble": clean_flag(config.get("voice_chime_show_bubble", DEFAULT_SHOW_BUBBLE), DEFAULT_SHOW_BUBBLE),
-        "show_quote": clean_flag(config.get("voice_chime_show_quote", DEFAULT_SHOW_QUOTE), DEFAULT_SHOW_QUOTE),
+        "show_bubble": clean_flag(
+            config.get("voice_chime_show_bubble", DEFAULT_SHOW_BUBBLE), DEFAULT_SHOW_BUBBLE
+        ),
+        "show_quote": clean_flag(
+            config.get("voice_chime_show_quote", DEFAULT_SHOW_QUOTE), DEFAULT_SHOW_QUOTE
+        ),
         "custom_quotes_zh": clean_custom_quotes(config.get("voice_chime_custom_quotes_zh", "")),
         "custom_quotes_en": clean_custom_quotes(config.get("voice_chime_custom_quotes_en", "")),
         "backend": clean_backend(config.get("voice_chime_tts_backend", DEFAULT_BACKEND)),
         "fallback": clean_flag(
             config.get("voice_chime_tts_fallback", DEFAULT_TTS_FALLBACK), DEFAULT_TTS_FALLBACK
         ),
-        "mimo_model": clean_mimo_model(config.get("voice_chime_mimo_model", DEFAULT_MIMO_MODEL)),
-        "mimo_voice": clean_mimo_voice(config.get("voice_chime_mimo_voice", DEFAULT_MIMO_VOICE)),
-        "mimo_style": clean_mimo_style(config.get("voice_chime_mimo_style", DEFAULT_MIMO_STYLE)),
+        "providers": providers,
+        # —— 历史平铺键（兼容既有调用点）——
+        "voice": edge_values.get("voice", DEFAULT_VOICE),
+        "rate": edge_values.get("rate", DEFAULT_RATE),
+        "pitch": edge_values.get("pitch", DEFAULT_PITCH),
+        "mimo_model": mimo_values.get("model", DEFAULT_MIMO_MODEL),
+        "mimo_voice": mimo_values.get("voice", DEFAULT_MIMO_VOICE),
+        "mimo_style": mimo_values.get("style", DEFAULT_MIMO_STYLE),
     }
+
 
 
 def is_chime_minute(now: datetime, cfg: dict) -> bool:
@@ -606,39 +503,22 @@ def build_bubble_sentence(now: datetime, cfg: dict) -> str:
     return f"{text}。{quote}" if quote else text
 
 
-def edge_rate_arg(rate) -> str:
-    """edge-tts rate 参数：如 +10% / -20% / +0%。"""
-    value = clean_rate(rate)
-    sign = "+" if value >= 0 else ""
-    return f"{sign}{value}%"
+def cache_key(text: str, cfg: dict, provider_id: str | None = None) -> str:
+    """音频缓存文件名键：内容 + 该后端 flavor 的短哈希。
 
-
-def edge_pitch_arg(pitch) -> str:
-    """edge-tts pitch 参数：如 +5Hz / -10Hz / +0Hz。"""
-    value = clean_pitch(pitch)
-    sign = "+" if value >= 0 else ""
-    return f"{sign}{value}Hz"
-
-
-def cache_key(text: str, cfg: dict) -> str:
-    """音频缓存文件名键：内容 + 后端 + 该后端的音色/参数 的短哈希。
-
-    后端必须进键：同一句报时在 edge 与 MiMo 下是两段不同的音频，缓存不能互串
-    （换后端后仍播上一个后端的声音，用户会以为设置没生效）。
+    flavor 由 provider 给（只含影响音频内容的参数），因此换后端 / 换音色 / 换风格都会
+    换键，不同后端的缓存不会互串；edge 的 flavor 保持历史格式，老缓存升级后仍命中。
     """
     import hashlib
 
-    backend = clean_backend(cfg.get("backend", BACKEND_EDGE))
-    if backend == BACKEND_MIMO:
-        raw = (
-            f"{text}|mimo|{clean_mimo_model(cfg.get('mimo_model', DEFAULT_MIMO_MODEL))}"
-            f"|{clean_mimo_voice(cfg.get('mimo_voice', DEFAULT_MIMO_VOICE))}"
-            f"|{clean_mimo_style(cfg.get('mimo_style', DEFAULT_MIMO_STYLE))}"
-        )
+    backend = clean_backend(provider_id or cfg.get("backend", BACKEND_EDGE))
+    provider = tts.get(backend)
+    if provider is None:
+        raw = f"{text}|{backend}"
     else:
-        # edge 分支保持历史格式逐字节不变：老缓存在升级后仍能命中。
-        raw = (
-            f"{text}|{clean_voice(cfg.get('voice', DEFAULT_VOICE))}"
-            f"|{edge_rate_arg(cfg.get('rate'))}|{edge_pitch_arg(cfg.get('pitch'))}"
-        )
+        values = (cfg.get("providers") or {}).get(backend)
+        if values is None:
+            # 紧凑调用（传的是原始 config 映射）：让 provider 自己按字段 key 取值
+            values = provider.values(cfg)
+        raw = f"{text}|{provider.flavor(values)}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]

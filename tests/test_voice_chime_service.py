@@ -104,7 +104,9 @@ def _service(tmp_path, monkeypatch, *, tts_available=True):
 
     _qapp()  # 服务的无主 QTimer 需要在有事件分发器的线程里才起得来（产品同口径）
     _WorkerSpy.instances = []
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", tts_available)
+    monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", tts_available)
+    # 凭据读空：不依赖开发者机器上真实存在的钥匙串条目
+    monkeypatch.setattr(svc_mod.tts_secrets, "get", lambda ref: "")
     monkeypatch.setattr(svc_mod, "_TTSWorker", _WorkerSpy)
     cfg = Config(base=tmp_path)
     app = _App(cfg)
@@ -760,6 +762,7 @@ def test_service_module_top_level_does_not_import_edge_tts(monkeypatch):
     import importlib.util
     import sys
 
+    import pet.tts.edge as edge_mod
     import pet.voice_chime_service as svc_mod
 
     monkeypatch.delitem(sys.modules, "edge_tts", raising=False)
@@ -769,7 +772,8 @@ def test_service_module_top_level_does_not_import_edge_tts(monkeypatch):
     spec.loader.exec_module(fresh)
 
     assert "edge_tts" not in sys.modules, "模块顶层把 edge_tts import 进来了（白付 1.4s）"
-    assert fresh._EDGE_TTS_AVAILABLE is (
+    # 惰性探测标志现在住在 provider 模块（服务层不再自己探）
+    assert edge_mod._EDGE_TTS_AVAILABLE is (
         importlib.util.find_spec("edge_tts") is not None
     ), "惰性探测结果必须与真实可导入性一致（否则会误报“请 pip install”）"
 
@@ -799,10 +803,15 @@ def test_tts_worker_reports_missing_edge_tts_instead_of_raising(tmp_path, monkey
 
     monkeypatch.setitem(sys.modules, "edge_tts", None)  # import edge_tts → ImportError
     seen: list = []
+    edge_attempt = svc_mod.tts.TtsAttempt(
+        provider="edge",
+        values={"voice": "zh-CN-XiaoxiaoNeural", "rate": 0, "pitch": 0},
+        plan={"provider": "edge", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%",
+              "pitch": "+0Hz", "ext": "mp3"},
+    )
     worker = svc_mod._TTSWorker(
         "现在是上午九点整。",
-        ({"backend": "edge", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%",
-          "pitch": "+0Hz", "ext": "mp3"},),
+        (edge_attempt,),
         (tmp_path / "chime.mp3",),
         lambda path, text, error: seen.append((path, text, error)),
     )

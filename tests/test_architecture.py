@@ -177,6 +177,10 @@ def test_pure_logic_modules_do_not_import_qt():
         "festival_quotes_cn.py", "festival_quotes_west.py",
         "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
         "festival_quotes_west_song.py",
+        # 语音报时的纯逻辑层与其 TTS provider（2026-09-22 接口化时加入）：
+        # provider 的 IO 只允许在 synth() 里惰性 import，模块顶层不得碰 Qt。
+        "voice_chime.py", "voice_chime_quotes.py",
+        "tts/base.py", "tts/edge.py", "tts/mimo.py",
     ):
         src = _read(name)
         assert "PySide6" not in src, f"{name} 引入了 Qt 依赖，破坏纯函数层定位"

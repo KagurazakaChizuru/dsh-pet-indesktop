@@ -637,6 +637,9 @@ def _make_svc(cfg: dict | None = None):
     from pet.voice_chime_service import VoiceChimeService
 
     svc = object.__new__(VoiceChimeService)
+    # 凭据读空：测试不该依赖开发者机器上真实存在的钥匙串条目（否则「没配 Key
+    # 就回退 edge」这类用例会因本机存过 Key 而变脸）。只改实例，不污染模块。
+    svc._secret_values = lambda: {}
     svc._cfg = {
         "show_bubble": True,
         "show_quote": True,
@@ -749,7 +752,7 @@ def test_maybe_precache_respects_window_busy_and_slot(monkeypatch, tmp_path):
         def start(self):
             started.append(1)
 
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", True)
+    monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", True)
     monkeypatch.setattr(svc_mod, "_TTSWorker", DummyWorker)
     monkeypatch.setattr(
         svc_mod,
@@ -761,7 +764,7 @@ def test_maybe_precache_respects_window_busy_and_slot(monkeypatch, tmp_path):
         "build_chime_sentence",
         lambda _now, _cfg: "现在是下午三点整。",
     )
-    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params: "fixed-key")
+    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params, **_kw: "fixed-key")
     monkeypatch.setattr(svc_mod, "chime_slot", lambda dt, _cfg: "2026-09-15T15:00#hourly")
     svc = _make_svc()
     svc._cache_dir = tmp_path
@@ -784,14 +787,14 @@ def test_maybe_precache_respects_window_busy_and_slot(monkeypatch, tmp_path):
 def test_maybe_precache_outside_window_does_nothing(monkeypatch, tmp_path):
     import pet.voice_chime_service as svc_mod
 
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", True)
+    monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", True)
     monkeypatch.setattr(svc_mod, "next_chime_in_seconds", lambda _now, _cfg: 120)
     monkeypatch.setattr(
         svc_mod,
         "build_chime_sentence",
         lambda _now, _cfg: "x",
     )
-    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params: "k")
+    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params, **_kw: "k")
     monkeypatch.setattr(svc_mod, "chime_slot", lambda dt, _cfg: "slot")
     svc = _make_svc()
     svc._cache_dir = tmp_path
@@ -820,8 +823,8 @@ def test_fire_cache_hit_uses_bubble_sentence(monkeypatch, tmp_path):
     """缓存命中路径：语音文本进缓存键与合成，气泡用阿拉伯数字文本。"""
     import pet.voice_chime_service as svc_mod
 
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", True)
-    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params: "hit")
+    monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", True)
+    monkeypatch.setattr(svc_mod, "cache_key", lambda _text, _params, **_kw: "hit")
     seen = []
     svc = _make_svc({"volume": 100})
     svc._cache_dir = tmp_path
@@ -968,7 +971,7 @@ def test_on_tick_uses_precached_bubble_text(monkeypatch, tmp_path):
     """命中预合成时，气泡复用预合成阶段算好的阿拉伯数字文本。"""
     import pet.voice_chime_service as svc_mod
 
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", True)
+    monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", True)
     monkeypatch.setattr(svc_mod, "chime_slot", lambda dt, _cfg: "2026-09-15T15:00#hourly")
     seen = []
     svc = _make_svc({"enabled": True, "schedule": "hourly"})

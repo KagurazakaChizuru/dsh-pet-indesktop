@@ -30,31 +30,20 @@
 
 from __future__ import annotations
 
-import asyncio
-import importlib.util
-import json
 import logging
 import threading
 import time
-import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import http_util, music_detect, tts_secrets
+from . import music_detect, tts, tts_secrets
 from .voice_chime import (
-    BACKEND_EDGE,
-    BACKEND_MIMO,
-    MIMO_BASE_URL,
-    MIMO_CHAT_PATH,
-    MIMO_TIMEOUT_S,
     build_bubble_sentence,
     build_chime_sentence,
     cache_key,
     chime_slot,
-    mimo_payload,
     next_chime_in_seconds,
     normalize_chime_config,
-    parse_mimo_audio,
     synth_attempts,
 )
 
@@ -67,48 +56,23 @@ _PRUNE_MIN_INTERVAL_S = 300.0
 # 超过该时限在调度 tick 中复位（正常合成 3-8s 完成，45s 余量充足）。
 _SYNTH_TIMEOUT_S = 45.0
 
-# 合成线程里的两种「缺东西」错误码：GUI 侧据此给出可操作的降级提示，
-# 而不是笼统的「合成失败」。
-EDGE_TTS_MISSING = "edge-tts-missing"
-MIMO_KEY_MISSING = "mimo-key-missing"
-
-
-class _MimoKeyMissing(RuntimeError):
-    """小米 MiMo 没有可用的 API Key（设置页未填 / 钥匙串读不到）。"""
-
-
-def _edge_tts_available() -> bool:
-    """**不 import 本体**地探测 edge-tts 是否可用（惰性探测）。
-
-    ``importlib.util.find_spec`` 只问 import 系统找不找得到包，不执行模块代码，
-    因此不付 edge_tts 的 ~1.4s 导入成本、也不占常驻内存。真正的 import 推迟到
-    :class:`_TTSWorker` 的合成线程里第一次合成时；万一探测通过而 import 失败
-    （半装/被禁用），worker 会在回调里带回错误码 :data:`EDGE_TTS_MISSING`，走
-    同一套降级文案。
-    """
-    try:
-        return importlib.util.find_spec("edge_tts") is not None
-    except (ImportError, ValueError):
-        # 父包缺失 / sys.modules 里被置 None 等异常形态：一律按不可用处理。
-        return False
-
-
-# 惰性探测结果（模块顶层，但不 import 本体）。测试可 monkeypatch 本标志。
-_EDGE_TTS_AVAILABLE = _edge_tts_available()
-
-
-def mimo_key_available() -> bool:
-    """小米 MiMo 的 API Key 是否已在（钥匙串或进程内存）。测试可 monkeypatch。"""
-    return bool(tts_secrets.get(tts_secrets.MIMO_API_KEY_REF))
+# 「缺东西」错误码：由 provider 自己声明（与 TtsProvider.availability_code 同源），
+# 服务层据此给可操作的降级提示，而不是笼统的「合成失败」。保留常量名是为了既有
+# 调用点与测试不必跟着改。
+EDGE_TTS_MISSING = tts.edge.AVAILABILITY_CODE
+MIMO_KEY_MISSING = tts.mimo.AVAILABILITY_CODE
 
 
 class _TTSWorker(threading.Thread):
-    """后台线程：按 attempts 顺序合成，第一个成功的写盘并回调返回。
+    """后台线程：按尝试链逐个合成，第一个成功的写盘并回调返回。
 
-    attempts 是本模块外的纯逻辑产物（voice_chime.synth_attempts），已经排好
-    主/备顺序；paths 与之等长——每个后端各自的缓存路径（扩展名不同：edge mp3、
-    MiMo wav）。全部失败时回调带回**主后端**的错误（用户选的那个最值得知道），
-    以 ``|`` 拼接后备错误便于排查。
+    ``attempts`` 是本模块外的纯逻辑产物（``voice_chime.synth_attempts``），已排好
+    主/备顺序；``paths`` 与之等长——每个后端各自的缓存路径（扩展名由 provider 的
+    合成计划给出：edge mp3、MiMo wav）。
+
+    真正的合成本体在 ``TtsProvider.synth()`` 里（provider 自己惰性导入依赖、自己
+    组请求），所以本类**不需要**知道任何后端的细节：加后端不用动这里。
+    全部失败时回调带回按顺序拼接的各后端错误（第一个是主后端，用户最该知道）。
 
     线程不直接碰 Qt 对象；完成后把结果交给 owner 提供的回调（owner 在
     GUI 线程，回调触发 queued 信号桥接）。
@@ -124,72 +88,25 @@ class _TTSWorker(threading.Thread):
     def run(self) -> None:  # noqa: D102
         errors: list[str] = []
         for attempt, path in zip(self._attempts, self._paths):
+            provider = tts.get(getattr(attempt, "provider", ""))
+            if provider is None:
+                errors.append(f"未知的合成后端：{getattr(attempt, 'provider', '')}")
+                continue
             try:
-                self._synthesize(attempt, path)
-            except _MimoKeyMissing:
-                errors.append(MIMO_KEY_MISSING)
-                logger.warning("小米 MiMo 未配置 API Key，尝试下一个合成后端")
+                provider.synth(self._text, attempt.plan, path)
+            except tts.TtsUnavailable as exc:
+                # provider 在合成时才发现自己不可用（缺库 / 缺 Key）
+                errors.append(exc.code or provider.availability_code)
+                logger.warning("%s 当前不可用（%s），尝试下一个合成后端", provider.id, exc)
                 continue
-            except ImportError:
-                # edge_tts 本该在 _synthesize 里惰性导入（见 _edge_tts_available）：
-                # 探测通过但真导入失败（半装 / 被禁用）时也走这里。
-                errors.append(EDGE_TTS_MISSING)
-                logger.warning("edge-tts 不可导入，尝试下一个合成后端")
-                continue
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 —— 单个后端失败不该终止整条链
                 errors.append(f"{type(exc).__name__}: {exc}")
-                logger.warning("%s 合成失败：%s", attempt.get("backend"), exc)
+                logger.warning("%s 合成失败：%s", provider.id, exc)
                 continue
             self._on_done(str(path), self._text, "")
             return
         fallback_path = str(self._paths[0]) if self._paths else ""
         self._on_done(fallback_path, self._text, "|".join(errors) or "没有可用的合成后端")
-
-    def _synthesize(self, attempt: dict, out_path: Path) -> None:
-        if attempt.get("backend") == BACKEND_MIMO:
-            self._synthesize_mimo(attempt, out_path)
-            return
-        asyncio.run(self._synthesize_edge(attempt, out_path))
-
-    async def _synthesize_edge(self, attempt: dict, out_path: Path) -> None:
-        # 惰性导入：只在真的要合成的后台线程里付这笔 import 成本。
-        import edge_tts
-
-        communicate = edge_tts.Communicate(
-            self._text,
-            attempt["voice"],
-            rate=attempt["rate"],
-            pitch=attempt["pitch"],
-        )
-        await communicate.save(str(out_path))
-
-    def _synthesize_mimo(self, attempt: dict, out_path: Path) -> None:
-        """小米 MiMo TTS：OpenAI 兼容的 chat/completions + 内联 base64 音频。
-
-        走 pet/http_util（先按系统代理试、传输失败改直连）：她的系统代理曾被
-        加速器留下一个没人监听的端口，直连兜底是歌词/余额那批修复的同一教训。
-        两个鉴权头都带：官方 curl 示例用 ``api-key``，OpenAI SDK 用 Bearer。
-        """
-        key = tts_secrets.get(tts_secrets.MIMO_API_KEY_REF)
-        if not key:
-            raise _MimoKeyMissing()
-        body = json.dumps(mimo_payload(self._text, attempt), ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            MIMO_BASE_URL.rstrip("/") + MIMO_CHAT_PATH,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "api-key": key,
-                "Authorization": f"Bearer {key}",
-            },
-        )
-        with http_util.urlopen(request, timeout=MIMO_TIMEOUT_S) as response:
-            raw = response.read()
-        audio = parse_mimo_audio(json.loads(raw.decode("utf-8", "replace")))
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(audio)
 
 
 class _AudioBridge:
@@ -454,26 +371,41 @@ class VoiceChimeService:
         return None
 
     # ------------------------------------------------------------ 合成后端
-    def _usable_attempts(self) -> tuple[dict, ...]:
-        """可用的合成尝试序列：缺库 / 缺 Key 的后端直接摘掉，不浪费一次往返。
+    def _secret_values(self) -> dict[str, dict[str, str]]:
+        """按 provider 声明的 secret 字段读系统钥匙串（纯逻辑层不碰凭据）。
 
-        摘掉而不是留给 worker 去失败，是为了让「没配 Key 就自动走 edge」不额外
-        付出一次 HTTP 往返；两个都摘光时调用方走「只有气泡」的降级提示。
+        返回 ``{provider_id: {字段名: 值}}``，注入 ``synth_attempts``；provider 若要
+        新增凭据，只需在 ``fields`` 里加一个 ``kind="secret"`` 字段，这里自动跟上。
         """
-        usable: list[dict] = []
-        for attempt in synth_attempts(self._cfg):
-            if attempt["backend"] == BACKEND_EDGE and not _EDGE_TTS_AVAILABLE:
+        secrets_map: dict[str, dict[str, str]] = {}
+        for provider in tts.providers():
+            specs = tts.secret_fields(provider)
+            if specs:
+                secrets_map[provider.id] = {
+                    spec.name: tts_secrets.get(spec.secret_ref) for spec in specs
+                }
+        return secrets_map
+
+    def _usable_attempts(self) -> tuple[tts.TtsAttempt, ...]:
+        """可用的合成尝试序列：provider 自报不可用的先摘掉，不浪费一次往返。
+
+        摘掉而不是留给 worker 去失败，是为了让「没配 Key 就自动走后备后端」不额外
+        付一次 HTTP 往返；全摘光时调用方走「只有气泡」的降级提示。
+        """
+        usable: list[tts.TtsAttempt] = []
+        for attempt in synth_attempts(self._cfg, secrets=self._secret_values()):
+            provider = tts.get(attempt.provider)
+            if provider is None:
                 continue
-            if attempt["backend"] == BACKEND_MIMO and not mimo_key_available():
+            if provider.availability(attempt.values):
                 continue
             usable.append(attempt)
         return tuple(usable)
 
-    def _cache_path(self, text: str, attempt: dict) -> Path:
-        """该后端该文本的缓存路径（扩展名随后端：edge mp3 / MiMo wav）。"""
-        cfg = dict(self._cfg)
-        cfg["backend"] = attempt["backend"]
-        return self._cache_dir / f"{cache_key(text, cfg)}.{attempt['ext']}"
+    def _cache_path(self, text: str, attempt: tts.TtsAttempt) -> Path:
+        """该后端该文本的缓存路径（扩展名由 provider 的合成计划给出）。"""
+        key = cache_key(text, self._cfg, provider_id=attempt.provider)
+        return self._cache_dir / f"{key}.{attempt.ext}"
 
     # ------------------------------------------------------------ 播报
     def _fire(self, sentence: str, now: datetime, bubble_text: str | None = None,
@@ -551,7 +483,12 @@ class VoiceChimeService:
             logger.info("语音报时已停止，丢弃迟到的合成结果：%s", Path(path).name)
             return
         if error:
-            if EDGE_TTS_MISSING in error or MIMO_KEY_MISSING in error:
+            unavailable_codes = tuple(
+                provider.availability_code
+                for provider in tts.providers()
+                if provider.availability_code
+            )
+            if any(code in error for code in unavailable_codes):
                 # 运行期才发现「库 / Key 不在」（顶层只做本地探测）：清掉可能残留的
                 # 预合成占位，再给可操作的降级提示。
                 if role == "precache":
@@ -716,25 +653,49 @@ class VoiceChimeService:
                 logger.exception("桌面通知失败")
 
     def _notify_missing_tts(self) -> None:
-        msg = "语音报时需要 edge-tts 库：请运行 pip install edge-tts 后重试"
-        logger.warning(msg)
-        self._bubble(msg)
+        """向后兼容的便捷入口（部分调用点/测试按名字引用）：等价于 edge 不可用提示。"""
+        self._notify_provider_unavailable(tts.edge.PROVIDER)
 
     def _notify_missing_mimo_key(self) -> None:
-        msg = "小米 MiMo 未配置 API Key：桌宠设置 → 语音 → 语音报时 里填一次即可"
+        """向后兼容的便捷入口：等价于 MiMo 不可用提示。"""
+        self._notify_provider_unavailable(tts.mimo.PROVIDER)
+
+    def _notify_provider_unavailable(self, provider) -> None:
+        """provider 自报不可用时，用它的声明文案提示（provider 自己决定怎么说）。"""
+        msg = provider.unavailable_message or f"{provider.label} 当前不可用"
         logger.warning(msg)
         self._bubble(msg)
 
     def _notify_unavailable(self, error: str = "") -> None:
-        """两个合成后端都不可用时的降级提示（给「怎么办」，不是「失败了」）。"""
-        if MIMO_KEY_MISSING in error or (
-            not error
-            and self._cfg.get("backend") == BACKEND_MIMO
-            and not mimo_key_available()
-        ):
-            self._notify_missing_mimo_key()
-            return
-        self._notify_missing_tts()
+        """整条合成链都不可用时的降级提示：按 provider 声明的原因码给对应说法。
+
+        ``error`` 为空表示「预判阶段就没得选」（例如没配 Key 且后备也缺库）——
+        此时看主后端自己报的原因，提示仍然精确到「缺什么、去哪里填」。
+        """
+        for provider in tts.providers():
+            code = provider.availability_code
+            if code and code in error:
+                self._notify_provider_unavailable(provider)
+                return
+        if not error:
+            primary = tts.get(self._cfg.get("backend") or "")
+            if primary is not None:
+                values = self._attempt_values(primary)
+                if primary.availability(values):
+                    self._notify_provider_unavailable(primary)
+                    return
+        msg = "语音报时的合成后端都不可用：请到 设置 → 语音 → 语音报时 检查"
+        logger.warning("%s（%s）", msg, error or "no-reason")
+        self._bubble(msg)
+
+    def _attempt_values(self, provider) -> dict:
+        """单个 provider 的字段值（含钥匙串里的密钥），供可用性判定与提示使用。"""
+        values = dict((self._cfg.get("providers") or {}).get(provider.id) or {})
+        if not values:
+            values = provider.values(self._cfg)
+        for spec in tts.secret_fields(provider):
+            values[spec.name] = tts_secrets.get(spec.secret_ref)
+        return values
 
     def _clear_precache(self) -> None:
         """丢弃整组预合成状态（失败/换本地后端时占位必须清掉）。"""

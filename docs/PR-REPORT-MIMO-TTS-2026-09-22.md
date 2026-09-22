@@ -67,9 +67,9 @@
 
 ## 五、已知限制与后续
 
-1. **未做真实 API 调用验证**：手上没有 MiMo API Key，请求形状依据官方文档实现，
-   `parse_mimo_audio` 对文档结构做了防御式解析。拿到 Key 后须补一次真实合成
-   （设置页「立即试听」即可，缓存目录会出现 `.wav`）。
+1. **真实 API 已验证**（2026-09-22，同日第二轮之后）：用钥匙串里已保存的 `tts/mimo`
+   凭据直接走 provider 的 `plan()` + `synth()` 打真接口，返回 **199,724 字节、文件头 `RIFF`**
+   的 wav（`mimo-v2.5-tts` / 冰糖 / 风格指令「轻快、带点笑意」）。请求形状与响应解析均确认无误。
 2. 流式接口（`stream=true` + `pcm16`）未接入：报时是「一句话」场景，非流式一次拿
    wav 更简单；将来要做边说边播再评估。
 3. `mimo-v2.5-tts-voiceclone`（声音克隆）未开放到界面：需要音频样本与上传流程，
@@ -85,3 +85,63 @@
 - 回滚：把 `voice_chime_tts_backend` 设为 `edge`（或关掉 `voice_chime_tts_fallback`
   观察主后端错误）即可；代码级回滚到本次提交之前的 `dist-onedir` 备份
   （`*.bak-<时间戳>`）也能立刻恢复旧声音。
+
+---
+
+## 七、第二轮：把 TTS 抽象成接口（2026-09-22 同日）
+
+> 用户追加要求：**「TTS的相关部分应该抽象为接口化。以便后续随意接入其他tts」**
+
+第一轮虽然做成了「可切换后端」，但后端知识散在四处：`synth_attempts` 里写死两家、
+`_TTSWorker` 里 if/else 分派、设置页硬编码 MiMo 的四行、错误码与提示也各写一遍。
+**接入第三个 TTS 仍要改 5 个文件**——这正是第二轮要消掉的东西。
+
+### 7.1 分层
+
+新增 `pet/tts/` 包（接口 + 注册表 + 内置 provider）：
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| `tts/base.py` | 219 | `TtsField`（声明式配置项）、`TtsProvider`（values/plan/flavor/availability/synth）、注册表 |
+| `tts/edge.py` | 171 | edge-tts 实现（音色表、rate/pitch、`find_spec` 惰性探测、`is_fallback=True`） |
+| `tts/mimo.py` | 201 | 小米 MiMo 实现（模型/音色/风格指令/密钥；HTTP 与 base64 解析都在这里） |
+| `tts/__init__.py` | 43 | import 即注册；新 provider 加一行 |
+
+边界就是**纯 / IO**：`values/plan/flavor/availability` 全是纯函数（可离线单测），
+只有 `synth()` 有 IO 且允许惰性 import 依赖——`pet/tts/*.py` 一并纳入
+`test_pure_logic_modules_do_not_import_qt` 的机器化守卫。
+
+### 7.2 核心代码不再认得任何厂家
+
+- `voice_chime.py`：`BACKENDS`/`BACKEND_LABELS` 来自注册表；`synth_attempts()` 按
+  provider 的 `plan()` 产出尝试链；`cache_key()` 用 provider 的 `flavor()`；
+  `normalize_chime_config()` 产出 `providers: {pid: 字段值}` 再加历史平铺键（兼容旧调用点）。
+- `voice_chime_service.py`：`_TTSWorker` 只剩「逐条 call `provider.synth`，失败换下一条」；
+  可用性预判、错误码、提示文案全部来自 provider 声明。
+- `voice_chime_settings.py`：**设置页按 `fields` 生成控件**——「合成后端」卡片不再有
+  MiMo 专用的四行代码；切后端显隐、字段间依赖（`hidden_when`）、密钥框 + 清除按钮
+  都是通用的。新增 TTS 不需要碰 UI。
+- `config.py`：provider 字段键由注册表遍历自动收编进默认值与 reload 白名单，
+  以后加后端不用改 `config.py`。
+
+### 7.3 「随意接入」的证据
+
+不是口头承诺，而是三条用例 + 一份指南：
+
+- `test_every_registered_provider_satisfies_the_contract`：把接口契约变成机器化清单
+  （字段键前缀、`plan["provider"]`/`plan["ext"]`、`flavor` 稳定性、secret 必须给 ref…），
+  新 provider 自动被它验；漏声明什么，它会指出来。
+- `test_third_party_provider_plugs_into_registry_and_chain`：注册一个假后端后，
+  它自动出现在引擎清单、进尝试链、拿到自己的扩展名与隔离的缓存键。
+- `test_third_party_provider_renders_settings_rows_without_ui_edits`：假后端的字段行
+  自动出现在设置页，普通字段写回 config、密钥字段按 `secret_ref` 进钥匙串、且不进 config。
+- `docs/ADDING-A-TTS-PROVIDER.md`：四步接入流程 + 契约表 + 红线（已登记进 `docs/INDEX.md`
+  与 `AGENTS.md` 的 Context pointers）。
+
+**结论：接入一个新的 TTS = 写一个 provider 模块 + 在 `pet/tts/__init__.py` 加一行 import。**
+
+### 7.4 验证
+
+- `ruff` 干净；全量 **2899 passed / 11 skipped / 0 failed**（第二轮前 2896）。
+- 真实接口验证见 §五.1。
+- 打包与部署：重建 onedir（slim/编码/DLL/双启动冒烟全过）并同步到本机两处实例。

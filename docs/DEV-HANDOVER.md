@@ -441,22 +441,43 @@ _on_tick(now)
   绝不进 config.json**，留空表示不改动已保存的 Key，「清除」按钮立即删除。
 - 域归属：在 `_rebuild_domain_navigation()` 中被收集为共享卡片域「语音报时」（排在灵动岛/主动识屏/探索看门狗之后）。
 
-### 5.9 合成后端：小米 MiMo TTS（2026-09-22 新增）
+### 5.9 合成后端：provider 接口（`pet/tts/`，2026-09-22）
 
-- **尝试链**由纯函数 `voice_chime.synth_attempts(cfg)` 产出：`[主后端, edge?]`。
-  默认 `mimo` 主、`edge` 备（`voice_chime_tts_fallback` 可关）。
-- **可用性预判**在服务层（`_usable_attempts`）：缺 edge-tts 库、缺 MiMo Key 的后端**先摘掉**，
-  不白打一次注定失败的请求；链空 → `_notify_unavailable()` 给出可操作提示（缺 Key 还是缺库，说法不同）。
-- **请求**（`_TTSWorker._synthesize_mimo`）：`POST https://api.xiaomimimo.com/v1/chat/completions`，
-  头带 `api-key` 与 `Authorization: Bearer`，body 由 `mimo_payload()` 构造——
-  **待合成文本在 `assistant` 消息**、风格指令在可选 `user` 消息、`audio.format=wav`。
-  走 `pet/http_util.urlopen`（系统代理失败改直连），超时 `MIMO_TIMEOUT_S = 30s`。
-- **响应**：`parse_mimo_audio()` 取 `choices[0].message.audio.data` 解 base64 写盘；解不出时抛
-  带原因的 `ValueError`（错误文本会进气泡与日志）。
-- **缓存**：键含后端与各自音色/参数（`cache_key`），扩展名随后端（edge `.mp3` / MiMo `.wav`）；
-  `_prune_cache` 同时统计两种扩展名。edge 分支的键**与历史格式逐字节一致**，老缓存升级后仍命中。
-- **失败语义**：全部后端失败时回调带走**主后端**错误（`|` 拼后备错误）；错误码
-  `MIMO_KEY_MISSING` / `EDGE_TTS_MISSING` 各走自己的降级文案。
+合成后端已**接口化**：核心（调度、缓存、设置页、服务层）只认接口，具体厂家写在
+provider 里。接入新 TTS 的完整步骤见 **`docs/ADDING-A-TTS-PROVIDER.md`**。
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| `pet/tts/base.py` | 219 | `TtsField`（声明式配置项）、`TtsProvider`（接口：values/plan/flavor/availability/synth）、注册表（register/get/providers/fallback_ids/secret_fields） |
+| `pet/tts/edge.py` | 171 | edge-tts 实现（内置 31 款音色、rate/pitch、`find_spec` 惰性探测、`is_fallback=True`） |
+| `pet/tts/mimo.py` | 201 | 小米 MiMo 实现（`mimo-v2.5-tts` / `-voicedesign`、8 款内置音色、风格指令、`api_key` 走钥匙串 ref `tts/mimo`） |
+| `pet/tts/__init__.py` | 43 | import 即注册内置 provider（新 provider 加在这里） |
+
+**运行时数据流**：
+
+```
+配置 → normalize_chime_config()  ── providers: {pid: {字段名: 值}}
+                                     │
+synth_attempts(cfg, secrets=…)  ─────┴─→ [TtsAttempt(主后端), TtsAttempt(后备后端)?]
+                                     │        （provider.plan 给出 values/ext）
+服务 _usable_attempts() ── provider.availability(values) 空串才留
+服务 _cache_path()     ── provider.flavor(values) 进缓存键，扩展名取 plan["ext"]
+_TTSWorker             ── provider.synth(text, plan, path)；TtsUnavailable → 码 → 下一条链
+```
+
+- **尝试链**：`[主后端] + fallback_ids()`（自身声明 `is_fallback=True` 的后端），
+  `voice_chime_tts_fallback` 可关。默认 `mimo` 主、`edge` 备。
+- **可用性预判**：缺库 / 缺 Key 的后端**先摘掉**，不白打一次注定失败的请求；
+  链空 → `_notify_unavailable()` 按 provider 声明的原因码给对应文案（缺 Key / 缺库说法不同）。
+- **凭据**：只有 `kind="secret"` + `secret_ref` 的字段进钥匙串（服务层读出后注入
+  `values`），既不进 `config.json` 也不进缓存键与日志。
+- **缓存**：键 = `文本 + provider.flavor(values)`，扩展名由 `plan["ext"]` 决定
+  （edge `.mp3` / MiMo `.wav`）；`_prune_cache` 统计两种扩展名。edge 的 flavor
+  与历史格式逐字节一致，老缓存升级后仍命中。
+- **失败语义**：全部后端失败时回调带走各后端错误的拼接串（第一个是主后端）；
+  不可用码 `edge-tts-missing` / `mimo-key-missing` 各走 provider 自己声明的提示。
+- **配置键**：provider 字段键由 `Config.__init__` / `reload()` 遍历注册表自动收编
+  （`config.py` 里不需要手写新后端的键）；`tests/test_config_schema.py` 的快照是刻意的门禁。
 
 ---
 

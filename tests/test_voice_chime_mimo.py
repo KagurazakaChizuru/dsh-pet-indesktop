@@ -20,10 +20,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QPushButton
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pet import tts_secrets  # noqa: E402
+from pet import tts, tts_secrets  # noqa: E402
 from pet.config import Config  # noqa: E402
 from pet.voice_chime import (  # noqa: E402
     BACKEND_EDGE,
@@ -45,6 +46,14 @@ from pet.voice_chime import (  # noqa: E402
     parse_mimo_audio,
     synth_attempts,
 )
+
+
+def _attempt(provider_id, **overrides):
+    """按注册表里的 provider 造一条合成尝试（值来自字段默认值 + 覆盖）。"""
+    provider = tts.get(provider_id)
+    values = provider.values({})
+    values.update(overrides)
+    return tts.TtsAttempt(provider=provider_id, values=values, plan=provider.plan(values))
 
 
 def _qapp():
@@ -80,17 +89,17 @@ def test_cleaners_fall_back_for_garbage_and_tame_style():
 def test_synth_attempts_orders_primary_then_edge_fallback():
     """尝试链：主后端在前，回退开关打开时 edge 收尾；关掉回退只剩主后端。"""
     cfg = normalize_chime_config({"voice_chime_tts_backend": BACKEND_MIMO})
-    assert [a["backend"] for a in synth_attempts(cfg)] == [BACKEND_MIMO, BACKEND_EDGE]
-    assert [a["ext"] for a in synth_attempts(cfg)] == ["wav", "mp3"], "扩展名随后端"
+    assert [a.provider for a in synth_attempts(cfg)] == [BACKEND_MIMO, BACKEND_EDGE]
+    assert [a.ext for a in synth_attempts(cfg)] == ["wav", "mp3"], "扩展名随后端"
 
     no_fallback = normalize_chime_config({
         "voice_chime_tts_backend": BACKEND_MIMO,
         "voice_chime_tts_fallback": False,
     })
-    assert [a["backend"] for a in synth_attempts(no_fallback)] == [BACKEND_MIMO]
+    assert [a.provider for a in synth_attempts(no_fallback)] == [BACKEND_MIMO]
 
     edge_only = normalize_chime_config({"voice_chime_tts_backend": BACKEND_EDGE})
-    assert [a["backend"] for a in synth_attempts(edge_only)] == [BACKEND_EDGE], (
+    assert [a.provider for a in synth_attempts(edge_only)] == [BACKEND_EDGE], (
         "edge 是链路末端，不回退到自己"
     )
 
@@ -98,23 +107,31 @@ def test_synth_attempts_orders_primary_then_edge_fallback():
 def test_cache_key_separates_backends_and_voices_and_keeps_edge_format():
     """缓存键必须按后端与音色隔离；edge 分支保持历史格式（老缓存仍命中）。"""
     text = "现在是上午九点整。加油"
-    edge_cfg = {"voice": "zh-CN-XiaoxiaoNeural", "rate": 0, "pitch": 0, "backend": BACKEND_EDGE}
-    mimo_cfg = {
-        "backend": BACKEND_MIMO,
-        "mimo_model": DEFAULT_MIMO_MODEL,
-        "mimo_voice": "冰糖",
-        "mimo_style": "",
-    }
-    assert cache_key(text, edge_cfg) != cache_key(text, mimo_cfg), "换后端不得命中同一缓存"
-    assert cache_key(text, mimo_cfg) != cache_key(
-        text, {**mimo_cfg, "mimo_voice": "苏打"}
+
+    def cfg_for(backend, **overrides):
+        raw = {
+            "voice_chime_tts_backend": backend,
+            "voice_chime_voice": "zh-CN-XiaoxiaoNeural",
+            "voice_chime_mimo_voice": "冰糖",
+            "voice_chime_mimo_style": "",
+            **overrides,
+        }
+        return normalize_chime_config(raw)
+
+    edge_cfg = cfg_for(BACKEND_EDGE)
+    mimo_cfg = cfg_for(BACKEND_MIMO)
+    assert cache_key(text, edge_cfg, BACKEND_EDGE) != cache_key(
+        text, mimo_cfg, BACKEND_MIMO
+    ), "换后端不得命中同一缓存"
+    assert cache_key(text, mimo_cfg, BACKEND_MIMO) != cache_key(
+        text, cfg_for(BACKEND_MIMO, voice_chime_mimo_voice="苏打"), BACKEND_MIMO
     ), "换 MiMo 音色必须换缓存"
-    assert cache_key(text, mimo_cfg) != cache_key(
-        text, {**mimo_cfg, "mimo_style": "温柔一点"}
+    assert cache_key(text, mimo_cfg, BACKEND_MIMO) != cache_key(
+        text, cfg_for(BACKEND_MIMO, voice_chime_mimo_style="温柔一点"), BACKEND_MIMO
     ), "换风格指令必须换缓存"
 
     legacy = hashlib.sha1(f"{text}|zh-CN-XiaoxiaoNeural|+0%|+0Hz".encode("utf-8")).hexdigest()[:16]
-    assert cache_key(text, edge_cfg) == legacy, "edge 缓存键必须与历史逐字节一致"
+    assert cache_key(text, edge_cfg, BACKEND_EDGE) == legacy, "edge 缓存键必须与历史逐字节一致"
 
 
 def test_mimo_payload_puts_text_in_assistant_and_voice_in_audio():
@@ -226,15 +243,13 @@ def test_mimo_worker_posts_request_and_writes_audio(tmp_path, monkeypatch):
         })
         return _FakeResponse(_mimo_ok_payload(b"WAV-BYTES"))
 
-    monkeypatch.setattr(svc_mod.http_util, "urlopen", fake_urlopen)
-    monkeypatch.setattr(svc_mod.tts_secrets, "get", lambda ref: "test-key-123")
+    monkeypatch.setattr("pet.http_util.urlopen", fake_urlopen)
 
     out = tmp_path / "chime.wav"
     results: list[tuple] = []
     worker = svc_mod._TTSWorker(
         "现在是上午九点整。",
-        ({"backend": BACKEND_MIMO, "model": DEFAULT_MIMO_MODEL, "voice": "冰糖",
-          "style": "轻快", "ext": "wav"},),
+        (_attempt("mimo", api_key="test-key-123", style="轻快"),),
         (out,),
         lambda path, text, error: results.append((path, text, error)),
     )
@@ -247,7 +262,7 @@ def test_mimo_worker_posts_request_and_writes_audio(tmp_path, monkeypatch):
     assert seen[0]["headers"]["api-key"] == "test-key-123"
     assert seen[0]["headers"]["authorization"] == "Bearer test-key-123"
     assert seen[0]["body"]["messages"][-1]["content"] == "现在是上午九点整。"
-    assert seen[0]["timeout"] == svc_mod.MIMO_TIMEOUT_S
+    assert seen[0]["timeout"] == tts.mimo.MIMO_TIMEOUT_S
 
 
 def test_mimo_worker_without_key_reports_key_missing_without_network(tmp_path, monkeypatch):
@@ -255,15 +270,12 @@ def test_mimo_worker_without_key_reports_key_missing_without_network(tmp_path, m
     import pet.voice_chime_service as svc_mod
 
     called: list = []
-    monkeypatch.setattr(svc_mod.http_util, "urlopen", lambda *a, **k: called.append(a))
-    monkeypatch.setattr(svc_mod.tts_secrets, "get", lambda ref: "")
-
+    monkeypatch.setattr("pet.http_util.urlopen", lambda *a, **k: called.append(a))
     out = tmp_path / "chime.wav"
     errors: list[str] = []
     svc_mod._TTSWorker(
         "现在是上午九点整。",
-        ({"backend": BACKEND_MIMO, "model": DEFAULT_MIMO_MODEL, "voice": "冰糖",
-          "style": "", "ext": "wav"},),
+        (_attempt("mimo"),),  # 字段默认值里没有 Key
         (out,),
         lambda path, text, error: errors.append(error),
     ).run()
@@ -277,20 +289,17 @@ def test_worker_falls_through_to_edge_when_mimo_fails(tmp_path, monkeypatch):
     """主后端失败：后备后端接棒，写它自己的缓存文件（mp3）并回调成功。"""
     import pet.voice_chime_service as svc_mod
 
-    attempts = (
-        {"backend": BACKEND_MIMO, "model": DEFAULT_MIMO_MODEL, "voice": "冰糖",
-         "style": "", "ext": "wav"},
-        {"backend": BACKEND_EDGE, "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%",
-         "pitch": "+0Hz", "ext": "mp3"},
-    )
+    attempts = (_attempt("mimo"), _attempt("edge"))
     paths = (tmp_path / "a.wav", tmp_path / "b.mp3")
 
-    def fake_synthesize(self, attempt, out_path):
-        if attempt["backend"] == BACKEND_MIMO:
-            raise RuntimeError("HTTP 401: invalid api key")
+    def fake_mimo_synth(text, plan, out_path):
+        raise RuntimeError("HTTP 401: invalid api key")
+
+    def fake_edge_synth(text, plan, out_path):
         Path(out_path).write_bytes(b"MP3")
 
-    monkeypatch.setattr(svc_mod._TTSWorker, "_synthesize", fake_synthesize)
+    monkeypatch.setattr(tts.get("mimo"), "synth", fake_mimo_synth)
+    monkeypatch.setattr(tts.get("edge"), "synth", fake_edge_synth)
 
     results: list[tuple] = []
     svc_mod._TTSWorker(
@@ -307,18 +316,17 @@ def test_worker_reports_primary_error_when_every_backend_fails(tmp_path, monkeyp
     """全失败：回调带走主后端错误（用户选的那个最该知道），后备错误用 | 拼接。"""
     import pet.voice_chime_service as svc_mod
 
-    attempts = (
-        {"backend": BACKEND_MIMO, "model": DEFAULT_MIMO_MODEL, "voice": "冰糖",
-         "style": "", "ext": "wav"},
-        {"backend": BACKEND_EDGE, "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%",
-         "pitch": "+0Hz", "ext": "mp3"},
-    )
+    attempts = (_attempt("mimo"), _attempt("edge"))
     paths = (tmp_path / "a.wav", tmp_path / "b.mp3")
 
-    def fake_synthesize(self, attempt, out_path):
-        raise RuntimeError(f"{attempt['backend']} boom")
+    def fake_mimo_synth(text, plan, out_path):
+        raise RuntimeError("mimo boom")
 
-    monkeypatch.setattr(svc_mod._TTSWorker, "_synthesize", fake_synthesize)
+    def fake_edge_synth(text, plan, out_path):
+        raise RuntimeError("edge boom")
+
+    monkeypatch.setattr(tts.get("mimo"), "synth", fake_mimo_synth)
+    monkeypatch.setattr(tts.get("edge"), "synth", fake_edge_synth)
 
     errors: list[str] = []
     svc_mod._TTSWorker(
@@ -338,19 +346,19 @@ def test_usable_attempts_drops_backends_that_cannot_run(monkeypatch):
     service = svc_mod.VoiceChimeService.__new__(svc_mod.VoiceChimeService)
     service._cfg = normalize_chime_config({"voice_chime_tts_backend": BACKEND_MIMO})
 
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", True)
-    monkeypatch.setattr(svc_mod, "mimo_key_available", lambda: False)
-    assert [a["backend"] for a in service._usable_attempts()] == [BACKEND_EDGE], (
+    monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", True)
+    monkeypatch.setattr(svc_mod.tts_secrets, "get", lambda ref: "")
+    assert [a.provider for a in service._usable_attempts()] == [BACKEND_EDGE], (
         "没配 Key 时不该白试 MiMo，直接走 edge"
     )
 
-    monkeypatch.setattr(svc_mod, "mimo_key_available", lambda: True)
-    assert [a["backend"] for a in service._usable_attempts()] == [BACKEND_MIMO, BACKEND_EDGE]
+    monkeypatch.setattr(svc_mod.tts_secrets, "get", lambda ref: "k")
+    assert [a.provider for a in service._usable_attempts()] == [BACKEND_MIMO, BACKEND_EDGE]
 
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", False)
-    assert [a["backend"] for a in service._usable_attempts()] == [BACKEND_MIMO]
+    monkeypatch.setattr("pet.tts.edge._EDGE_TTS_AVAILABLE", False)
+    assert [a.provider for a in service._usable_attempts()] == [BACKEND_MIMO]
 
-    monkeypatch.setattr(svc_mod, "mimo_key_available", lambda: False)
+    monkeypatch.setattr(svc_mod.tts_secrets, "get", lambda ref: "")
     assert service._usable_attempts() == (), "两个都不可用时由调用方给提示"
 
 
@@ -457,7 +465,9 @@ def test_settings_page_clear_button_removes_saved_key(tmp_path, monkeypatch):
     monkeypatch.setattr(tts_secrets, "set", lambda ref, value: True)
 
     page = VoiceChimeSettingsPage(Config(base=tmp_path))
-    page.mimo_key_clear_btn.click()
+    clear_btn = page.mimo_key_row.findChild(QPushButton)
+    assert clear_btn is not None, "密钥行必须带清除按钮"
+    clear_btn.click()
     page.apply_to_config()
 
     assert cleared == [state["ref"]]
@@ -485,3 +495,124 @@ def test_settings_page_swaps_edge_and_mimo_rows(tmp_path):
     assert page.edge_pitch_row.isVisibleTo(page)
     assert not page.mimo_voice_row.isVisibleTo(page)
     assert not page.mimo_key_row.isVisibleTo(page)
+
+
+# ============================================================ 接口化：provider 即插即用
+
+
+class _FakeProvider(tts.TtsProvider):
+    """假后端：只声明字段 + 实现 plan/flavor/synth，用来验证「写个 provider 就能插进来」。"""
+
+    id = "fake"
+    label = "测试后端（假）"
+    is_fallback = True
+    availability_code = "fake-unavailable"
+    unavailable_message = "测试后端不可用：随便填点什么就好"
+    fields = (
+        tts.TtsField(
+            "voice", "voice_chime_fake_voice", "假音色",
+            kind="select", default="甲", options=(("甲", "甲"), ("乙", "乙")),
+        ),
+        tts.TtsField(
+            "api_key", "voice_chime_fake_api_key", "假 Key",
+            kind="secret", default="", secret_ref="tts/fake",
+        ),
+    )
+
+    def plan(self, values: dict) -> dict:
+        return {"provider": self.id, "voice": values.get("voice"), "ext": "ogg"}
+
+    def flavor(self, values: dict) -> str:
+        return f"fake|{values.get('voice')}"
+
+    def synth(self, text: str, plan: dict, out_path) -> None:
+        Path(out_path).write_bytes(b"OGG")
+
+
+@pytest.fixture
+def fake_provider():
+    provider = _FakeProvider()
+    tts.register(provider)
+    try:
+        yield provider
+    finally:
+        tts.unregister("fake")
+
+
+def test_every_registered_provider_satisfies_the_contract():
+    """接口契约的机器化守卫：注册表里的每个 provider 都必须满足它。
+
+    新接入一个 TTS 时，这条用例就是「你漏声明了什么」的清单。
+    """
+    assert tts.provider_ids(), "至少要有内置 provider"
+    for provider in tts.providers():
+        assert provider.id and provider.label, f"{provider.id}: 缺少 id/label"
+        assert provider.fields, f"{provider.id}: 至少要声明一个可配置字段"
+        for spec in provider.fields:
+            assert spec.kind in tts.FIELD_KINDS, f"{provider.id}.{spec.name}: 未知控件类型"
+            assert spec.key.startswith("voice_chime_"), (
+                f"{provider.id}.{spec.name}: 字段键必须是登记过的顶层配置键"
+            )
+            if spec.kind == "secret":
+                assert spec.secret_ref, f"{provider.id}.{spec.name}: 密钥字段必须给 secret_ref"
+        values = provider.values({})
+        plan = provider.plan(values)
+        assert plan.get("provider") == provider.id, f"{provider.id}: plan 必须标注 provider"
+        assert plan.get("ext"), f"{provider.id}: plan 必须给扩展名（缓存文件名要用）"
+        assert provider.flavor(values) == provider.flavor(provider.values({})), (
+            f"{provider.id}: flavor 必须只依赖传入的 values（缓存键要稳定）"
+        )
+        assert isinstance(provider.availability(values), str)
+
+
+def test_third_party_provider_plugs_into_registry_and_chain(fake_provider):
+    """注册一个新 provider 后：后端清单、尝试链、扩展名、缓存键都自动跟上。"""
+    assert "fake" in tts.provider_ids()
+    assert tts.labels()["fake"] == "测试后端（假）"
+
+    cfg = normalize_chime_config({"voice_chime_tts_backend": "fake"})
+    attempts = synth_attempts(cfg)
+    assert [a.provider for a in attempts] == ["fake", "edge"], (
+        "主后端 + 声明 is_fallback 的 provider（fake 自己不重复进链）"
+    )
+    assert attempts[0].ext == "ogg", "扩展名由 provider 的 plan 给出"
+    assert cache_key("文本", cfg, "fake") != cache_key("文本", cfg, "edge"), (
+        "新后端的缓存键与既有后端天然隔离"
+    )
+
+    # 关掉回退就只剩它自己；它自报不可用时调用方能看到原因码
+    no_fallback = normalize_chime_config({
+        "voice_chime_tts_backend": "fake", "voice_chime_tts_fallback": False,
+    })
+    assert [a.provider for a in synth_attempts(no_fallback)] == ["fake"]
+
+
+def test_third_party_provider_renders_settings_rows_without_ui_edits(fake_provider, tmp_path, monkeypatch):
+    """设置页不为它写一行代码：控件按 fields 生成、显隐按依赖走、读写自动接线。"""
+    from pet.voice_chime_settings import VoiceChimeSettingsPage
+
+    _qapp()
+    stored: dict[str, str] = {}
+    monkeypatch.setattr(
+        tts_secrets, "set", lambda ref, value: stored.__setitem__(ref, value) or True
+    )
+    monkeypatch.setattr(tts_secrets, "get", lambda ref: stored.get(ref, ""))
+
+    cfg = Config(base=tmp_path)
+    page = VoiceChimeSettingsPage(cfg)
+
+    data = {page.backend_select.itemData(i) for i in range(page.backend_select.count())}
+    assert "fake" in data, "新后端自动出现在引擎下拉里"
+
+    page.backend_select.setCurrentData("fake")
+    fake_voice_row = page._field_rows[("fake", "voice")]
+    assert fake_voice_row.isVisibleTo(page), "选中它的后端 → 它的字段行可见"
+    assert not page._field_rows[("edge", "voice")].isVisibleTo(page), "别的后端字段行隐藏"
+
+    page._field_widgets["voice_chime_fake_voice"].setCurrentData("乙")
+    page._secret_edits["voice_chime_fake_api_key"].setText("sk-fake")
+    page.apply_to_config()
+
+    assert cfg.get("voice_chime_fake_voice") == "乙", "普通字段按声明写回 config"
+    assert stored == {"tts/fake": "sk-fake"}, "密钥字段按 secret_ref 进钥匙串"
+    assert "sk-fake" not in json.dumps(cfg.data, ensure_ascii=False), "密钥不进 config"
