@@ -101,6 +101,7 @@ from . import edge, mimo, mytts  # noqa: F401 —— import 即注册
 | `number` | 数字框 | `minimum` / `maximum` / `suffix` |
 | `flag` | 开关 | `default=True/False` |
 | `text` | 单行输入 | `placeholder` / `max_length` |
+| `multiline` | 多行文本框（**整行铺开**） | `placeholder` / `max_length` / `min_height`；写整句描述（风格指令、音色描述）用它 |
 | `secret` | 密码框 + 清除按钮 | `secret_ref`（存系统钥匙串，**绝不进 config.json**） |
 
 字段间依赖用 `hidden_when=(另一个字段的 name, 值)` 声明（例：MiMo 选「音色设计」

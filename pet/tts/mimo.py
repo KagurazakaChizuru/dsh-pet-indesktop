@@ -137,9 +137,10 @@ class MimoTtsProvider(TtsProvider):
         ),
         TtsField(
             "style", "voice_chime_mimo_style", "风格指令",
-            "可选：用一句自然语言描述语气/情绪/节奏（如「温柔但有点疲惫」）。"
-            "选「音色设计」模型时这里是必填的音色描述。",
-            kind="text", default=DEFAULT_MIMO_STYLE, max_length=MIMO_STYLE_MAX_LEN,
+            "可选：用自然语言描述语气/情绪/节奏（如「温柔但有点疲惫」「脆生生的小女孩童声」）。"
+            "选「音色设计」模型时这里是必填的音色描述，写具体一点效果更好。",
+            kind="multiline", default=DEFAULT_MIMO_STYLE, max_length=MIMO_STYLE_MAX_LEN,
+            min_height=88,
             placeholder="如：轻快、带点笑意，语速稍快（留空按模型默认）",
         ),
         TtsField(

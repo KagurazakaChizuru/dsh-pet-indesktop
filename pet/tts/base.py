@@ -31,8 +31,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
 
-#: 字段类型 → 设置页控件（见 voice_chime_settings._build_field_row）
-FIELD_KINDS = ("select", "text", "number", "flag", "secret")
+#: 字段类型 → 设置页控件（见 voice_chime_settings._build_field_widget）
+#: - select 下拉 / text 单行 / multiline 多行 / number 数字 / flag 开关 / secret 密钥
+FIELD_KINDS = ("select", "text", "multiline", "number", "flag", "secret")
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ class TtsField:
     maximum: int = 100
     suffix: str = ""
     max_length: int = 0
+    #: 多行框（kind="multiline"）的最小高度：设置页会整行铺开它，写整句描述用
+    min_height: int = 80
     secret_ref: str = ""
     advanced: bool = False
     #: 当另一个字段取到指定值时本行隐藏：``(字段 name, 值)``。

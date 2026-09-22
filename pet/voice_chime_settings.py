@@ -234,10 +234,13 @@ class VoiceChimeSettingsPage(QWidget):
     def _build_field_row(self, provider, spec: tts.TtsField) -> SettingRow:
         widget = self._build_field_widget(provider, spec)
         self._field_widgets[spec.key] = widget
-        return SettingRow(spec.key, spec.label, spec.hint, widget)
+        # 多行框整行铺开（stacked）：写在右侧一栏里放不下一句话
+        return SettingRow(
+            spec.key, spec.label, spec.hint, widget, stacked=spec.kind == "multiline"
+        )
 
     def _build_field_widget(self, provider, spec: tts.TtsField) -> QWidget:
-        """按字段声明造控件（select / number / flag / secret / text）。"""
+        """按字段声明造控件（select / multiline / number / flag / secret / text）。"""
         current = provider.clean(spec, self.config.get(spec.key, spec.default))
         if spec.kind == "select":
             select = ModernSelect(self, width=230)
@@ -279,6 +282,15 @@ class VoiceChimeSettingsPage(QWidget):
             layout.addWidget(clear)
             self._secret_edits[spec.key] = edit
             return box
+        if spec.kind == "multiline":
+            # 整句描述（风格指令、音色描述）用多行框：单行框在设置页里根本看不全
+            area = QPlainTextEdit(self)
+            area.setMinimumHeight(max(48, int(spec.min_height)))
+            area.setMaximumHeight(180)
+            if spec.placeholder:
+                area.setPlaceholderText(spec.placeholder)
+            area.setPlainText(str(current or ""))
+            return area
         edit = QLineEdit(self)
         if spec.max_length:
             edit.setMaxLength(spec.max_length)
@@ -363,6 +375,8 @@ class VoiceChimeSettingsPage(QWidget):
             return widget.currentData()
         if spec.kind == "secret":
             return self._secret_edits.get(spec.key).text().strip() if spec.key in self._secret_edits else ""
+        if spec.kind == "multiline":
+            return widget.toPlainText()
         return widget.text()
 
     def _on_secret_clear(self, spec: tts.TtsField) -> None:

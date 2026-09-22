@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QPlainTextEdit, QPushButton
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -402,7 +402,7 @@ def test_settings_page_round_trips_backend_keys(tmp_path):
     page.fallback_check.setChecked(False)
     page.mimo_model_select.setCurrentData(MIMO_MODEL_VOICE_DESIGN)
     page.mimo_voice_select.setCurrentData("苏打")
-    page.mimo_style_edit.setText("沉稳一点，语速正常")
+    page.mimo_style_edit.setPlainText("沉稳一点，语速正常")  # 多行框：setPlainText
     page.apply_to_config()
     cfg.save()
 
@@ -514,6 +514,10 @@ class _FakeProvider(tts.TtsProvider):
             kind="select", default="甲", options=(("甲", "甲"), ("乙", "乙")),
         ),
         tts.TtsField(
+            "style", "voice_chime_fake_style", "假风格指令",
+            kind="multiline", default="", min_height=88,
+        ),
+        tts.TtsField(
             "api_key", "voice_chime_fake_api_key", "假 Key",
             kind="secret", default="", secret_ref="tts/fake",
         ),
@@ -610,9 +614,38 @@ def test_third_party_provider_renders_settings_rows_without_ui_edits(fake_provid
     assert not page._field_rows[("edge", "voice")].isVisibleTo(page), "别的后端字段行隐藏"
 
     page._field_widgets["voice_chime_fake_voice"].setCurrentData("乙")
+    fake_style = page._field_widgets["voice_chime_fake_style"]
+    assert isinstance(fake_style, QPlainTextEdit), "multiline 字段必须渲染成多行框"
+    fake_style.setPlainText("整句描述：温柔但有点疲惫，语速慢一点")
     page._secret_edits["voice_chime_fake_api_key"].setText("sk-fake")
     page.apply_to_config()
 
     assert cfg.get("voice_chime_fake_voice") == "乙", "普通字段按声明写回 config"
+    assert cfg.get("voice_chime_fake_style") == "整句描述：温柔但有点疲惫，语速慢一点"
     assert stored == {"tts/fake": "sk-fake"}, "密钥字段按 secret_ref 进钥匙串"
     assert "sk-fake" not in json.dumps(cfg.data, ensure_ascii=False), "密钥不进 config"
+
+
+def test_mimo_style_row_is_a_multiline_box(tmp_path):
+    """MiMo 的「风格指令」要写整句描述：必须是多行框，且长文本能原样存回配置。"""
+    from pet.voice_chime_settings import VoiceChimeSettingsPage
+
+    _qapp()
+    cfg = Config(base=tmp_path)
+    page = VoiceChimeSettingsPage(cfg)
+
+    style_widget = page._field_widgets["voice_chime_mimo_style"]
+    assert isinstance(style_widget, QPlainTextEdit), "风格指令给单行框等于看不见自己写了什么"
+    assert style_widget.minimumHeight() >= 48
+
+    long_text = "脆生生的小女孩童声，可爱但不幼稚，念古诗文的感觉，语速偏慢"
+    style_widget.setPlainText(long_text)
+    page.apply_to_config()
+
+    assert cfg.get("voice_chime_mimo_style") == long_text, "整句描述必须完整落进配置"
+    assert len(long_text) > 20, "这个用例的意义就在于长文本"
+
+    # 运行中的进程按当前配置回读时也拿得到同一句（refresh 路径不截断）
+    from pet.voice_chime import normalize_chime_config
+
+    assert normalize_chime_config(cfg)["providers"]["mimo"]["style"] == long_text
