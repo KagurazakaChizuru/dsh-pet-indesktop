@@ -460,22 +460,31 @@ provider 里。接入新 TTS 的完整步骤见 **`docs/ADDING-A-TTS-PROVIDER.md
                                      │
 synth_attempts(cfg, secrets=…)  ─────┴─→ [TtsAttempt(主后端), TtsAttempt(后备后端)?]
                                      │        （provider.plan 给出 values/ext）
-服务 _usable_attempts() ── provider.availability(values) 空串才留
+服务 _usable_attempts() ── provider.preflight(values)：配置里已失效的换成能用的
+                         （如被下架的音色 → 默认音色），说明走一次性气泡
+                        ── provider.availability(values) 空串才留
 服务 _cache_path()     ── provider.flavor(values) 进缓存键，扩展名取 plan["ext"]
 _TTSWorker             ── provider.synth(text, plan, path)；TtsUnavailable → 码 → 下一条链
 ```
 
 - **尝试链**：`[主后端] + fallback_ids()`（自身声明 `is_fallback=True` 的后端），
   `voice_chime_tts_fallback` 可关。默认 `mimo` 主、`edge` 备。
+- **合成前自检**（`preflight`，GUI 线程、**不联网**）：把「配置里已不成立的东西」换成
+  能用的并给用户一句话说明。实例：微软 2026-09 下架了 10 款中文音色（晓涵等），配上它们
+  只会得到 `NoAudioReceived`——用户看到的是「声音没了」；现在会自动改用默认音色并提示。
 - **可用性预判**：缺库 / 缺 Key 的后端**先摘掉**，不白打一次注定失败的请求；
   链空 → `_notify_unavailable()` 按 provider 声明的原因码给对应文案（缺 Key / 缺库说法不同）。
 - **凭据**：只有 `kind="secret"` + `secret_ref` 的字段进钥匙串（服务层读出后注入
   `values`），既不进 `config.json` 也不进缓存键与日志。
 - **缓存**：键 = `文本 + provider.flavor(values)`，扩展名由 `plan["ext"]` 决定
-  （edge `.mp3` / MiMo `.wav`）；`_prune_cache` 统计两种扩展名。edge 的 flavor
-  与历史格式逐字节一致，老缓存升级后仍命中。
+  （edge `.mp3` / MiMo `.wav`）；`_prune_cache` 统计两种扩展名；**命中要求文件非空**，
+  失败产物即时删除（半截文件曾被当成缓存 → 一声静音且不再重合成）。
+  edge 的 flavor 与历史格式逐字节一致，老缓存升级后仍命中。
 - **失败语义**：全部后端失败时回调带走各后端错误的拼接串（第一个是主后端）；
   不可用码 `edge-tts-missing` / `mimo-key-missing` 各走 provider 自己声明的提示。
+- **edge 的两条实机坑**（2026-09-22）：音色会下架（见上）；**连发请求偶发
+  `NoAudioReceived`**（间隔重试即可恢复）——所以 `synth` 内置 `EDGE_RETRY_TIMES=2` +
+  1.5s 间隔，并在主音色反复失败时退默认音色。在线音色表由后台线程刷新（TTL 6h）。
 - **配置键**：provider 字段键由 `Config.__init__` / `reload()` 遍历注册表自动收编
   （`config.py` 里不需要手写新后端的键）；`tests/test_config_schema.py` 的快照是刻意的门禁。
 

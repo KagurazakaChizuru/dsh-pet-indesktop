@@ -244,7 +244,9 @@ class VoiceChimeSettingsPage(QWidget):
             for value, label in spec.options:
                 select.addItem(label, value)
             if select.findData(current) < 0 and spec.allow_custom:
-                select.addItem(f"自定义：{current}", current)
+                # 配置值不在清单里（手改配置、或清单里那项已被厂家下架）：
+                # 明确标出来，别让用户以为它还是有效选项（provider 的提示会说清后果）。
+                select.addItem(f"不在清单里：{current}", current)
             select.setCurrentData(current)
             select.currentIndexChanged.connect(self._refresh_backend_controls)
             return select

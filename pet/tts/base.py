@@ -145,6 +145,15 @@ class TtsProvider:
         """空串 = 可用；否则返回原因码。只看配置与 find_spec，不联网。"""
         return ""
 
+    def preflight(self, values: dict) -> tuple[dict, str]:
+        """合成前的自检/校正：返回 ``(可能被修正的 values, 面向用户的提示)``。
+
+        默认原样返回。provider 可以在这里把「配置里已经不成立的东西」换成能用的
+        （典型：在线音色被下架 → 换默认音色），并把原因作为提示交给服务层转达给用户。
+        **跑在 GUI 线程，不许联网**——要联网的校验放到 ``synth()`` 里。
+        """
+        return values, ""
+
     # ------------------------------------------------------------ IO 层
     def synth(self, text: str, plan: dict, out_path) -> None:
         """真正合成并把音频写到 ``out_path``；失败抛异常（缺依赖/凭据用 TtsUnavailable）。"""

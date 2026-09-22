@@ -90,6 +90,7 @@ from . import edge, mimo, mytts  # noqa: F401 —— import 即注册
 | `plan(values) -> dict` | 纯 | **必须**含 `provider` 与 `ext`；其余字段由 `synth` 自解释 |
 | `flavor(values) -> str` | 纯 | 进缓存键；**不得**含密钥、时间戳等不稳定内容 |
 | `availability(values) -> str` | 纯 | 空串=可用；否则返回原因码（离线判定，不许联网） |
+| `preflight(values) -> (values, note)` | 纯 | **不许联网**；把「配置里已失效的东西」换成能用的（如被下架的音色 → 默认音色），`note` 会作为一次性气泡转达给用户。默认原样返回 |
 | `synth(text, plan, out_path)` | IO | 在后台线程跑；缺依赖/凭据抛 `TtsUnavailable(code)` |
 
 字段类型（`kind`）与设置页控件对应：
@@ -109,6 +110,11 @@ from . import edge, mimo, mytts  # noqa: F401 —— import 即注册
 
 ## 三、红线
 
+0. **对「配置里已不成立的东西」必须兜底**：在线音色会被厂家下架、模型名会被改名——
+   用户配的是**当时有效**的值，之后失效时不能只表现为「没声音」。做法：
+   ``preflight(values)`` 在 GUI 线程（**不联网**，只看缓存/内置清单）把失效值换成可用的
+   并返回一句面向用户的说明；``synth()`` 里再重试 + 退默认值兜一层。范例见
+   ``pet/tts/edge.py``（晓涵等 10 款音色 2026-09-22 被微软下架那次事故）。
 1. **`pet/tts/*.py` 模块顶层不得 import Qt**，也不得 import 重量级/可选依赖
    （`edge_tts` 这种惰性到 `synth()` 里）——`tests/test_architecture.py::
    test_pure_logic_modules_do_not_import_qt` 会红。

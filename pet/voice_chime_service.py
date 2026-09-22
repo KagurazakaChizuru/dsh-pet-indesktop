@@ -62,6 +62,9 @@ _SYNTH_TIMEOUT_S = 45.0
 EDGE_TTS_MISSING = tts.edge.AVAILABILITY_CODE
 MIMO_KEY_MISSING = tts.mimo.AVAILABILITY_CODE
 
+# 同一条 provider 自检提示每个进程只弹一次（如「音色已下架，已改用晓晓」）
+_ANNOUNCED_NOTES: set[str] = set()
+
 
 class _TTSWorker(threading.Thread):
     """后台线程：按尝试链逐个合成，第一个成功的写盘并回调返回。
@@ -404,16 +407,34 @@ class VoiceChimeService:
 
         摘掉而不是留给 worker 去失败，是为了让「没配 Key 就自动走后备后端」不额外
         付一次 HTTP 往返；全摘光时调用方走「只有气泡」的降级提示。
+
+        这里还会跑一遍 ``provider.preflight()``：把「配置里已不成立的东西」先换掉
+        （典型：在线音色被下架 → 换默认音色），并把说明转达给用户——否则用户只会
+        看到「声音没了」，不知道是音色本身不存在了。
         """
         usable: list[tts.TtsAttempt] = []
         for attempt in synth_attempts(self._cfg, secrets=self._secret_values()):
             provider = tts.get(attempt.provider)
             if provider is None:
                 continue
+            values, note = provider.preflight(attempt.values)
+            if note:
+                attempt.values = values
+                attempt.plan = provider.plan(values)
+                self._announce_once(note)
             if provider.availability(attempt.values):
                 continue
             usable.append(attempt)
         return tuple(usable)
+
+    def _announce_once(self, note: str) -> None:
+        """同一条提示每个进程只弹一次（避免每次报时都重复刷屏）。"""
+        if note in _ANNOUNCED_NOTES:
+            logger.debug("已提示过：%s", note)
+            return
+        _ANNOUNCED_NOTES.add(note)
+        logger.warning(note)
+        self._bubble(note)
 
     def _cache_path(self, text: str, attempt: tts.TtsAttempt) -> Path:
         """该后端该文本的缓存路径（扩展名由 provider 的合成计划给出）。"""
