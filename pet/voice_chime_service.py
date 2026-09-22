@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""语音报时：调度服务 + edge-tts 合成 + QtMultimedia 播放（GUI 线程）。
+"""语音报时：调度服务 + 在线 TTS 合成 + QtMultimedia 播放（GUI 线程）。
+
+合成后端（见 voice_chime.synth_attempts）：
+- ``mimo``：小米 MiMo TTS（OpenAI 兼容接口，需 API Key，走 pet/tts_secrets 钥匙串）；
+- ``edge``：edge-tts（微软在线，免 Key）；
+- 默认主后端失败时**自动回退**另一个（``voice_chime_tts_fallback``，默认开），
+  两个都不行才降级为「只有气泡、没有声音」并给出可操作提示。
 
 架构（参考 pet/todo_reminder.py 与 pet/click_sound.py）：
 - 模块顶层不 import Qt：QObject / QTimer / QtMultimedia 均在方法内惰性导入，
@@ -9,14 +15,15 @@
 - 报时调度 tick（20s）→ voice_chime.is_chime_minute 判定 + 槽位盖戳幂等；
 - 文本双轨：语音用中文口播文本（build_chime_sentence，同时作为合成输入与
   缓存键），气泡用阿拉伯数字文本（build_bubble_sentence），两者解耦；
-- 合成在后台线程跑 edge_tts（asyncio），完成后经 QObject 信号（queued）
-  桥回 GUI 线程，用 QMediaPlayer + QAudioOutput 播放；
+- 合成在后台线程跑（edge 走 edge_tts 的 asyncio，mimo 走 http_util 的同步
+  HTTP），完成后经 QObject 信号（queued）桥回 GUI 线程，用 QMediaPlayer +
+  QAudioOutput 播放；
 - edge_tts **懒加载**：模块顶层只做 find_spec 探测（不 import 本体），真正的
   import 推迟到 _TTSWorker 的合成线程里第一次合成时——edge_tts 首次 import
   实测 ~1.4s 且常驻内存，而语音报时默认关闭、服务可能整个不 start，顶层 import
   等于让每个用户白付这笔钱；
-- 音频缓存于 config.dir/voice_chime_cache，按“文本+音色+语速+音调”哈希
-  去重，同句不重复合成；
+- 音频缓存于 config.dir/voice_chime_cache，按「文本+后端+该后端的音色/参数」
+  哈希去重，同句不重复合成（含后端，换后端不会播到上一个后端的声音）；
 - 预合成降延迟：距下一报时点 ≤ 60s 时提前在后台线程合成该次报时音频并
   写缓存，到点直接播缓存实现近零延迟；预合成未及时完成则回退即时合成。
 """
@@ -25,22 +32,30 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import logging
 import threading
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import music_detect
+from . import http_util, music_detect, tts_secrets
 from .voice_chime import (
+    BACKEND_EDGE,
+    BACKEND_MIMO,
+    MIMO_BASE_URL,
+    MIMO_CHAT_PATH,
+    MIMO_TIMEOUT_S,
     build_bubble_sentence,
     build_chime_sentence,
     cache_key,
     chime_slot,
-    edge_pitch_arg,
-    edge_rate_arg,
+    mimo_payload,
     next_chime_in_seconds,
     normalize_chime_config,
+    parse_mimo_audio,
+    synth_attempts,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,9 +67,14 @@ _PRUNE_MIN_INTERVAL_S = 300.0
 # 超过该时限在调度 tick 中复位（正常合成 3-8s 完成，45s 余量充足）。
 _SYNTH_TIMEOUT_S = 45.0
 
-# 合成线程里 edge_tts 导入失败时的回调错误码：GUI 侧据此走 _notify_missing_tts
-# 降级（"请 pip install edge-tts"），而不是笼统的"合成失败"。
+# 合成线程里的两种「缺东西」错误码：GUI 侧据此给出可操作的降级提示，
+# 而不是笼统的「合成失败」。
 EDGE_TTS_MISSING = "edge-tts-missing"
+MIMO_KEY_MISSING = "mimo-key-missing"
+
+
+class _MimoKeyMissing(RuntimeError):
+    """小米 MiMo 没有可用的 API Key（设置页未填 / 钥匙串读不到）。"""
 
 
 def _edge_tts_available() -> bool:
@@ -77,49 +97,99 @@ def _edge_tts_available() -> bool:
 _EDGE_TTS_AVAILABLE = _edge_tts_available()
 
 
+def mimo_key_available() -> bool:
+    """小米 MiMo 的 API Key 是否已在（钥匙串或进程内存）。测试可 monkeypatch。"""
+    return bool(tts_secrets.get(tts_secrets.MIMO_API_KEY_REF))
+
+
 class _TTSWorker(threading.Thread):
-    """后台线程：edge-tts 合成 mp3 后经回调返回。
+    """后台线程：按 attempts 顺序合成，第一个成功的写盘并回调返回。
+
+    attempts 是本模块外的纯逻辑产物（voice_chime.synth_attempts），已经排好
+    主/备顺序；paths 与之等长——每个后端各自的缓存路径（扩展名不同：edge mp3、
+    MiMo wav）。全部失败时回调带回**主后端**的错误（用户选的那个最值得知道），
+    以 ``|`` 拼接后备错误便于排查。
 
     线程不直接碰 Qt 对象；完成后把结果交给 owner 提供的回调（owner 在
     GUI 线程，回调触发 queued 信号桥接）。
     """
 
-    def __init__(self, text: str, voice: str, rate: str, pitch: str, out_path: Path, on_done) -> None:
+    def __init__(self, text: str, attempts, paths, on_done) -> None:
         super().__init__(daemon=True)
         self._text = text
-        self._voice = voice
-        self._rate = rate
-        self._pitch = pitch
-        self._out_path = out_path
+        self._attempts = tuple(attempts)
+        self._paths = tuple(paths)
         self._on_done = on_done
 
     def run(self) -> None:  # noqa: D102
-        try:
-            asyncio.run(self._synthesize())
-        except ImportError:
-            # edge_tts 本该在 _synthesize 里惰性导入（见 _edge_tts_available）：
-            # 探测通过但真导入失败（半装 / 被禁用）时也走这里，回 GUI 侧同一套
-            # "请 pip install edge-tts" 降级，而不是笼统的合成失败。
-            logger.warning("edge-tts 不可导入，降级为仅气泡提示")
-            self._on_done(str(self._out_path), self._text, EDGE_TTS_MISSING)
+        errors: list[str] = []
+        for attempt, path in zip(self._attempts, self._paths):
+            try:
+                self._synthesize(attempt, path)
+            except _MimoKeyMissing:
+                errors.append(MIMO_KEY_MISSING)
+                logger.warning("小米 MiMo 未配置 API Key，尝试下一个合成后端")
+                continue
+            except ImportError:
+                # edge_tts 本该在 _synthesize 里惰性导入（见 _edge_tts_available）：
+                # 探测通过但真导入失败（半装 / 被禁用）时也走这里。
+                errors.append(EDGE_TTS_MISSING)
+                logger.warning("edge-tts 不可导入，尝试下一个合成后端")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{type(exc).__name__}: {exc}")
+                logger.warning("%s 合成失败：%s", attempt.get("backend"), exc)
+                continue
+            self._on_done(str(path), self._text, "")
             return
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("edge-tts 合成失败")
-            self._on_done(str(self._out_path), self._text, f"{type(exc).__name__}: {exc}")
-            return
-        self._on_done(str(self._out_path), self._text, "")
+        fallback_path = str(self._paths[0]) if self._paths else ""
+        self._on_done(fallback_path, self._text, "|".join(errors) or "没有可用的合成后端")
 
-    async def _synthesize(self) -> None:
+    def _synthesize(self, attempt: dict, out_path: Path) -> None:
+        if attempt.get("backend") == BACKEND_MIMO:
+            self._synthesize_mimo(attempt, out_path)
+            return
+        asyncio.run(self._synthesize_edge(attempt, out_path))
+
+    async def _synthesize_edge(self, attempt: dict, out_path: Path) -> None:
         # 惰性导入：只在真的要合成的后台线程里付这笔 import 成本。
         import edge_tts
 
         communicate = edge_tts.Communicate(
             self._text,
-            self._voice,
-            rate=self._rate,
-            pitch=self._pitch,
+            attempt["voice"],
+            rate=attempt["rate"],
+            pitch=attempt["pitch"],
         )
-        await communicate.save(str(self._out_path))
+        await communicate.save(str(out_path))
+
+    def _synthesize_mimo(self, attempt: dict, out_path: Path) -> None:
+        """小米 MiMo TTS：OpenAI 兼容的 chat/completions + 内联 base64 音频。
+
+        走 pet/http_util（先按系统代理试、传输失败改直连）：她的系统代理曾被
+        加速器留下一个没人监听的端口，直连兜底是歌词/余额那批修复的同一教训。
+        两个鉴权头都带：官方 curl 示例用 ``api-key``，OpenAI SDK 用 Bearer。
+        """
+        key = tts_secrets.get(tts_secrets.MIMO_API_KEY_REF)
+        if not key:
+            raise _MimoKeyMissing()
+        body = json.dumps(mimo_payload(self._text, attempt), ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            MIMO_BASE_URL.rstrip("/") + MIMO_CHAT_PATH,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "api-key": key,
+                "Authorization": f"Bearer {key}",
+            },
+        )
+        with http_util.urlopen(request, timeout=MIMO_TIMEOUT_S) as response:
+            raw = response.read()
+        audio = parse_mimo_audio(json.loads(raw.decode("utf-8", "replace")))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(audio)
 
 
 class _AudioBridge:
@@ -335,27 +405,21 @@ class VoiceChimeService:
             return
         if self._busy:
             return  # 合成中，下个 tick（20s 内）再试，窗口 60s 足够
-        if not _EDGE_TTS_AVAILABLE:
+        attempts = self._usable_attempts()
+        if not attempts:
             return
         sentence = build_chime_sentence(next_at, self._cfg)
         bubble = build_bubble_sentence(next_at, self._cfg)
-        key = cache_key(
-            sentence,
-            {
-                "voice": self._cfg["voice"],
-                "rate": self._cfg["rate"],
-                "pitch": self._cfg["pitch"],
-            },
-        )
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self._cache_dir / f"{key}.mp3"
+        paths = [self._cache_path(sentence, attempt) for attempt in attempts]
+        cached = next((path for path in paths if path.exists()), None)
         # 先占位：即便本次合成未在报时点前完成，到点也会回退即时合成。
         self._precache_slot = next_slot
         self._precache_text = sentence
         self._precache_bubble = bubble
-        self._precache_path = str(out_path) if out_path.exists() else None
-        if out_path.exists():
-            logger.info("预合成命中已有缓存：%s", out_path.name)
+        self._precache_path = str(cached) if cached is not None else None
+        if cached is not None:
+            logger.info("预合成命中已有缓存：%s", cached.name)
             return
         self._busy = True
         self._busy_since = time.monotonic()
@@ -363,15 +427,8 @@ class VoiceChimeService:
         if self._bridge is None:
             self._bridge = _AudioBridge()
             self._bridge.signals.synthesized.connect(self._on_synthesized)
-        worker = _TTSWorker(
-            sentence,
-            self._cfg["voice"],
-            edge_rate_arg(self._cfg["rate"]),
-            edge_pitch_arg(self._cfg["pitch"]),
-            out_path,
-            self._bridge.on_synthesized,
-        )
-        logger.info("预合成下一报时音频（%ds 后）：%s", next_secs, out_path.name)
+        worker = _TTSWorker(sentence, attempts, paths, self._bridge.on_synthesized)
+        logger.info("预合成下一报时音频（%ds 后）：%s", next_secs, paths[0].name)
         worker.start()
 
     def _consume_precache(self, slot: str) -> str | None:
@@ -396,6 +453,29 @@ class VoiceChimeService:
         self._precache_path = None
         return None
 
+    # ------------------------------------------------------------ 合成后端
+    def _usable_attempts(self) -> tuple[dict, ...]:
+        """可用的合成尝试序列：缺库 / 缺 Key 的后端直接摘掉，不浪费一次往返。
+
+        摘掉而不是留给 worker 去失败，是为了让「没配 Key 就自动走 edge」不额外
+        付出一次 HTTP 往返；两个都摘光时调用方走「只有气泡」的降级提示。
+        """
+        usable: list[dict] = []
+        for attempt in synth_attempts(self._cfg):
+            if attempt["backend"] == BACKEND_EDGE and not _EDGE_TTS_AVAILABLE:
+                continue
+            if attempt["backend"] == BACKEND_MIMO and not mimo_key_available():
+                continue
+            usable.append(attempt)
+        return tuple(usable)
+
+    def _cache_path(self, text: str, attempt: dict) -> Path:
+        """该后端该文本的缓存路径（扩展名随后端：edge mp3 / MiMo wav）。"""
+        cfg = dict(self._cfg)
+        cfg["backend"] = attempt["backend"]
+        return self._cache_dir / f"{cache_key(text, cfg)}.{attempt['ext']}"
+
+    # ------------------------------------------------------------ 播报
     def _fire(self, sentence: str, now: datetime, bubble_text: str | None = None,
               *, show_bubble: bool = True, role: str = "play") -> None:
         """播报一次。
@@ -406,28 +486,22 @@ class VoiceChimeService:
         ``show_bubble=False`` / ``role="speak"`` 是给外部播报（节日提醒）用的：
         只出声、不出气泡（气泡由调用方自己管），合成完成回调据此走 ``_play_only``。
         """
-        if not _EDGE_TTS_AVAILABLE:
-            self._notify_missing_tts()
+        attempts = self._usable_attempts()
+        if not attempts:
+            self._notify_unavailable()
             return
         bubble = bubble_text if bubble_text is not None else build_bubble_sentence(now, self._cfg)
-        voice = self._cfg["voice"]
-        key = cache_key(
-            sentence,
-            {
-                "voice": voice,
-                "rate": self._cfg["rate"],
-                "pitch": self._cfg["pitch"],
-            },
-        )
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self._cache_dir / f"{key}.mp3"
+        paths = [self._cache_path(sentence, attempt) for attempt in attempts]
         # 缓存命中（含预合成已完成）直接播放，零网络延迟；合成中不阻塞缓存播放。
-        if out_path.exists():
-            if show_bubble:
-                self._play_and_bubble(str(out_path), sentence, bubble)
-            else:
-                self._play_only(str(out_path))
-            return
+        # 逐个后端查缓存：主后端没缓存而后备（上次回退时）有，也能直接命中。
+        for path in paths:
+            if path.exists():
+                if show_bubble:
+                    self._play_and_bubble(str(path), sentence, bubble)
+                else:
+                    self._play_only(str(path))
+                return
         if self._busy:
             # 合成在飞（多为本次报时的预合成）：排队待补，不得直接丢弃——
             # 到点回退即时合成正经此路径（_on_tick 在预合成未完成时调 _fire，
@@ -445,14 +519,7 @@ class VoiceChimeService:
         if self._bridge is None:
             self._bridge = _AudioBridge()
             self._bridge.signals.synthesized.connect(self._on_synthesized)
-        worker = _TTSWorker(
-            sentence,
-            voice,
-            edge_rate_arg(self._cfg["rate"]),
-            edge_pitch_arg(self._cfg["pitch"]),
-            out_path,
-            self._bridge.on_synthesized,
-        )
+        worker = _TTSWorker(sentence, attempts, paths, self._bridge.on_synthesized)
         worker.start()
 
     # ------------------------------------------------------------ 播放
@@ -484,22 +551,16 @@ class VoiceChimeService:
             logger.info("语音报时已停止，丢弃迟到的合成结果：%s", Path(path).name)
             return
         if error:
-            if error == EDGE_TTS_MISSING:
-                # 运行期才发现 edge-tts 缺失（顶层只做 find_spec 探测）：清掉可能
-                # 残留的预合成占位，再走既有缺依赖降级文案。
+            if EDGE_TTS_MISSING in error or MIMO_KEY_MISSING in error:
+                # 运行期才发现「库 / Key 不在」（顶层只做本地探测）：清掉可能残留的
+                # 预合成占位，再给可操作的降级提示。
                 if role == "precache":
-                    self._precache_slot = None
-                    self._precache_text = None
-                    self._precache_bubble = None
-                    self._precache_path = None
-                self._notify_missing_tts()
+                    self._clear_precache()
+                self._notify_unavailable(error)
                 return
             if role == "precache":
                 # 预合成失败：丢弃占位，到点走即时合成回退。
-                self._precache_slot = None
-                self._precache_text = None
-                self._precache_bubble = None
-                self._precache_path = None
+                self._clear_precache()
                 logger.warning("预合成失败，到点将即时合成：%s", error)
                 return
             logger.warning("语音报时合成失败：%s", error)
@@ -659,6 +720,29 @@ class VoiceChimeService:
         logger.warning(msg)
         self._bubble(msg)
 
+    def _notify_missing_mimo_key(self) -> None:
+        msg = "小米 MiMo 未配置 API Key：桌宠设置 → 语音 → 语音报时 里填一次即可"
+        logger.warning(msg)
+        self._bubble(msg)
+
+    def _notify_unavailable(self, error: str = "") -> None:
+        """两个合成后端都不可用时的降级提示（给「怎么办」，不是「失败了」）。"""
+        if MIMO_KEY_MISSING in error or (
+            not error
+            and self._cfg.get("backend") == BACKEND_MIMO
+            and not mimo_key_available()
+        ):
+            self._notify_missing_mimo_key()
+            return
+        self._notify_missing_tts()
+
+    def _clear_precache(self) -> None:
+        """丢弃整组预合成状态（失败/换本地后端时占位必须清掉）。"""
+        self._precache_slot = None
+        self._precache_text = None
+        self._precache_bubble = None
+        self._precache_path = None
+
     def _release_stale_busy(self) -> None:
         """合成线程异常未回调时复位 _busy；否则报时/预合成会被永久跳过。"""
         if not self._busy:
@@ -682,7 +766,10 @@ class VoiceChimeService:
             if not self._cache_dir.is_dir():
                 return
             files = sorted(
-                (p for p in self._cache_dir.glob("*.mp3")),
+                # 两种后端的产物都要算进上限：edge 出 mp3、MiMo 出 wav；
+                # 只 glob mp3 会让 MiMo 的缓存无上限地涨下去。
+                (p for p in self._cache_dir.iterdir()
+                 if p.suffix.lower() in (".mp3", ".wav") and p.is_file()),
                 key=lambda p: p.stat().st_mtime,
             )
             for old in files[: max(0, len(files) - self.MAX_CACHE_FILES)]:

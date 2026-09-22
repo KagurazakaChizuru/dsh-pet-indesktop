@@ -18,7 +18,11 @@ AIGC:
 > 本轮（2026-09-18，「歌词显示审计修复」）：分支 `feat/media-window-fallback`（从 `1ff3c39` 起，已 `merge origin/main`），
 > 9 个提交（`b79add5` … `6708091`）：自有修复见 `e6d5437`（33 files +1305/-203），承接上游 #134/#135 见 `6708091`。
 > 详见 `docs/PR-REPORT-LYRIC-DISPLAY-AUDIT-2026-09-18.md`（含根因、验证与合并口径）。
-> 生成日期：2026-09-17（本行于 2026-09-18 校准基线与本轮信息）。文档内的数字均为实测值，代码改动后请同步校准。
+> 本轮（2026-09-22，两件事）：① 合并上游 `origin/main` #173（#150→#173 共 81 个提交，
+> 含岛屿同步硬墙、气泡文字大小、移动素材等），merge 提交 `f1fe6a1`，全量 **2871 passed**；
+> ② 语音报时接入**小米 MiMo TTS**（可切换后端 + 失败自动回退 edge），全量 **2895 passed**。
+> 详见 `docs/PR-REPORT-MIMO-TTS-2026-09-22.md`。
+> 生成日期：2026-09-17（本行于 2026-09-22 校准基线与本轮信息）。文档内的数字均为实测值，代码改动后请同步校准。
 
 ---
 
@@ -112,9 +116,10 @@ D:\dsh-pet\
 │   ├── settings_widgets.py       # 设置控件库（ToggleSwitch / SettingRow / ModernSelect …）
 │   ├── speech_bubble.py          # 气泡绘制与交互（1491 行）
 │   ├── speech_bubble_text.py     # 气泡分页/定位纯函数（408 行）
-│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（457 行，零 Qt / 零 edge_tts）
-│   ├── voice_chime_service.py    # ★ 语音报时服务层（694 行，tick + 合成 + 播放）
-│   ├── voice_chime_settings.py   # ★ 语音报时设置页（234 行）
+│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（644 行，零 Qt / 零 edge_tts）
+│   ├── voice_chime_service.py    # ★ 语音报时服务层（781 行，tick + 合成链 + 播放）
+│   ├── voice_chime_settings.py   # ★ 语音报时设置页（429 行，含合成后端 6 行）
+│   ├── tts_secrets.py            # ★ 合成凭据存取（92 行；钥匙串优先、内存兜底）
 │   ├── voice_chime_quotes.py     # ★ 台词/歌词纯数据库（96 行，中英各 40 条）
 │   ├── festival.py               # ★ 节日提醒纯逻辑层（395 行，零 Qt）
 │   ├── festival_data.py          # ★ 节日定义表 + 动态生日节日（158 行）
@@ -299,7 +304,7 @@ modern_settings_dialog.py
 - `pet/config_domains.py` 提供只读域 facade：`ChatConfig`、`AgentLinkConfig`、`ProactiveConfig`、`CollisionConfig`、`MenuConfig`，`normalize` 全部复用 `config.py` 既有清洗函数。
 - 配置落盘位置：运行期 `config.dir/config.json`（打包版为 `%APPDATA%\dsh-pet-standalone-<variant>\`）；仓库内 `pet/persona_presets/*.json` 属角色台词预设，不属运行期配置。
 
-### 4.2 语音报时配置键（本项目的主要定制，11 个）
+### 4.2 语音报时配置键（本项目的主要定制，16 个）
 
 | 键 | 含义 | 默认值 | 校验/清洗 |
 |---|---|---|---|
@@ -314,8 +319,16 @@ modern_settings_dialog.py
 | `voice_chime_show_quote` | 台词/歌词开关 | `True` | `clean_flag` |
 | `voice_chime_custom_quotes_zh` | 自定义中文台词/歌词（一行一条） | `""` | `clean_custom_quotes`：按行拆分、去控制字符、单条截断 120 字、去重保序；空则回退内置中文库 |
 | `voice_chime_custom_quotes_en` | 自定义英文台词/歌词（一行一条） | `""` | 同上；空则回退内置英文库 |
+| `voice_chime_tts_backend` | 合成后端 | `"mimo"`（小米 MiMo） | `clean_backend`：`mimo` / `edge`，非法回落 `mimo` |
+| `voice_chime_tts_fallback` | 主后端失败时自动回退 edge | `True` | `clean_flag` |
+| `voice_chime_mimo_model` | MiMo 模型 | `"mimo-v2.5-tts"` | `clean_mimo_model`：内置音色 / `mimo-v2.5-tts-voicedesign`（音色设计） |
+| `voice_chime_mimo_voice` | MiMo 内置音色 | `"冰糖"` | `clean_mimo_voice`：中文 冰糖/茉莉/苏打/白桦，英文 Mia/Chloe/Milo/Dean |
+| `voice_chime_mimo_style` | 风格指令（自然语言，可选） | `""` | `clean_mimo_style`：去控制字符、压换行、截断 300 字；音色设计模型下必填 |
 
-统一清洗出口：`voice_chime.normalize_chime_config(config)` 返回 `enabled / schedule / custom_times / voice / rate / pitch / volume / show_bubble / show_quote / custom_quotes_zh / custom_quotes_en`。
+> **API Key 不在配置里**：`tts/mimo` 存系统钥匙串（`pet/tts_secrets.py`，服务名
+> `dsh-pet-standalone`）；keyring 不可用时退化为进程内存（本次运行有效）。
+
+统一清洗出口：`voice_chime.normalize_chime_config(config)` 返回 `enabled / schedule / custom_times / voice / rate / pitch / volume / show_bubble / show_quote / custom_quotes_zh / custom_quotes_en / backend / fallback / mimo_model / mimo_voice / mimo_style`。
 
 **手工改配置的注意**：运行中的进程**不会热加载** `config.json`（见第九章坑位 1）。要么改完重启，要么通过设置对话框保存（走 `Config.set/save` 并触发服务同步）。
 
@@ -323,13 +336,14 @@ modern_settings_dialog.py
 
 ## 五、语音报时功能（本项目主要定制点）
 
-涉及四个文件（均为本次定制新增）：
+涉及五个文件（四个自有 + 一个新增的凭据模块）：
 
 | 文件 | 行数 | 层 | 职责 |
 |---|---|---|---|
-| `pet/voice_chime.py` | 457 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、edge 参数与缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
-| `pet/voice_chime_service.py` | 694 | 服务 | 20s tick、预合成、`edge-tts` 后台合成、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪、降级 |
-| `pet/voice_chime_settings.py` | 234 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config` / `refresh_from_config` |
+| `pet/voice_chime.py` | 644 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、后端尝试链、MiMo 请求体/响应解析、缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
+| `pet/voice_chime_service.py` | 781 | 服务 | 20s tick、预合成、合成链（MiMo HTTP / edge-tts 后台线程）、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪（mp3+wav）、降级 |
+| `pet/voice_chime_settings.py` | 429 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config`；含「合成后端」6 行与按后端显隐 |
+| `pet/tts_secrets.py` | 92 | 凭据 | `tts/mimo` 的钥匙串存取（惰性 import keyring、内存兜底），不依赖 Qt / pet.chat |
 | `pet/voice_chime_quotes.py` | 96 | 数据 | 中英台词/歌词库各 40 条（`CHINESE_QUOTES` / `ENGLISH_QUOTES`），纯数据零依赖 |
 
 ### 5.1 六种调度与「槽位幂等」
@@ -417,10 +431,32 @@ _on_tick(now)
 
 ### 5.8 设置页（`VoiceChimeSettingsPage`）
 
-- 11 个 `SettingRow`：总开关、调度模式（`ModernSelect`）、自定义时间点、音色（常用音色清单 `VOICE_OPTIONS`，中英双语）、语速、音调、音量、气泡开关、台词开关、自定义中文台词、自定义英文台词，外加**试听按钮**（作为 `SettingRow` 的 control 位，键 `voice_chime_preview`）。
+- 18 个 `SettingRow`：**合成后端 6 行**（语音引擎 / 失败自动回退 / MiMo 模型 / MiMo 音色 / 风格指令 / MiMo API Key）+
+  基础设置 3 行（总开关、调度模式、自定义时间点）+ 语音 7 行（edge 音色、语速、音调、音量、气泡、台词、试听）+ 台词/歌词 2 行，
+  外加**试听按钮**（作为 `SettingRow` 的 control 位，键 `voice_chime_preview`）。
+- **按后端显隐**（`_refresh_backend_controls`）：切到 MiMo 时 edge 的音色/语速/音调三行隐藏；
+  切回 edge 时 MiMo 四行隐藏；选「音色设计」模型时 MiMo 音色行也隐藏（音色由风格指令描述生成）。
 - 试听链路：`preview_requested(str)` → `modern_settings_dialog._on_voice_chime_preview()` → `parent().on_voice_chime_now`（窗口由 AppShell 赋值）。
-- 写回：`apply_to_config()` 只写 11 个 `voice_chime_*` 键；`refresh_from_config()` 按当前配置回滚控件显示。
+- 写回：`apply_to_config()` 写 16 个 `voice_chime_*` 键；**API Key 走 `tts_secrets`（钥匙串），
+  绝不进 config.json**，留空表示不改动已保存的 Key，「清除」按钮立即删除。
 - 域归属：在 `_rebuild_domain_navigation()` 中被收集为共享卡片域「语音报时」（排在灵动岛/主动识屏/探索看门狗之后）。
+
+### 5.9 合成后端：小米 MiMo TTS（2026-09-22 新增）
+
+- **尝试链**由纯函数 `voice_chime.synth_attempts(cfg)` 产出：`[主后端, edge?]`。
+  默认 `mimo` 主、`edge` 备（`voice_chime_tts_fallback` 可关）。
+- **可用性预判**在服务层（`_usable_attempts`）：缺 edge-tts 库、缺 MiMo Key 的后端**先摘掉**，
+  不白打一次注定失败的请求；链空 → `_notify_unavailable()` 给出可操作提示（缺 Key 还是缺库，说法不同）。
+- **请求**（`_TTSWorker._synthesize_mimo`）：`POST https://api.xiaomimimo.com/v1/chat/completions`，
+  头带 `api-key` 与 `Authorization: Bearer`，body 由 `mimo_payload()` 构造——
+  **待合成文本在 `assistant` 消息**、风格指令在可选 `user` 消息、`audio.format=wav`。
+  走 `pet/http_util.urlopen`（系统代理失败改直连），超时 `MIMO_TIMEOUT_S = 30s`。
+- **响应**：`parse_mimo_audio()` 取 `choices[0].message.audio.data` 解 base64 写盘；解不出时抛
+  带原因的 `ValueError`（错误文本会进气泡与日志）。
+- **缓存**：键含后端与各自音色/参数（`cache_key`），扩展名随后端（edge `.mp3` / MiMo `.wav`）；
+  `_prune_cache` 同时统计两种扩展名。edge 分支的键**与历史格式逐字节一致**，老缓存升级后仍命中。
+- **失败语义**：全部后端失败时回调带走**主后端**错误（`|` 拼后备错误）；错误码
+  `MIMO_KEY_MISSING` / `EDGE_TTS_MISSING` 各走自己的降级文案。
 
 ---
 
@@ -591,6 +627,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 
 | 优先级 | 事项 | 说明 / 切入点 |
 |---|---|---|
+| 高 | **小米 MiMo 后端的真实 API 验证** | 实现已按官方文档落地、单测全覆盖，但**还没用真 Key 打过一次**。拿到 Key 后在设置页填一次（存钥匙串），点「立即试听」，确认 `%APPDATA%\dsh-pet-standalone-webm-chat\voice_chime_cache\` 出现 `.wav` 且音色正确；若报 401/参数错，先看气泡文案里的错误原文 |
 | 高 | `window.py` 增量拆分 | 4624/4632；按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器 |
 | 高 | `modern_settings_dialog.py` 再拆分 | 余量仅 3 行（2390/2393）；新设置页应先拆到独立 `*_settings.py` |
 | 中 | 节日动画素材缺口补齐（复活节/母亲节/父亲节） | 补素材后从 `festival_animations.KNOWN_GAPS` 移除，对应用例会变红提醒 |
@@ -632,19 +669,20 @@ explorer "%APPDATA%\dsh-pet-standalone-webm-chat"
 
 | 内容 | 位置 |
 |---|---|
-| 语音报时 11 键默认值 | `pet/config.py` 693-703 行 |
-| 语音报时 reload 白名单 | `pet/config.py` 913-923 行 |
+| 语音报时 16 键默认值 | `pet/config.py` 的 `voice_chime_*` 块（搜 `voice_chime_enabled`） |
+| 语音报时 reload 白名单 | `pet/config.py` `reload()` 白名单元组里的 `voice_chime_*` 段 |
 | 配置键三处登记护栏 | `tests/test_config_schema.py`（`DEFAULTS_SNAPSHOT` / `RELOAD_WHITELIST_SNAPSHOT`） |
-| 语音报时纯逻辑总入口 | `pet/voice_chime.py`（`normalize_chime_config` 226 行、`chime_slot` 299 行、`build_chime_text` 314 行、`quote_slot_serial` 329 行、`chime_index_in_period` 339 行、`split_quote_batches` 361 行、`pick_quote` 382 行、`build_chime_bubble_text` 417 行、`build_bubble_sentence` 427 行、`cache_key` 455 行） |
-| 语音报时服务 | `pet/voice_chime_service.py`（常量 126-130 行、`_on_tick` 213 行、`_maybe_precache` 237 行、`_consume_precache` 295 行、`_play_and_bubble` 394 行、`_bubble` 430 行、`_prune_cache` 487 行） |
+| 语音报时纯逻辑 | `pet/voice_chime.py`（`normalize_chime_config` / `chime_slot` / `build_chime_text` / `pick_quote` / `synth_attempts` / `mimo_payload` / `parse_mimo_audio` / `cache_key`；**行号随重构漂移，按符号名搜**） |
+| 语音报时服务 | `pet/voice_chime_service.py`（`_usable_attempts` / `_cache_path` / `_fire` / `_maybe_precache` / `_TTSWorker` / `_prune_cache`；同上按符号名搜） |
+| 合成凭据 | `pet/tts_secrets.py`（ref `tts/mimo`，服务名 `dsh-pet-standalone`） |
 | 语音报时设置页 | `pet/voice_chime_settings.py` |
-| 语音报时设置页接入 | `pet/modern_settings_dialog.py` 928-931（构造）、1777-1791（域收集）、2133-2135（写回）、2221（试听） |
-| 语音报时服务启停 | `pet/app.py` 1107-1130（`_chime_wanted` / `_ensure_chime_service` / `_sync_chime_service`）、2307-2319（`trigger_voice_chime_now` / `toggle_voice_chime`） |
-| 菜单动作注册 | `pet/context_menus/registry.py` 125-133、219-224 行 |
+| 语音报时设置页接入 | `pet/modern_settings_dialog.py`（构造 / 域收集 / `_write_config` 写回 / `_on_voice_chime_preview`；按符号名搜） |
+| 语音报时服务启停 | `pet/app.py`（`_chime_wanted` / `_ensure_chime_service` / `_sync_chime_service` / `trigger_voice_chime_now` / `toggle_voice_chime`） |
+| 菜单动作注册 | `pet/context_menus/registry.py`（`voice_chime_now` / `voice_chime_toggle`） |
 | 菜单模板节点 | `pet/menu_templates/modern-default-v1.json` |
-| 行数预算常量 | `tests/test_architecture.py`（`WINDOW_PY_LINE_BUDGET` = 4507 / `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` = 2311） |
+| 行数预算常量 | `tests/test_architecture.py`（`WINDOW_PY_LINE_BUDGET` = 4632 / `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` = 2393） |
 | 构建脚本 | `scripts/build_onedir.ps1`、`scripts/slim_bundle.py`、`scripts/check_bundle_encoding.py`、`scripts/verify_bundle_qt.py` |
-| 交付包与 PR | `dist-onedir\dsh-pet-standalone-webm-chat-portable.zip`（146.53 MB，2026-09-16 18:06）；[PR #131](https://github.com/MerZlin/dsh-pet-indesktop/pull/131)（承接 #127；#118/#125/#127 均已合并） |
-| 相关工程文档 | `docs/ONEDIR_PACKAGING.md`、`docs/SETTINGS-CHANGE-GATES.md`、`docs/WINDOW_PY_SPLIT_GUIDE.md`、`docs/PR-REPORT-VOICE-CHIME-2026-09-15.md`、`docs/PR-MERGE-LESSONS-2026-09-12.md` |
+| 本机部署位置 | live：`D:\dsh-pet\dist-onedir\dsh-pet-standalone-webm-chat\`；副本：`H:\dsh-pet-standalone-webm-chat\`（开始菜单快捷方式） |
+| 相关工程文档 | `docs/ONEDIR_PACKAGING.md`、`docs/SETTINGS-CHANGE-GATES.md`、`docs/WINDOW_PY_SPLIT_GUIDE.md`、`docs/PR-REPORT-MIMO-TTS-2026-09-22.md`、`docs/PR-MERGE-LESSONS-2026-09-12.md` |
 
 *（内容由AI生成，仅供参考）*

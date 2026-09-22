@@ -950,9 +950,9 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
         all_rows = dialog.findChildren(SettingRow)
         chime_rows = [r for r in all_rows if r.objectName().startswith("settingRow_voice_chime_")]
         festival_rows = [r for r in all_rows if r.objectName().startswith("settingRow_festival")]
-        # 语音报时页实测 12 行（基础设置 3 + 语音 7 + 台词/歌词 2）：锁「整组都在、
-        # 一个不漏」，行本身不动，只是被域收集机制 reparent 进「语音」域。
-        assert len(chime_rows) == 12, "语音报时整组 12 行都必须在「语音」域"
+        # 语音报时页实测 18 行（基础设置 3 + 合成后端 6 + 语音 7 + 台词/歌词 2）：
+        # 锁「整组都在、一个不漏」，行本身不动，只是被域收集机制 reparent 进「语音」域。
+        assert len(chime_rows) == 18, "语音报时整组 18 行都必须在「语音」域"
         # 节日提醒 14 行 = 上游 12 行 + 本分支的「节日动画」「我的生日」两行
         # （承接 #127 第二轮迭代；合并 origin/main 后按实测校准）。
         assert len(festival_rows) == 14, "节日提醒整组 14 行必须整体移入「语音」域"

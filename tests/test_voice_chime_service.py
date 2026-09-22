@@ -82,9 +82,11 @@ class _WorkerSpy:
 
     instances: list["_WorkerSpy"] = []
 
-    def __init__(self, text, voice, rate, pitch, out_path, on_done) -> None:
+    def __init__(self, text, attempts, paths, on_done) -> None:
         self.text = text
-        self.out_path = out_path
+        self.attempts = tuple(attempts)
+        self.paths = tuple(paths)
+        self.out_path = self.paths[0]
         self.on_done = on_done
         _WorkerSpy.instances.append(self)
 
@@ -165,8 +167,10 @@ def test_service_cfg_matches_contract_shape_at_construction(tmp_path, monkeypatc
 
 
 def test_missing_edge_tts_degrades_to_bubble_without_synthesis(tmp_path, monkeypatch):
-    """edge-tts 缺失：只气泡提示，不起合成线程（降级路径不许静默丢弃）。"""
-    service, app, _cfg = _service(tmp_path, monkeypatch, tts_available=False)
+    """edge-tts 缺失（且后端就是 edge）：只气泡提示，不起合成线程。"""
+    service, app, cfg = _service(tmp_path, monkeypatch, tts_available=False)
+    cfg.set("voice_chime_tts_backend", "edge")  # 钉住后端：默认后端已改为小米 MiMo
+    service.apply_config()
     service.say_now("整点报时")
 
     assert _WorkerSpy.instances == []
@@ -797,10 +801,9 @@ def test_tts_worker_reports_missing_edge_tts_instead_of_raising(tmp_path, monkey
     seen: list = []
     worker = svc_mod._TTSWorker(
         "现在是上午九点整。",
-        "zh-CN-XiaoxiaoNeural",
-        "+0%",
-        "+0Hz",
-        tmp_path / "chime.mp3",
+        ({"backend": "edge", "voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%",
+          "pitch": "+0Hz", "ext": "mp3"},),
+        (tmp_path / "chime.mp3",),
         lambda path, text, error: seen.append((path, text, error)),
     )
 
@@ -816,8 +819,8 @@ def test_service_bubbles_install_hint_when_edge_tts_import_fails(tmp_path, monke
     service, app, _cfg = _service(tmp_path, monkeypatch)
 
     class _MissingWorker:
-        def __init__(self, text, voice, rate, pitch, out_path, on_done) -> None:
-            self._out_path = out_path
+        def __init__(self, text, attempts, paths, on_done) -> None:
+            self._out_path = paths[0]
             self._on_done = on_done
 
         def start(self) -> None:

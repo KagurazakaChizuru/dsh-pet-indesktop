@@ -69,6 +69,11 @@ def test_default_chime_config_has_all_flat_keys():
         "voice_chime_show_quote",
         "voice_chime_custom_quotes_zh",
         "voice_chime_custom_quotes_en",
+        "voice_chime_tts_backend",
+        "voice_chime_tts_fallback",
+        "voice_chime_mimo_model",
+        "voice_chime_mimo_voice",
+        "voice_chime_mimo_style",
     }
     assert cfg["voice_chime_schedule"] in SCHEDULE_KEYS
     assert cfg["voice_chime_enabled"] is False  # 默认关闭：主动打扰型功能，用户显式开启

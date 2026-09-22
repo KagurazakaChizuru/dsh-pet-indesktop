@@ -132,11 +132,16 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "voice_chime_custom_quotes_zh",
         "voice_chime_custom_times",
         "voice_chime_enabled",
+        "voice_chime_mimo_model",
+        "voice_chime_mimo_style",
+        "voice_chime_mimo_voice",
         "voice_chime_pitch",
         "voice_chime_rate",
         "voice_chime_schedule",
         "voice_chime_show_bubble",
         "voice_chime_show_quote",
+        "voice_chime_tts_backend",
+        "voice_chime_tts_fallback",
         "festival_birthday",
         "festival_custom_quotes_cn",
         "festival_custom_quotes_west",
@@ -161,7 +166,9 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
 # 2026-09-19 加入 file_interpret（拖文件解读，嵌套 dict 走 _merge_ 专门路径）。
 SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "chat", "file_interpret"})
 
-# 默认值 dict 键集合现状快照（126 键）= 白名单 ∪ 特例键。
+# 默认值 dict 键集合现状快照（131 键）= 白名单 ∪ 特例键。
+# 2026-09-22 加入语音报时合成后端 5 键（tts_backend / tts_fallback / mimo_model /
+# mimo_voice / mimo_style）：白名单 126 + 特例 5 = 131。
 # 2026-09-19 合并 origin/main（#150）后实测：白名单 121 + 特例 5 = 126。
 # （本分支的 music_player_paths / festival_reminder_animation / festival_birthday
 # 与上游 #140/#150 的 file_interpret 等新增键叠加后的结果。）

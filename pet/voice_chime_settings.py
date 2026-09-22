@@ -5,7 +5,14 @@
     voice_chime_enabled / voice_chime_schedule / voice_chime_custom_times /
     voice_chime_voice / voice_chime_rate / voice_chime_pitch / voice_chime_volume /
     voice_chime_show_bubble / voice_chime_show_quote /
-    voice_chime_custom_quotes_zh / voice_chime_custom_quotes_en
+    voice_chime_custom_quotes_zh / voice_chime_custom_quotes_en /
+    voice_chime_tts_backend / voice_chime_tts_fallback /
+    voice_chime_mimo_model / voice_chime_mimo_voice / voice_chime_mimo_style
+
+合成后端可切换：edge-tts（微软在线，免 Key）或小米 MiMo TTS（需 API Key，存
+系统钥匙串，见 pet/tts_secrets.py）；主后端失败时可自动回退 edge。切到 MiMo 时
+edge 专属的「音色 / 语速 / 音调」三行隐藏（它们对 MiMo 无意义），MiMo 的模型 /
+音色 / 风格指令 / API Key 四行显示。
 
 台词/歌词按本地时间每 8 小时整体换一批（0-8 / 8-16 / 16-24 各对应库中一批，
 跨周期切到新批次），同一周期内每次报时在批次内按顺序轮换取不同条目；自定义
@@ -22,6 +29,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
@@ -29,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import tts_secrets
 from .modern_settings_dialog import (
     BrowserSpinBox,
     SettingRow,
@@ -37,15 +46,30 @@ from .modern_settings_dialog import (
 )
 from .settings_widgets import ModernSelect
 from .voice_chime import (
+    BACKENDS,
+    BACKEND_LABELS,
+    BACKEND_MIMO,
+    DEFAULT_BACKEND,
+    DEFAULT_MIMO_MODEL,
+    DEFAULT_MIMO_STYLE,
+    DEFAULT_MIMO_VOICE,
     DEFAULT_PITCH,
     DEFAULT_RATE,
     DEFAULT_SHOW_BUBBLE,
     DEFAULT_SHOW_QUOTE,
+    DEFAULT_TTS_FALLBACK,
     DEFAULT_VOICE,
     DEFAULT_VOLUME,
+    MIMO_MODELS,
+    MIMO_VOICE_OPTIONS,
     SCHEDULE_KEYS,
     SCHEDULE_LABELS,
     VOICE_OPTIONS,
+    clean_backend,
+    clean_flag,
+    clean_mimo_model,
+    clean_mimo_style,
+    clean_mimo_voice,
     clean_pitch,
     clean_rate,
     clean_schedule,
@@ -57,6 +81,14 @@ from .voice_chime import (
 def _sync_voice_select(select: ModernSelect, config) -> None:
     """按配置值刷新音色下拉：配置音色不在预设列表时追加“自定义”项并选中。"""
     current = clean_voice(config.get("voice_chime_voice", DEFAULT_VOICE))
+    if select.findData(current) < 0:
+        select.addItem(f"自定义：{current}", current)
+    select.setCurrentData(current)
+
+
+def _sync_mimo_voice_select(select: ModernSelect, config) -> None:
+    """MiMo 音色下拉：配置值不在预设列表（如音色克隆/自定义）时追加一项。"""
+    current = clean_mimo_voice(config.get("voice_chime_mimo_voice", DEFAULT_MIMO_VOICE))
     if select.findData(current) < 0:
         select.addItem(f"自定义：{current}", current)
     select.setCurrentData(current)
@@ -88,10 +120,61 @@ class VoiceChimeSettingsPage(QWidget):
         self.schedule_select.currentIndexChanged.connect(self._refresh_custom_enabled)
 
         # ---- 语音 ----
+        # 合成后端：edge-tts（免 Key）或小米 MiMo（需 API Key）
+        self.backend_select = ModernSelect(self, width=230)
+        for key in BACKENDS:
+            self.backend_select.addItem(BACKEND_LABELS[key], key)
+        self.backend_select.setCurrentData(
+            clean_backend(self.config.get("voice_chime_tts_backend", DEFAULT_BACKEND))
+        )
+
+        self.fallback_check = ToggleSwitch(self)
+        self.fallback_check.setChecked(
+            clean_flag(
+                self.config.get("voice_chime_tts_fallback", DEFAULT_TTS_FALLBACK),
+                DEFAULT_TTS_FALLBACK,
+            )
+        )
+
+        self.mimo_model_select = ModernSelect(self, width=230)
+        for value, label in MIMO_MODELS:
+            self.mimo_model_select.addItem(label, value)
+        self.mimo_model_select.setCurrentData(
+            clean_mimo_model(self.config.get("voice_chime_mimo_model", DEFAULT_MIMO_MODEL))
+        )
+
+        self.mimo_voice_select = ModernSelect(self, width=230)
+        for value, label in MIMO_VOICE_OPTIONS:
+            self.mimo_voice_select.addItem(label, value)
+        _sync_mimo_voice_select(self.mimo_voice_select, self.config)
+
+        self.mimo_style_edit = QLineEdit(self)
+        self.mimo_style_edit.setText(
+            clean_mimo_style(self.config.get("voice_chime_mimo_style", DEFAULT_MIMO_STYLE))
+        )
+        self.mimo_style_edit.setPlaceholderText("如：轻快、带点笑意，语速稍快（留空按模型默认）")
+
+        # API Key：只写系统钥匙串，绝不落 config.json；留空 = 不改动已保存的 Key。
+        self.mimo_key_edit = QLineEdit(self)
+        self.mimo_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.mimo_key_edit.setPlaceholderText("粘贴 MiMo API Key（留空不变）")
+        self.mimo_key_clear_btn = QPushButton("清除", self)
+        self.mimo_key_clear_btn.setToolTip("清除已保存的 API Key")
+        self.mimo_key_clear_btn.clicked.connect(self._on_mimo_key_clear)
+        self._mimo_key_cleared = False
+        self.mimo_key_box = QWidget(self)
+        key_layout = QHBoxLayout(self.mimo_key_box)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_layout.setSpacing(8)
+        key_layout.addWidget(self.mimo_key_edit)
+        key_layout.addWidget(self.mimo_key_clear_btn)
+
         self.voice_select = ModernSelect(self, width=230)
         for value, label in VOICE_OPTIONS:
             self.voice_select.addItem(label, value)
         _sync_voice_select(self.voice_select, self.config)
+        self.backend_select.currentIndexChanged.connect(self._refresh_backend_controls)
+        self.mimo_model_select.currentIndexChanged.connect(self._refresh_backend_controls)
 
         # 速率/音调/音量一律走纯逻辑层清洗：config.json 被手改成非法值时
         # 回落默认值，绝不让设置页在构造期抛异常把用户挡在设置界面之外。
@@ -139,6 +222,45 @@ class VoiceChimeSettingsPage(QWidget):
         self.preview_btn.setToolTip("按当前配置立即播报一句报时+台词（无需等待报时点）")
         self.preview_btn.clicked.connect(self._on_preview_clicked)
 
+        # ---- 行对象：切后端时按需显隐（行必须留着引用才收得回来）----
+        self.edge_voice_row = SettingRow(
+            "voice_chime_voice",
+            "音色",
+            "edge-tts 专属：内置 20+ 款中英文音色；配置值不在列表时自动追加“自定义”项。",
+            self.voice_select,
+        )
+        self.edge_rate_row = SettingRow(
+            "voice_chime_rate", "语速", "edge-tts 专属：语速偏移百分比，0 为正常。", self.rate_spin
+        )
+        self.edge_pitch_row = SettingRow(
+            "voice_chime_pitch", "音调", "edge-tts 专属：音调偏移（Hz），0 为正常。", self.pitch_spin
+        )
+        self.mimo_model_row = SettingRow(
+            "voice_chime_mimo_model",
+            "MiMo 模型",
+            "内置音色：直接选音色；音色设计：用「风格指令」里的文字描述生成音色（无需样本）。",
+            self.mimo_model_select,
+        )
+        self.mimo_voice_row = SettingRow(
+            "voice_chime_mimo_voice",
+            "MiMo 音色",
+            "小米内置音色（中文：冰糖 / 茉莉 / 苏打 / 白桦；英文：Mia / Chloe / Milo / Dean）。",
+            self.mimo_voice_select,
+        )
+        self.mimo_style_row = SettingRow(
+            "voice_chime_mimo_style",
+            "风格指令",
+            "可选：用一句自然语言描述语气/情绪/节奏（如「温柔但有点疲惫」）。"
+            "选「音色设计」模型时这里是必填的音色描述。",
+            self.mimo_style_edit,
+        )
+        self.mimo_key_row = SettingRow(
+            "voice_chime_mimo_api_key",
+            "MiMo API Key",
+            "在 platform.xiaomimimo.com 生成；只存系统钥匙串，不写进配置文件。留空表示不改动已保存的 Key。",
+            self.mimo_key_box,
+        )
+
         # ---- Layout ----
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -158,16 +280,38 @@ class VoiceChimeSettingsPage(QWidget):
 
         root.addWidget(
             SettingsSection(
-                "语音",
+                "合成后端",
                 [
                     SettingRow(
-                        "voice_chime_voice",
-                        "音色",
-                        "内置 20+ 款中英文音色（edge-tts 在线合成，无需 API Key）；配置值不在列表时自动追加“自定义”项。",
-                        self.voice_select,
+                        "voice_chime_tts_backend",
+                        "语音引擎",
+                        "edge-tts：微软在线音色，免 Key；小米 MiMo：音色更自然、支持情绪/风格指令，"
+                        "需要在 platform.xiaomimimo.com 申请 API Key（下方填入，存系统钥匙串）。",
+                        self.backend_select,
                     ),
-                    SettingRow("voice_chime_rate", "语速", "语速偏移百分比：0 为正常，正数更快，负数更慢。", self.rate_spin),
-                    SettingRow("voice_chime_pitch", "音调", "音调偏移（Hz）：0 为正常，正数更尖锐，负数更低沉。", self.pitch_spin),
+                    SettingRow(
+                        "voice_chime_tts_fallback",
+                        "失败自动回退",
+                        "主引擎合成失败（没配 Key / 网络不通 / 接口报错）时自动改用 edge-tts，"
+                        "两个都不行才只显示气泡不出声。",
+                        self.fallback_check,
+                    ),
+                    self.mimo_model_row,
+                    self.mimo_voice_row,
+                    self.mimo_style_row,
+                    self.mimo_key_row,
+                ],
+                self,
+            )
+        )
+
+        root.addWidget(
+            SettingsSection(
+                "语音",
+                [
+                    self.edge_voice_row,
+                    self.edge_rate_row,
+                    self.edge_pitch_row,
                     SettingRow("voice_chime_volume", "音量", "报时播放音量（0-100）。", self.volume_spin),
                     SettingRow("voice_chime_show_bubble", "报时气泡", "报时时在桌宠头顶显示气泡文字（含台词/歌词）。", self.bubble_check),
                     SettingRow("voice_chime_show_quote", "台词/歌词", "报时时附带台词/歌词（每 8 小时整体换一批，同周期内每次报时按序取不同条目）；关闭后仅播报时间文本。", self.quote_check),
@@ -205,6 +349,7 @@ class VoiceChimeSettingsPage(QWidget):
         )
 
         self._refresh_custom_enabled()
+        self._refresh_backend_controls()
 
     # ------------------------------------------------------------ 交互
     def _on_preview_clicked(self) -> None:
@@ -216,9 +361,38 @@ class VoiceChimeSettingsPage(QWidget):
         is_custom = self.schedule_select.currentData() == "custom"
         self.custom_edit.setEnabled(is_custom)
 
+    def _refresh_backend_controls(self) -> None:
+        """按当前后端显隐参数行：edge 的语速/音调对 MiMo 无意义，反之亦然。"""
+        backend = clean_backend(self.backend_select.currentData() or DEFAULT_BACKEND)
+        is_mimo = backend == BACKEND_MIMO
+        for row in (self.edge_voice_row, self.edge_rate_row, self.edge_pitch_row):
+            row.setVisible(not is_mimo)
+        for row in (self.mimo_model_row, self.mimo_voice_row, self.mimo_style_row, self.mimo_key_row):
+            row.setVisible(is_mimo)
+        # 音色设计模型不用选内置音色（音色由风格指令描述生成）
+        voicedesign = clean_mimo_model(self.mimo_model_select.currentData()) != MIMO_MODELS[0][0]
+        self.mimo_voice_row.setVisible(is_mimo and not voicedesign)
+        self._refresh_mimo_key_hint()
+
+    def _on_mimo_key_clear(self) -> None:
+        """清除已保存的 Key：立即生效（服务下一次合成即读不到）。"""
+        tts_secrets.clear(tts_secrets.MIMO_API_KEY_REF)
+        self.mimo_key_edit.clear()
+        self._mimo_key_cleared = True
+        self._refresh_mimo_key_hint()
+
+    def _refresh_mimo_key_hint(self) -> None:
+        saved = bool(tts_secrets.get(tts_secrets.MIMO_API_KEY_REF))
+        state = "已保存" if saved else "未设置"
+        where = "系统钥匙串" if tts_secrets.available() else "本次运行（钥匙串不可用）"
+        self.mimo_key_row.hint_label.setText(
+            f"API Key：{state}（{where}）；在 platform.xiaomimimo.com 生成，"
+            "只存系统钥匙串、不写进配置文件。留空表示不改动已保存的 Key。"
+        )
+
     # ------------------------------------------------------------ 配置读写
     def apply_to_config(self) -> None:
-        """把控件值合并写回 config（仅写语音报时 11 键）。"""
+        """把控件值合并写回 config（语音报时 16 键；API Key 只进钥匙串）。"""
         if self.config is None:
             return
         self.config.set("voice_chime_enabled", self.enabled_check.isChecked())
@@ -232,3 +406,24 @@ class VoiceChimeSettingsPage(QWidget):
         self.config.set("voice_chime_show_quote", self.quote_check.isChecked())
         self.config.set("voice_chime_custom_quotes_zh", self.custom_zh_edit.toPlainText().strip())
         self.config.set("voice_chime_custom_quotes_en", self.custom_en_edit.toPlainText().strip())
+        self.config.set("voice_chime_tts_backend", clean_backend(self.backend_select.currentData()))
+        self.config.set("voice_chime_tts_fallback", self.fallback_check.isChecked())
+        self.config.set("voice_chime_mimo_model", clean_mimo_model(self.mimo_model_select.currentData()))
+        self.config.set(
+            "voice_chime_mimo_voice", clean_mimo_voice(self.mimo_voice_select.currentData())
+        )
+        self.config.set("voice_chime_mimo_style", clean_mimo_style(self.mimo_style_edit.text()))
+        self._apply_mimo_key()
+
+    def _apply_mimo_key(self) -> None:
+        """API Key 的写入口：非空即保存（钥匙串优先），输入框随即清空。
+
+        空输入 + 未按过「清除」= 不改动已保存的 Key（避免每次保存设置都把已存
+        的 Key 抹掉）；按过「清除」则保持已清除状态。
+        """
+        text = self.mimo_key_edit.text().strip()
+        if text:
+            tts_secrets.set(tts_secrets.MIMO_API_KEY_REF, text)
+            self.mimo_key_edit.clear()
+            self._mimo_key_cleared = False
+        self._refresh_mimo_key_hint()
