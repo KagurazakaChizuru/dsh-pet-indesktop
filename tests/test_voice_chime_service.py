@@ -892,3 +892,53 @@ def test_queued_fire_discarded_after_stop(tmp_path, monkeypatch):
 
     assert played == []
     assert len(_WorkerSpy.instances) == workers_before, "stop 后不得补播排队项"
+
+
+# ------------------------------------------------------------ 半截缓存文件
+
+def test_empty_cache_file_is_not_treated_as_hit(tmp_path, monkeypatch):
+    """0 字节缓存不算命中：否则播出一声静音且永远不再重合成。"""
+    service, app, _cfg = _service(tmp_path, monkeypatch)
+    service.apply_config()
+    sentence = "现在是上午九点整。半截缓存"
+    attempts = service._usable_attempts()
+    assert attempts, "默认配置下至少要有一条可用尝试"
+    cache_dir = service._cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stale = service._cache_path(sentence, attempts[0])
+    stale.write_bytes(b"")
+
+    service.say_now(sentence)
+
+    assert _WorkerSpy.instances, "空文件不得当命中，必须重新合成"
+    assert _WorkerSpy.instances[-1].paths[0] == stale, "重合成写回同一个缓存路径"
+    assert service._player.plays == 0, "不得把空文件当缓存播放"
+
+
+def test_failed_synthesis_discards_partial_file(tmp_path, monkeypatch):
+    """合成失败留下的半截产物必须删掉，别让下一次把它当缓存命中。"""
+    import pet.voice_chime_service as svc_mod
+    from pet import tts
+
+    # 直接构造真实 worker（本用例不经过 _service，那里的 _WorkerSpy 替身没有 run）
+    out = tmp_path / "partial.mp3"
+
+    def fake_synth(text, plan, out_path):
+        Path(out_path).write_bytes(b"PARTIAL")
+        raise RuntimeError("连接中断")
+
+    monkeypatch.setattr(tts.get("edge"), "synth", fake_synth)
+
+    errors: list[str] = []
+    svc_mod._TTSWorker(
+        "现在是上午九点整。",
+        (svc_mod.tts.TtsAttempt(provider="edge",
+                                values={"voice": "zh-CN-XiaoxiaoNeural", "rate": 0, "pitch": 0},
+                                plan={"provider": "edge", "voice": "zh-CN-XiaoxiaoNeural",
+                                      "rate": "+0%", "pitch": "+0Hz", "ext": "mp3"}),),
+        (out,),
+        lambda path, text, error: errors.append(error),
+    ).run()
+
+    assert errors and "连接中断" in errors[0]
+    assert not out.exists(), "失败产物必须被清掉"

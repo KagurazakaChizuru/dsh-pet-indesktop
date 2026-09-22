@@ -96,10 +96,15 @@ class _TTSWorker(threading.Thread):
                 provider.synth(self._text, attempt.plan, path)
             except tts.TtsUnavailable as exc:
                 # provider 在合成时才发现自己不可用（缺库 / 缺 Key）
+                self._discard_partial(path)
                 errors.append(exc.code or provider.availability_code)
                 logger.warning("%s 当前不可用（%s），尝试下一个合成后端", provider.id, exc)
                 continue
             except Exception as exc:  # noqa: BLE001 —— 单个后端失败不该终止整条链
+                # 失败产物必须清掉：provider 多半是先建文件再写（edge_tts.save 就是），
+                # 半截/0 字节文件留在缓存目录会被后续 exists() 判定成"已有缓存"，
+                # 播出来是一声静音且再也不重合成。
+                self._discard_partial(path)
                 errors.append(f"{type(exc).__name__}: {exc}")
                 logger.warning("%s 合成失败：%s", provider.id, exc)
                 continue
@@ -107,6 +112,14 @@ class _TTSWorker(threading.Thread):
             return
         fallback_path = str(self._paths[0]) if self._paths else ""
         self._on_done(fallback_path, self._text, "|".join(errors) or "没有可用的合成后端")
+
+    @staticmethod
+    def _discard_partial(path) -> None:
+        """删掉失败留下的半截产物（best-effort：删不掉也不该影响回退）。"""
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            logger.debug("清理半截合成产物失败：%s", path)
 
 
 class _AudioBridge:
@@ -329,7 +342,7 @@ class VoiceChimeService:
         bubble = build_bubble_sentence(next_at, self._cfg)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         paths = [self._cache_path(sentence, attempt) for attempt in attempts]
-        cached = next((path for path in paths if path.exists()), None)
+        cached = next((path for path in paths if self._cache_hit(path)), None)
         # 先占位：即便本次合成未在报时点前完成，到点也会回退即时合成。
         self._precache_slot = next_slot
         self._precache_text = sentence
@@ -407,6 +420,18 @@ class VoiceChimeService:
         key = cache_key(text, self._cfg, provider_id=attempt.provider)
         return self._cache_dir / f"{key}.{attempt.ext}"
 
+    @staticmethod
+    def _cache_hit(path: Path) -> bool:
+        """缓存命中判定：文件存在**且非空**。
+
+        只判 exists() 不够——失败的合成会留下 0 字节/半截文件，那会被当成"已有缓存"，
+        于是播出静音且不再重新合成（实机在缓存目录里抓到过 0 字节的 mp3）。
+        """
+        try:
+            return path.is_file() and path.stat().st_size > 0
+        except OSError:
+            return False
+
     # ------------------------------------------------------------ 播报
     def _fire(self, sentence: str, now: datetime, bubble_text: str | None = None,
               *, show_bubble: bool = True, role: str = "play") -> None:
@@ -428,7 +453,7 @@ class VoiceChimeService:
         # 缓存命中（含预合成已完成）直接播放，零网络延迟；合成中不阻塞缓存播放。
         # 逐个后端查缓存：主后端没缓存而后备（上次回退时）有，也能直接命中。
         for path in paths:
-            if path.exists():
+            if self._cache_hit(path):
                 if show_bubble:
                     self._play_and_bubble(str(path), sentence, bubble)
                 else:
