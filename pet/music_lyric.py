@@ -9,6 +9,12 @@
 
 三个源都是明文 HTTP 接口，无需加密，也不下载任何音频（单曲响应约 10 KB）。
 
+**网络边界：歌词请求一律直连，不走系统代理。** 三个源都是公开接口、其中两个还是
+国内域名，走系统代理只会多绕一段路；2026-09-22 实机事故里，用户开着全局代理时
+三个源单次耗时 20~41 秒（全部超过 ``HTTP_TIMEOUT``），于是每首未缓存曲目都以
+「0 行」收场，看起来就像歌词功能被改坏了（详见
+``docs/PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md``）。
+
 缓存放数据目录下的 ``lyrics_cache/``，只存歌词文本，不存音频、不存收听历史；
 条目数超过上限时按文件修改时间淘汰最旧的。用户可在设置页一键清空。
 
@@ -29,27 +35,10 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import http_util
-
 log = logging.getLogger(__name__)
 
 # 缓存条目上限：按实测量级约 10 KB/首，2000 首 ≈ 21 MB。
-# 实际生效值由 `music_lyric_cache_limit` 配置经 :func:`set_cache_limit` 覆盖。
 CACHE_LIMIT = 2000
-_cache_limit = CACHE_LIMIT
-# 上次"全部源取词失败"的原因签名：同一原因只 WARNING 一次（见 _report_source_failures）。
-_last_failure_sig: tuple | None = None
-
-
-def set_cache_limit(limit: int | None) -> None:
-    """按配置调整缓存上限（非法值保持原值；下限 50 防止把缓存压成 0）。"""
-    global _cache_limit
-    try:
-        _cache_limit = max(50, int(limit))
-    except (TypeError, ValueError):
-        return
-
-
 # 单个 HTTP 请求超时（秒）。歌词是锦上添花，宁可失败也不要长时间挂住后台线程。
 HTTP_TIMEOUT = 8.0
 # 缓存格式版本：解析逻辑变更时可据此失效旧缓存。
@@ -218,17 +207,15 @@ def _write_cache(title: str, artist: str, lyrics: Lyrics, limit: int | None = No
     except Exception:
         log.debug("写入歌词缓存失败: %s", path, exc_info=True)
         return
-    _prune_cache(limit)
+    _prune_cache(CACHE_LIMIT if limit is None else limit)
 
 
-def _prune_cache(limit: int | None = None) -> None:
+def _prune_cache(limit: int = CACHE_LIMIT) -> None:
     """条目超上限时，按修改时间淘汰最旧的若干条（LRU 近似）。
 
-    两种口径都支持：调用方显式传值（``fetch_lyrics(cache_limit=…)`` / ``_write_cache``）；
-    不传则用配置生效值（``music_lyric_cache_limit`` → :func:`set_cache_limit`）。
+    ``limit`` 由调用方决定：生产路径传配置里的 ``music_lyric_cache_limit``
+    （见 :func:`fetch_lyrics` 的 ``cache_limit``），不传则用模块默认。
     """
-    if limit is None:
-        limit = _cache_limit
     try:
         entries = [p for p in cache_dir().glob("*.json") if p.is_file()]
         if len(entries) <= limit:
@@ -245,38 +232,70 @@ def _prune_cache(limit: int | None = None) -> None:
 
 # ---------------------------------------------------------------- 网络
 
+# 「绕过了系统代理」这件事每个进程只记一行（见 _note_proxy_bypass_once）。
+_proxy_bypass_logged = False
 
-def _http_read(url: str, *, referer: str | None) -> bytes:
-    """发起一次请求并读回字节；失败抛异常（[测试接缝]）。
 
-    传输层的「系统代理不通就改直连」兜底统一在 :mod:`pet.http_util`（歌词、余额、
-    识屏、AI 对话、更新检查共用同一份进程内结论）：2026-09-17 实机 Windows 系统代理
-    （IE/WinINET 设置）被加速器打开、进程却没在跑，`urllib` 仍照着它走 → 歌词三个源
-    **全部连接被拒** → 每首歌都被记成"无词" → 气泡只剩歌名（用户原话"显示一半就剩
-    歌名了"）。
+def _host_of(url: str) -> str:
+    """取 URL 的主机名，供日志定位（解析失败时回退成原串）。"""
+    try:
+        return urllib.parse.urlsplit(url).hostname or url
+    except Exception:
+        return url
+
+
+def _build_opener():
+    """歌词请求专用 opener：**显式禁用系统代理**（直连）。
+
+    为什么不用 ``urllib.request.urlopen``：它会自动套用系统代理
+    （Windows 注册表 / 环境变量，``urllib.request.getproxies()``）。用户开着
+    全局模式 VPN 时，本机实测三个源单次耗时变成 41.3 / 22.1 / 20.4 秒，全部
+    超过 ``HTTP_TIMEOUT``（8 秒），于是 ``fetch_lyrics`` 每次都在 9 秒死线处
+    放弃、返回「0 行」——表现就是"歌词功能坏了"（2026-09-22 实机事故）。
+
+    直连这三个公开接口实测 0.25~3.5 秒，与代理是否开启无关，行为可预期。
+
+    构造开销实测 122us/次，故每次请求现建、不缓存：用户中途开关代理不会
+    带出陈旧状态，也免掉跨线程共享 opener 的同步问题。
     """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _note_proxy_bypass_once() -> None:
+    """检测到系统代理时记一行 INFO，说明歌词请求改走直连。
+
+    排查这类"听起来像功能坏了"的问题，第一眼就该看出网络走了哪条路：
+    原先失败原因只写 ``log.debug``，而应用是 ``basicConfig(level=INFO)``，
+    日志里只剩「0行, 耗时 9.00s」，根因被静默吞掉。
+    """
+    global _proxy_bypass_logged
+    if _proxy_bypass_logged:
+        return
+    try:
+        proxies = urllib.request.getproxies()
+    except Exception:
+        return
+    _proxy_bypass_logged = True
+    if proxies:
+        log.info("歌词请求直连：已绕过系统代理 %s",
+                 ", ".join(sorted({str(v) for v in proxies.values() if v})))
+
+
+def _open_direct(request: urllib.request.Request, *, timeout: float):
+    """用直连 opener 发请求（见 :func:`_build_opener`）。"""
+    _note_proxy_bypass_once()
+    return _build_opener().open(request, timeout=timeout)
+
+
+def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | None:
     headers = {"User-Agent": _UA}
     if referer:
         headers["Referer"] = referer
     request = urllib.request.Request(url, headers=headers)
-    with http_util.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-        return response.read()
-
-
-def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | None:
-    """GET 一个 JSON 接口（代理/直连兜底见 :func:`_http_read`）。
-
-    服务器明确答复（HTTPError 4xx/5xx）说明链路本来就是通的，本次就当"没有结果"，
-    不重试、也不改传输方式。
-    """
+    started = time.monotonic()
     try:
-        raw = _http_read(url, referer=referer)
-    except urllib.error.HTTPError:
-        return None
-    except Exception as exc:  # noqa: BLE001 - 传输失败：本次没有结果，交给上层换源
-        log.debug("歌词请求失败: %s (%r)", url, exc)
-        return None
-    try:
+        with _open_direct(request, timeout=HTTP_TIMEOUT) as response:
+            raw = response.read()
         # 部分接口返回 JSONP，剥掉外层包裹后再解析。
         text = raw.decode("utf-8", "replace").strip()
         if not text.startswith(("{", "[")):
@@ -285,8 +304,12 @@ def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | Non
             if start != -1 and end > start:
                 text = text[start + 1:end]
         return json.loads(text)
-    except Exception:
-        log.debug("歌词响应解析失败: %s", url, exc_info=True)
+    except Exception as exc:
+        # 必须落在 INFO 可见的级别：取词失败时日志里只有「0 行」会被误当成
+        # "功能坏了"，这里把主机、耗时与异常类型留下（含超时 / 连接被拒）。
+        log.warning("歌词请求失败 %s（%.2fs）: %s: %s",
+                    _host_of(url), time.monotonic() - started,
+                    type(exc).__name__, exc)
         return None
 
 
@@ -297,50 +320,6 @@ def _name_matches(candidate: str, wanted: str) -> bool:
     if not a or not b:
         return False
     return a in b or b in a
-
-
-# 版本噪声词：同名候选中优先挑"录音室原版"，别拿现场/重制/伴奏版的时间轴去对原曲。
-_VERSION_NOISE = (
-    "live", "现场", "演唱会", "remix", "混音", "伴奏", "instrumental",
-    "cover", "翻唱", "纯音乐", "karaoke", "dj",
-)
-
-
-def _normalize_name(name: str) -> str:
-    """歌名归一：小写、去掉括号补充说明（(Live)/（现场版）/(feat. …)）与空白符号。"""
-    text = str(name or "").lower()
-    text = re.sub(r"[（(\[].*?[)）\]]", " ", text)
-    text = re.sub(r"\b(feat|ft|featuring)\b.*$", " ", text)
-    return re.sub(r"[\s\-–—_·・.、,，]+", "", text)
-
-
-def _title_matches(candidate: str, wanted: str) -> bool:
-    """歌名匹配：归一后相等或互为子串（"十年" 命中 "十年 (《…》插曲)"）。"""
-    a, b = _normalize_name(candidate), _normalize_name(wanted)
-    if not a or not b:
-        return False
-    return a == b or a in b or b in a
-
-
-def _pick_song(candidates, title: str, artist: str):
-    """从搜索结果里挑一首歌，返回其 payload（挑不到返回 ``None``）。
-
-    ``candidates`` 是可迭代的 ``(歌名, 歌手串, payload)``。**歌名与歌手都必须匹配**：
-    原实现只校验歌手，同歌手的别的歌/现场版都可能被选中——实机候选中紧跟着
-    「十年 (Live)」「富士山下 (Live)」，一旦正确版本不在第一位，取到的歌词时间轴
-    就整首对不上。同分时优先非现场/非重制/非伴奏版本，其次取归一后更贴近目标的。
-    """
-    best = None
-    best_score = None
-    for song_name, singers, payload in candidates:
-        if not _name_matches(singers, artist) or not _title_matches(song_name, title):
-            continue
-        noise = any(token in str(song_name).lower() for token in _VERSION_NOISE)
-        exact = _normalize_name(song_name) == _normalize_name(title)
-        score = (0 if noise else 1, 1 if exact else 0)
-        if best_score is None or score > best_score:
-            best, best_score = payload, score
-    return best
 
 
 def _as_lyrics(lines: list[LyricLine]) -> Lyrics | None:
@@ -400,18 +379,14 @@ def _fetch_from_qq(title: str, artist: str) -> Lyrics | None:
     if not isinstance(search, dict):
         return None
     songs = ((search.get("data") or {}).get("song") or {}).get("list") or []
-    songmid = _pick_song(
-        (
-            (
-                str(song.get("songname") or song.get("title") or ""),
-                "/".join(str(s.get("name") or "") for s in (song.get("singer") or [])),
-                song.get("songmid"),
-            )
-            for song in songs
-        ),
-        title,
-        artist,
-    )
+    songmid = None
+    for song in songs:
+        singers = "/".join(
+            str(s.get("name") or "") for s in (song.get("singer") or [])
+        )
+        if _name_matches(singers, artist):
+            songmid = song.get("songmid")
+            break
     if not songmid:
         return None
     payload = _http_get_json(
@@ -450,18 +425,14 @@ def _fetch_from_netease(title: str, artist: str) -> Lyrics | None:
     if not isinstance(search, dict):
         return None
     songs = ((search.get("result") or {}).get("songs")) or []
-    song_id = _pick_song(
-        (
-            (
-                str(song.get("name") or ""),
-                "/".join(str(a.get("name") or "") for a in (song.get("artists") or [])),
-                song.get("id"),
-            )
-            for song in songs
-        ),
-        title,
-        artist,
-    )
+    song_id = None
+    for song in songs:
+        singers = "/".join(
+            str(a.get("name") or "") for a in (song.get("artists") or [])
+        )
+        if _name_matches(singers, artist):
+            song_id = song.get("id")
+            break
     if not song_id:
         return None
     payload = _http_get_json(
@@ -525,7 +496,6 @@ def fetch_lyrics(
         ]
         rank = {name: index for index, (name, _) in enumerate(_SOURCES)}
         found: dict[str, Lyrics] = {}
-        failures: dict[str, BaseException] = {}
         deadline = time.monotonic() + HTTP_TIMEOUT + 1.0
         grace_until = time.monotonic() + _PRIORITY_GRACE
 
@@ -546,8 +516,7 @@ def fetch_lyrics(
                     continue
                 try:
                     lines = future.result()
-                except Exception as exc:
-                    failures[name] = exc
+                except Exception:
                     log.debug("歌词源 %s 异常", name, exc_info=True)
                     continue
                 if lines is not None:
@@ -560,7 +529,6 @@ def fetch_lyrics(
             if found and time.monotonic() >= grace_until:
                 break
 
-        _report_source_failures(failures, title, artist)
         best = _best_found(found, rank)
         if best is not None:
             _write_cache(title, artist, best, cache_limit)
@@ -568,40 +536,6 @@ def fetch_lyrics(
     finally:
         # 不等剩余请求收尾：已经拿到结果，慢源在后台自然结束即可。
         executor.shutdown(wait=False)
-
-
-def _report_source_failures(
-    failures: dict[str, BaseException], title: str, artist: str
-) -> None:
-    """把"取词失败"从 DEBUG 提到可见级别（同因只警告一次，避免每首歌刷屏）。
-
-    审计发现：源异常只落 ``log.debug``，而发布版日志级别是 INFO ⇒ 用户遇到
-    "歌词一直没有"时日志里什么都看不到，只能靠猜。约定：
-    - 全部源都失败 = 环境/网络问题（例如系统代理指向一个没在跑的进程）→ WARNING；
-      完全相同的失败原因只警告一次，后续降到 DEBUG，避免整张歌单刷屏。
-    - 部分源失败但拿到了结果 = 正常降级 → INFO。
-    - 没有任何异常（各源都"没有这首词"）= 正常情况 → 不打扰。
-    """
-    global _last_failure_sig
-    if not failures:
-        _last_failure_sig = None  # 恢复正常：下次再失败时重新警告
-        return
-    detail = "；".join(
-        "%s: %s: %s" % (name, type(exc).__name__, exc)
-        for name, exc in sorted(failures.items())
-    )
-    if len(failures) >= len(_SOURCES):
-        sig = (tuple(sorted(failures)), tuple(sorted(type(e).__name__ for e in failures.values())))
-        if sig != _last_failure_sig:
-            _last_failure_sig = sig
-            log.warning(
-                "歌词全部源取词失败（%s《%s》）：%s",
-                artist or "未知歌手", title or "未知歌名", detail,
-            )
-        else:
-            log.debug("歌词全部源仍取词失败：%s", detail)
-        return
-    log.info("部分歌词源取词失败（%d/%d）：%s", len(failures), len(_SOURCES), detail)
 
 
 def _best_found(

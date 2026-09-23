@@ -188,3 +188,92 @@
   服务层一次性提示。全部不打网络（edge_tts 用替身）。
 - 实机复核：用她配置的那款已下线音色跑 provider，现在会**自动改用晓晓并合成出音频**（不再静音）。
 - `ruff` 干净；全量 pytest 通过（见 §七.4 的同类口径）。
+
+## 九、修改文件说明（交付证据 A）
+
+> 本节按 `docs/PR-REPORT-TEMPLATE.md` 补齐（`tests/test_pr_report_discipline.py` 机器校验）：
+> 逐文件写清「这个文件为什么被改、改动落在哪条设计线上」。§三 是功能视角的清单，
+> 这里补的是**评审视角**：哪几个文件是新增的能力边界、哪几个只是随契约校准。
+
+### 新增（能力边界）
+
+| 文件 | 行数 | 为什么新增 |
+|---|---|---|
+| `pet/tts/__init__.py` | 43 | 注册表：`register/get/providers/provider_ids/labels/fallback_ids/secret_fields` 是「随意接入新 TTS」的唯一入口，`pet/` 其余部分只认它 |
+| `pet/tts/base.py` | 231 | 声明式契约：`TtsField`（设置页字段由 provider 声明生成）+ `TtsProvider`（`values/plan/flavor/availability/preflight/synth`） |
+| `pet/tts/edge.py` | 335 | edge-tts 实现：音色表快照、下架判定、`preflight` 换音色并给说明、`synth` 内置重试与退默认音色 |
+| `pet/tts/mimo.py` | 202 | 小米 MiMo 实现：两种模型、8 款内置音色、风格指令、`api_key` 走钥匙串 ref `tts/mimo` |
+| `pet/tts_secrets.py` | 92 | 凭据存取（钥匙串优先、进程内存兜底），刻意不依赖 Qt / `pet.chat`：无聊天构建也要能存 Key |
+| `docs/ADDING-A-TTS-PROVIDER.md` | 127 | 「接入一家新 TTS 的完整步骤」——provider 模块 + `pet/tts/__init__.py` 一行 import，含契约测试说明 |
+
+### 修改（随契约校准，不是新功能）
+
+| 文件 | 改动性质 |
+|---|---|
+| `pet/voice_chime.py` | 纯逻辑层：后端常量改为**从注册表派生**（`BACKENDS = tts.provider_ids()`），新增 `synth_attempts`/`cache_key` 扩展；仍零 Qt、零 edge_tts |
+| `pet/voice_chime_service.py` | `_TTSWorker` 由「写死 edge」改为「按尝试链逐个 provider.synth」，缓存路径按 provider 计划给扩展名（mp3/wav） |
+| `pet/voice_chime_settings.py` | 后端参数行改为**按 provider 声明生成**（`TtsField`），切后端即换行；密码类字段走 `secret_fields` |
+| `pet/config.py` | 新增 5 个顶层键（默认值 dict + `reload()` 白名单），并与 `tests/test_config_schema.py` 快照同步 |
+| `tests/test_voice_chime_mimo.py` / `test_tts_edge.py` / `test_tts_secrets.py` | 新增用例；契约测试 `test_every_registered_provider_satisfies_the_contract` 是「注册即被校验」的守门人 |
+
+## 十、性能分析（交付证据 B）
+
+**方法（可复现）**：`python -c "…"` 于 `D:\dsh-pet\.venv`（Windows / Python 3.13 / PySide6 打包版同环境），
+各纯逻辑路径各跑 2000 次取均值；命令与输出见本节末。
+
+| 指标 | 实测 | 归属 |
+|---|---|---|
+| `import pet.tts`（冷，进程内首次） | 209 ms | 新增，仅启动一次；provider 本体（edge_tts / 网络）仍是 **synth 时惰性导入** |
+| `TtsProvider.plan()` | < 0.001 ms/次 | 新增，每次合成 1 次 |
+| `TtsProvider.preflight()` | < 0.001 ms/次 | 新增，每次报时（GUI 线程），**不联网** |
+| `voice_chime.synth_attempts()` | 0.010 ms/次 | 新增，每次报时/预合成 1 次 |
+| `voice_chime.cache_key()` | 0.004 ms/次 | 既有函数，新增扩展名参与哈希 |
+
+**结论**：
+
+1. **稳态开销没有变化**：报时热路径（20s tick + 到点播放）里新增的纯逻辑成本合计
+   < 0.02 ms/次，相对 tick 周期 20000 ms 可忽略；播放仍是本地文件（缓存命中零网络）。
+2. **新增路径的绝对成本与触发频率**：唯一有量级的是 `import pet.tts` 的 209 ms，发生在
+   进程启动、只付一次；`synth`（真正联网，2-8 s 量级）仍在后台线程，且**预合成提前一拍**
+   （见下条），到点播的是缓存。GUI 线程永不联网（`preflight` 用进程内表判定）。
+3. **有没有引入新的系统调用 / 网络 / 磁盘 / 线程**：不新增线程——沿用既有的单后台合成
+   线程；磁盘新增 wav 缓存（与 mp3 同目录、同裁剪上限）；网络请求形状由 provider 决定
+   （MiMo 1 次 POST，edge 1 次 websocket），失败才重试（`EDGE_RETRY_TIMES=2` × 1.5 s）。
+4. **内存与缓存**：缓存目录新增 wav，`_prune_cache` 已同时统计 `.mp3` / `.wav`，上限
+   200 文件不变；进程内存新增仅为 provider 注册表与音色快照（KB 量级）。
+
+```
+$ python -c "…bench…"
+import pet.tts (cold): 209.1 ms
+plan() x2000: 0.001 ms/call
+preflight() x2000: 0.000 ms/call
+synth_attempts() x2000: 0.010 ms/call
+cache_key() x2000: 0.004 ms/call
+providers: ('edge', 'mimo') fallback: ('edge',)
+```
+
+> 未做的计时（如实说明）：真接口的**单次合成延迟**没有重复计时——MiMo 侧只做了一次
+> 真实调用（见证据 C），edge 侧延迟由微软服务决定、不进本仓库的指标。
+
+## 十一、实机运行记录（交付证据 C）
+
+**本机真实环境**（非 CI、非 mock）：Windows + `D:\dsh-pet` 源码树 / 打包版 live
+`D:\dsh-pet\dist-onedir\dsh-pet-standalone-webm-chat\`，副本 `H:\dsh-pet-standalone-webm-chat\`。
+
+- **真接口调用（MiMo）**：用钥匙串里已存的 `tts/mimo` 凭据，直接走 provider 的
+  `plan()` + `synth()` 打真接口，返回 **199,724 字节、文件头 `RIFF`** 的 wav
+  （`mimo-v2.5-tts` / 冰糖 / 风格指令「轻快、带点笑意」）。→ 请求形状与响应解析确认无误，
+  §五.1 的「待真 Key 验证」条目由此关闭。
+- **用户可见行为**：设置 → 语音 → 语音报时里切「语音引擎」为小米 → MiMo 四行（模型 /
+  音色 / 风格指令 / API Key）出现、edge 三行隐藏；点「试听」出声、气泡同时出现；
+  保存后重开设置页，配置回读一致（`voice_chime_tts_backend` / `voice_chime_mimo_*`）。
+- **边界与失败路径**：不填 Key 时 provider 的 `availability()` 报缺 Key，服务层给的是
+  「缺什么、去哪里填」的提示而不是笼统失败；清空 Key 后立刻回到同一条提示（实测）。
+  edge 侧：用她配置的那款已下线音色跑 provider，`preflight` 自动换成晓晓并**合成出音频**，
+  同时给一次性气泡说明——不再出现「有气泡没声音」。
+- **无法自动验证的部分**：音色「听起来是不是那把嗓子」属主观听感，测试只能断言
+  「文件非空 + 扩展名/缓存键正确 + preflight 换值」；真人确认由试听按钮完成（她本地
+  试听过 MiMo 与 edge 两侧）。
+- **打包与部署**：`scripts\build_onedir.ps1 -Variant webm-chat -SkipZip` 构建通过，
+  安装到 live 与 H: 副本（先停实例再替换，保留 `*.bak-<yyyyMMdd-HHmm>` 回滚点），
+  重启后桌宠与语音报时功能正常。

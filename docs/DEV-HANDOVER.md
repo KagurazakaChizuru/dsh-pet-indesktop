@@ -20,9 +20,18 @@ AIGC:
 > 详见 `docs/PR-REPORT-LYRIC-DISPLAY-AUDIT-2026-09-18.md`（含根因、验证与合并口径）。
 > 本轮（2026-09-22，两件事）：① 合并上游 `origin/main` #173（#150→#173 共 81 个提交，
 > 含岛屿同步硬墙、气泡文字大小、移动素材等），merge 提交 `f1fe6a1`，全量 **2871 passed**；
-> ② 语音报时接入**小米 MiMo TTS**（可切换后端 + 失败自动回退 edge），全量 **2895 passed**。
+> ② 语音报时接入**小米 MiMo TTS**（可切换后端 + 失败自动回退 edge），全量 **3018 passed / 11 skipped**。
 > 详见 `docs/PR-REPORT-MIMO-TTS-2026-09-22.md`。
-> 生成日期：2026-09-17（本行于 2026-09-22 校准基线与本轮信息）。文档内的数字均为实测值，代码改动后请同步校准。
+> 本轮（2026-09-23，同步上游最新）：合并上游 `origin/main` @ `5a20251`（#182/#183/#185，
+> v4.2.1 之后的 51 个提交），**非破坏性合并**（保留自有功能，未硬重置；合并提交见 `git log --merges -1`）。
+> **关键背景**：上游 `#143`（`9fde83c`）回退了 `#136/#131` 整批——原因是 Windows CI 偶发
+> C 级 access violation（崩溃栈在 `pet/now_playing.py` 的 asyncio/WinRT 调用里，#142 的闸门
+> 修复实测无效）。故歌词簇（`now_playing` / `music_lyric` / `music_lyric_controller` / 菜单
+> 对齐）**以上游为基线**，本仓库的媒体窗口兜底（`pet/media_window.py`）与其采样线程设计随
+> 回退一并撤下；自有功能（`pet/tts/*` provider 注册表、MiMo TTS、配置保存重试、气泡同内容
+> 续期、`http_util` 代理兜底、节日动画）保留，并按本地调用点接回 `now_playing.available()`
+> 与暂停/切歌的媒体会话门控。详见合并提交（`git log --merges -1`）。
+> 生成日期：2026-09-17（本行于 2026-09-23 校准基线与本轮信息）。文档内的数字均为实测值，代码改动后请同步校准。
 
 ---
 
@@ -108,16 +117,16 @@ D:\dsh-pet\
 ├── dsh-pet-standalone-webm-chat.spec   # PyInstaller 规格（onedir）
 ├── pet\                          # 应用源码（128 个 .py，含子包）
 │   ├── __main__.py               # 入口：python -m pet
-│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3264 行）
-│   ├── window.py                 # 桌宠主窗口（组合根，4624 行，预算 4632）
+│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3424 行）
+│   ├── window.py                 # 桌宠主窗口（组合根，4659 行，预算 4659）
 │   ├── config.py                 # 配置读取/清洗/迁移/持久化（1565 行）
 │   ├── config_domains.py         # 配置域 facade（chat/agent_link/proactive/collision/menu）
-│   ├── modern_settings_dialog.py # 现代设置主对话框（2390 行，预算 2393，余 3 行）
+│   ├── modern_settings_dialog.py # 现代设置主对话框（2360 行，预算 2360）
 │   ├── settings_widgets.py       # 设置控件库（ToggleSwitch / SettingRow / ModernSelect …）
 │   ├── speech_bubble.py          # 气泡绘制与交互（1491 行）
 │   ├── speech_bubble_text.py     # 气泡分页/定位纯函数（408 行）
-│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（644 行，零 Qt / 零 edge_tts）
-│   ├── voice_chime_service.py    # ★ 语音报时服务层（781 行，tick + 合成链 + 播放）
+│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（548 行，零 Qt / 零 edge_tts）
+│   ├── voice_chime_service.py    # ★ 语音报时服务层（803 行，tick + 合成链 + 播放）
 │   ├── voice_chime_settings.py   # ★ 语音报时设置页（429 行，含合成后端 6 行）
 │   ├── tts_secrets.py            # ★ 合成凭据存取（92 行；钥匙串优先、内存兜底）
 │   ├── voice_chime_quotes.py     # ★ 台词/歌词纯数据库（96 行，中英各 40 条）
@@ -238,8 +247,8 @@ modern_settings_dialog.py
 
 | 文件 | 预算常量 | 当前预算 | 当前实测 |
 |---|---|---|---|
-| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4632** | 4624 |
-| `pet/modern_settings_dialog.py` | `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` | **2393** | 2390 |
+| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4659** | 4659 |
+| `pet/modern_settings_dialog.py` | `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` | **2360** | 2360 |
 
 **触发预算时的正确动作（优先级从高到低）**：
 
@@ -340,8 +349,8 @@ modern_settings_dialog.py
 
 | 文件 | 行数 | 层 | 职责 |
 |---|---|---|---|
-| `pet/voice_chime.py` | 644 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、后端尝试链、MiMo 请求体/响应解析、缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
-| `pet/voice_chime_service.py` | 781 | 服务 | 20s tick、预合成、合成链（MiMo HTTP / edge-tts 后台线程）、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪（mp3+wav）、降级 |
+| `pet/voice_chime.py` | 548 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词批次轮换、后端尝试链、MiMo 请求体/响应解析、缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
+| `pet/voice_chime_service.py` | 803 | 服务 | 20s tick、预合成、合成链（MiMo HTTP / edge-tts 后台线程）、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪（mp3+wav）、降级 |
 | `pet/voice_chime_settings.py` | 429 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config`；含「合成后端」6 行与按后端显隐 |
 | `pet/tts_secrets.py` | 92 | 凭据 | `tts/mimo` 的钥匙串存取（惰性 import keyring、内存兜底），不依赖 Qt / pet.chat |
 | `pet/voice_chime_quotes.py` | 96 | 数据 | 中英台词/歌词库各 40 条（`CHINESE_QUOTES` / `ENGLISH_QUOTES`），纯数据零依赖 |
@@ -599,28 +608,47 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 1. fork 上游仓库，本地切 `feat/<slug>` 开发；
 2. 提交前过**三道本地门**（见 8.4）；
 3. push 到自己的 fork，向上游 `main` 开 PR；
-4. PR 描述必须包含：变更点清单、验证证据（命令 + 结果数字）、风险门与回滚方式；
+4. PR 描述必须包含：变更点清单、**修改文件说明**、**性能分析**、**实机运行记录**
+   （三份交付证据的硬要求见 8.3）、验证证据（命令 + 结果数字）、风险门与回滚方式；
 5. 合并前阅读 `docs/PR-MERGE-LESSONS-2026-09-12.md`：叠放 PR 在父 PR squash 后的冲突、两个 PR 合并后才越线的预算/红线、时序测试写法。
 
 > **本仓库当前 PR 状态（2026-09-17）**：语音报时 #118（`3cf70bc`）、语音报时 v2 #125（`eeb29bb`）、节日提醒 #127（`be9a6d0`）以及 #128/#129/#130 均已合并。**注意 #124 本身未合并**——它被上游以 #125（`eeb29bb`，内容同、提交不同）接管落 main，这是"叠放 PR 在父 PR squash 后冲突"的已知陷阱（见教训 1）。当前 open 的自有 PR：[#131](https://github.com/MerZlin/dsh-pet-indesktop/pull/131)（`feat/festival-reminder-v2` @ `1ca34af`，承接 #127，11 files +844/-11）。后续同类改动沿用这一模式：**父 PR 合并后新建承接分支 + 承接 PR，PR 正文写明与前一 PR 的承接关系**。
 
 ### 8.3 PR 报告文档写法与存放位置
 
-- 存放：`docs/PR-REPORT-<主题>-<YYYY-MM-DD>.md`，示例：
+**三份交付证据是硬要求**（2026-09-22 起，`AGENTS.md` 的 Delivery evidence discipline
+是权威口径；本节是细则）：
+
+| # | 证据 | 判定标准（不合格的典型写法） |
+|---|---|---|
+| 1 | **修改文件说明** | 逐文件「改了什么 + 为什么」+ 增删行数（`git diff --numstat`）+ 新增/删除文件。（不合格：「修了 bug」「优化了逻辑」） |
+| 2 | **性能分析** | 受影响路径的**实测**数字：命令 + 环境 + 样本量，并逐条回答稳态开销、新增路径成本与触发频率、有无新的系统调用/网络/磁盘/线程、内存有无增长。（不合格：「开销可忽略」「性能更好」——形容词不算分析） |
+| 3 | **实机运行记录或报告** | 本机真实环境（非 CI、非 mock）跑过的命令 + 真实输出 + 用户可见行为确认；无法自动验证的能力必须给出「为什么不能自动」的探针证据。（不合格：只贴 pytest 结果，或用沉默代替结论） |
+
+- **豁免**：纯文档 / 文案 / 依赖版本号这类不改变运行行为的改动，可只保留第 1 条，
+  但必须在 PR 描述里写明豁免理由。
+- 存放：`docs/PR-REPORT-<主题>-<YYYY-MM-DD>.md`，模板见
+  [`PR-REPORT-TEMPLATE.md`](PR-REPORT-TEMPLATE.md)（复制后逐节填写），并在
+  [`INDEX.md`](INDEX.md) 的「PR 报告存档」登记一行。示例：
   - `docs/PR-REPORT-VOICE-CHIME-2026-09-15.md`（语音报时，含九轮改进章节）
   - `docs/PR-REPORT-GATES-2026-09-10.md`、`docs/PR-REPORT-PR76-2026-09-10.md`
-- 结构建议：
-  1. **核心特性**：一句话定位 + 能力清单；
+  - `docs/PR-REPORT-music-lyric-align-2026-09-22.md`（三个必备章节的完整范例）
+- **机器化校验**：`tests/test_pr_report_discipline.py` 对 `2026-09-22` 及之后的
+  报告强制校验「修改文件说明 / 性能分析 / 实机运行记录」三个章节、模板存在、
+  `AGENTS.md` 与本文件仍写明该要求；历史报告豁免。
+- 结构建议（在三个必备章节之外）：
+  1. **核心特性**：一句话定位 + 能力清单 + 红线/不变量；
   2. **修改文件清单**：逐文件说明改动意图（含新增/删除）；
   3. **实现要点**：关键算法、数据结构、线程与信号模型；
-  4. **测试与验证**：命令、通过数、构建冒烟结果；
+  4. **测试与验证**：命令、通过数、构建冒烟结果、断言有效性验证；
   5. **已知限制与后续**：明确未完成项；
-  6. **风险与回滚**：影响面、开关、回滚步骤。
+  6. **风险与回滚**：影响面、开关、配置迁移、回滚步骤。
 - **迭代写法**：后续轮次在同一文档**追加新章节**（如「第二轮改进」「第九轮修正」），保留新旧逻辑对照表，不要重写覆盖——评审依赖历史对照。
 
 ### 8.4 变更门禁
 
 - **本地三道门（推送前必过）**：① `ruff check pet/ tests/`；② 全量 `pytest -q`；③ 受影响时序测试族高负载复跑（本地 CPU 打满跑 3 遍）。缝合/脚本化改动后**必须重跑 ruff**（重复定义、残留 import 不许交给 CI 发现）。
+- **交付证据门（2026-09-22 起）**：修改文件说明 + 性能分析 + 实机运行记录三份证据缺一即视为未完成（细则见 8.3，机器化校验见 `tests/test_pr_report_discipline.py`）。
 - **设置相关变更门禁**：`docs/SETTINGS-CHANGE-GATES.md` —— 准入 6 条（是否必须持久化、是否有默认值、是否进 reload 白名单、是否包 `SettingRow`、是否有测试、是否跨平台）+ 准出 5 类验证（契约、TDD、布局、跨平台、视觉）。
 - **配置键变更**：同步三处（第三章 3.3）。
 - **菜单变更**：同步四件套（第三章 3.5）。
@@ -638,7 +666,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 3. **设置页控件必须包 `SettingRow`**：普通布局里的按钮在打包版**不可见**；且 `SettingRow` 的键在 `objectName`（`settingRow_<key>`），校验收集性要用 `objectName().startswith("settingRow_")`，不要按属性 `key` 查。
 4. **`modern_settings_dialog.py` 顶层禁止 import `pet.chat`**：no-chat 变体会 exclude `pet.chat`，顶层 import 会让设置界面整体打不开。
 5. **菜单动作四件套同步**：registry + 模板 JSON + 两处测试断言，缺一即红。
-6. **`window.py`「只许瘦不许胖」**：当前 4624 行（预算 4632，余 8 行）。增量按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器；超预算只随实测校准（写日期+理由）。
+6. **`window.py`「只许瘦不许胖」**：当前 4659 行（预算 4659，随 2026-09-23 合并实测校准）。增量按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器；超预算只随实测校准（写日期+理由）。
 7. **纯逻辑层禁 Qt / 禁 edge_tts**：`voice_chime.py`、`voice_chime_quotes.py` 不得 import Qt 与 edge_tts；`edge-tts` 只在服务层惰性导入（缺失即降级为纯气泡）。
 8. **跨线程纪律**：`_TTSWorker` 中禁止触碰 QWidget/QMediaPlayer；一律经 `_AudioBridge` queued 信号回 GUI 线程。
 9. **预合成状态的清理时机**：`_consume_precache` 会清空整组状态，气泡文本必须先取后用（历史缺陷点）。
@@ -657,9 +685,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1 -Variant webm-
 
 | 优先级 | 事项 | 说明 / 切入点 |
 |---|---|---|
-| 高 | **小米 MiMo 后端的真实 API 验证** | 实现已按官方文档落地、单测全覆盖，但**还没用真 Key 打过一次**。拿到 Key 后在设置页填一次（存钥匙串），点「立即试听」，确认 `%APPDATA%\dsh-pet-standalone-webm-chat\voice_chime_cache\` 出现 `.wav` 且音色正确；若报 401/参数错，先看气泡文案里的错误原文 |
-| 高 | `window.py` 增量拆分 | 4624/4632；按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器 |
-| 高 | `modern_settings_dialog.py` 再拆分 | 余量仅 3 行（2390/2393）；新设置页应先拆到独立 `*_settings.py` |
+| 高 | `window.py` 增量拆分 | 4659/4659（预算已随 2026-09-23 合并实测校准）；按 `docs/WINDOW_PY_SPLIT_GUIDE.md` 域地图拆控制器 |
+| 高 | `modern_settings_dialog.py` 再拆分 | 已迈出第一步：「互动」域整页搬进 `pet/settings_interaction.py`（页内任务标签），本文件 2441 → 2347 行并**首次因拆分下调预算**；合并上游后实测 2360，下一步按同法拆其余长域 |
 | 中 | 节日动画素材缺口补齐（复活节/母亲节/父亲节） | 补素材后从 `festival_animations.KNOWN_GAPS` 移除，对应用例会变红提醒 |
 | 中 | 离线音色兜底（候选：Windows SAPI / pyttsx3） | 当前 edge-tts 不可用时仅气泡；可评估本地离线音色作为第二合成后端 |
 | 中 | 任务栏隐藏模式下的报时行为验证 | 隐藏/自动隐藏场景下气泡与播放位置的体验待专项验证 |
@@ -710,7 +737,7 @@ explorer "%APPDATA%\dsh-pet-standalone-webm-chat"
 | 语音报时服务启停 | `pet/app.py`（`_chime_wanted` / `_ensure_chime_service` / `_sync_chime_service` / `trigger_voice_chime_now` / `toggle_voice_chime`） |
 | 菜单动作注册 | `pet/context_menus/registry.py`（`voice_chime_now` / `voice_chime_toggle`） |
 | 菜单模板节点 | `pet/menu_templates/modern-default-v1.json` |
-| 行数预算常量 | `tests/test_architecture.py`（`WINDOW_PY_LINE_BUDGET` = 4632 / `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` = 2393） |
+| 行数预算常量 | `tests/test_architecture.py`（`WINDOW_PY_LINE_BUDGET` = 4659 / `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` = 2360） |
 | 构建脚本 | `scripts/build_onedir.ps1`、`scripts/slim_bundle.py`、`scripts/check_bundle_encoding.py`、`scripts/verify_bundle_qt.py` |
 | 本机部署位置 | live：`D:\dsh-pet\dist-onedir\dsh-pet-standalone-webm-chat\`；副本：`H:\dsh-pet-standalone-webm-chat\`（开始菜单快捷方式） |
 | 相关工程文档 | `docs/ONEDIR_PACKAGING.md`、`docs/SETTINGS-CHANGE-GATES.md`、`docs/WINDOW_PY_SPLIT_GUIDE.md`、`docs/PR-REPORT-MIMO-TTS-2026-09-22.md`、`docs/PR-MERGE-LESSONS-2026-09-12.md` |

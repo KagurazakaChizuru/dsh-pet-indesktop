@@ -110,11 +110,14 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "self_talk_bubble_style",
         "self_talk_duration_seconds",
         "self_talk_enabled",
+        "self_talk_image_chance",
         "self_talk_image_dir",
         "self_talk_image_scale",
         "self_talk_max_interval",
         "self_talk_min_interval",
+        "self_talk_speak_enabled",
         "self_talk_texts",
+        "self_talk_voice_precache_enabled",
         "settings_process_isolation",
         "shift_drag",
         "show_dock_icon",
@@ -166,12 +169,12 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
 # 2026-09-19 加入 file_interpret（拖文件解读，嵌套 dict 走 _merge_ 专门路径）。
 SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "chat", "file_interpret"})
 
-# 默认值 dict 键集合现状快照（131 键）= 白名单 ∪ 特例键。
-# 2026-09-22 加入语音报时合成后端 5 键（tts_backend / tts_fallback / mimo_model /
-# mimo_voice / mimo_style）：白名单 126 + 特例 5 = 131。
-# 2026-09-19 合并 origin/main（#150）后实测：白名单 121 + 特例 5 = 126。
-# （本分支的 music_player_paths / festival_reminder_animation / festival_birthday
-# 与上游 #140/#150 的 file_interpret 等新增键叠加后的结果。）
+# 默认值 dict 键集合现状快照（135 键）= 白名单 ∪ 特例键。
+# 2026-09-23 合并 origin/main（5a20251）后实测：白名单字面量 130 + 特例 5 = 135。
+# 组成：本分支的 music_player_paths / festival_reminder_animation / festival_birthday /
+# 语音报时合成后端 5 键（tts_backend / tts_fallback / mimo_model / mimo_voice /
+# mimo_style）与上游的点击台词朗读·预缓存·配图概率 3 键（self_talk_speak_enabled /
+# self_talk_voice_precache_enabled / self_talk_image_chance）、file_interpret 等叠加。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 

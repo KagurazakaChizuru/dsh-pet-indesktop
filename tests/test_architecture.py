@@ -101,11 +101,21 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 # 2026-09-20 上调到 4632：delete_when_idle 轮询定时器绑定 menu context（+3：
 # 注释），窗口/菜单销毁后不再访问已删 C++ 对象。与 move-sync-facing 的 4629
 # 叠加，组合实测 4632（docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2 又一实例）。
-# 2026-09-22 合并 origin/main（#173）后实测 4624：自有歌词审计批的
-# show_bubble -> bool（被提醒队列/设置窗口丢弃时返回 False，歌词据此记账，必须留在
-# PetWindow 上——它是所有冒泡路径的唯一收口）与上游 #150→#173 的碰撞/贴边/移动
-# 增量叠加，落在既有 4632 预算内（余 8 行），故本轮不动预算、只登记实测值。
-WINDOW_PY_LINE_BUDGET = 4632
+# 2026-09-22 上调到 4635：崩溃消融回退（_rebuild_frame 零拷贝直取改回
+# currentPixmap().toImage() 私有深拷贝，切断 窗口↔显示槽↔首帧缓存 别名面，
+# Qt6Gui QRasterPaintEngine 三连崩排查，见 .scratch/single-overlay-window/
+# HANDOFF.md 崩溃案），注释 +2 + currentPixmap→toImage 两行替代原一行直取（+3）。实测 4635。
+# 2026-09-23 上调到 4638：rebase 合入上游 a7489ae（fix(self-talk): 点击自言自语
+# 与周期气泡解耦 + 恢复点击侧设置可见，window.py +4/-1）。与本分支各修复无
+# 组合冲突，叠加实测 4638（docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2 常规校准）。
+# 2026-09-23 上调到 4648：合入前评审修复——A1 冷 meta 闸门（_try_move 加
+# duration 退化值守卫 + 注释，+9）与 A2 飞行加速按用户「播放速率」复合
+# （表达式改写 + getattr 防御测试替身，+2）。净增为守卫与注释，未拆控制器
+# （守卫必须贴着 _try_move 的建计划点才有效），按预算规则校准。实测 4648。
+# 2026-09-23 上调到 4659：合并 origin/main（5a20251，#150→#185 共 51 个提交）后实测。
+# 上游本侧记的是 4648，而本仓库同时保留了自家批次里未被上游采纳的 window.py 增量
+# （show_bubble -> bool 收口、点击台词/多行气泡接线等），两相叠加后实测 4659。
+WINDOW_PY_LINE_BUDGET = 4659
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的
@@ -161,7 +171,36 @@ WINDOW_PY_LINE_BUDGET = 4632
 # 3 行 SettingRow 展开式写法（6 行）+ _write_config 回写 1 行 + 布局编排认领 1 行；
 # 控件本体落在 pet/settings_pet_controls.py（与既有的「配图大小」同处），
 # 缩放实现全在 pet/speech_bubble*.py。按文件约定只随实测校准，不为达标压行。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2401
+# 2026-09-22 上调到 2419：点击台词朗读 / 台词自动预缓存 / 配图概率共 3 个 SettingRow
+# 接入「互动」域已存在的两组（点击反馈 + 自言自语），逐项为 SettingRow 展开式写法、
+# 随组显隐名单、归属 claim、_write_config 写回，实测 2419；控件本体落在
+# pet/settings_pet_controls.py，朗读/预缓存实现全在 pet/self_talk_voice.py 与
+# pet/window_alerts.py。同页同组连续加控件，拆出来只会把这组设置割成两半；
+# 按文件约定只随实测校准，不为达标压行。设置页拆分仍是待办。
+# 2026-09-22 上调到 2436：点击侧显隐解耦（+17）——点击自言自语不再依附周期气泡
+# 总开关，因此点击侧另立一个 _update_click_self_talk_controls（含函数 docstring 与
+# 两处接线），实测 2436。这是可用性修复（原实现让新开关在默认配置下整组隐藏），
+# 不是新功能；分页/拆分后预算会随实测下调（见「互动」域分页改造）。按文件约定
+# 只随实测校准，不为达标压行。
+# 2026-09-22 上调到 2441：**组合越线**——#176（点击侧显隐解耦，2436）与
+# #177（音乐播放器路径接线的 +5）各自合并时都在预算内，合到一起才越线，
+# 又一次「红线是组合性质」的实例（docs/PR-MERGE-LESSONS-2026-09-12.md 教训 2）。
+# 实测 2441；随后即由「互动」域分页 + 抽 pet/settings_interaction.py 大幅下调，
+# 故这里只做一次性校准，不为达标压行。
+# 2026-09-22 **下调到 2347**：兑现上一条的承诺——「互动」域整页搬进
+# pet/settings_interaction.py（页内任务标签「点击与音效 / 自言自语」），
+# 本文件净减 94 行（2441 → 2347）。这是本文件第一次**因拆分而下调**预算：
+# 靠搬代码而不是压行宽解决预算，正是预算作为「绊线」的预期用法。
+# 2026-09-23 上调到 2357：纯桌宠版岛隐藏死锁修复——新增
+# _chat_feature_available() 构建变体判定助手（+12）并将「隐藏时对话气泡」
+# SettingRow 改为按构建变体条件收录（净 +3，注释另计）：无 pet.chat 的
+# 打包变体不再展示该死路开关（运行时回退在 pet/dynamic_island.py 的
+# chat_available）。实测 2357；按文件约定只随实测校准，不为达标压行。
+# 2026-09-23 上调到 2360：合并 origin/main（5a20251）后实测——上游的岛/设置页拆分与
+# 本仓库保留的设置行（多行输入框、TTS 后端行等）叠加，净 +3。同样按实测校准。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2360
+
+
 def _read(name: str) -> str:
     return (PET_DIR / name).read_text(encoding="utf-8")
 

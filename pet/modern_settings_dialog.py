@@ -97,6 +97,18 @@ from .menu_layout import (
 )
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 
+
+def _chat_feature_available() -> bool:
+    """本构建是否带聊天模块（纯桌宠版打包时排除 pet.chat，与 app.py
+    ChatService 导入守卫同一判定口径）。"""
+    try:
+        from .chat.service import ChatService  # noqa: F401
+    except ImportError as exc:
+        if str(getattr(exc, "name", "") or "").startswith("pet.chat"):
+            return False
+        raise
+    return True
+
 from .settings_widgets import (
     _system_font_families,
     BROWSER_CONTROL_SPEC,
@@ -149,6 +161,8 @@ from .persona_template import (
     PARAMETERS,
 )
 from . import settings_file_interpret
+from . import settings_interaction
+from . import settings_music
 from . import settings_pet_controls
 from .report_gates import REPORT_GATE_KEYS, REPORT_GATE_LABELS, gate_for_event
 
@@ -309,6 +323,8 @@ class ModernSettingsDialog(QDialog):
         self._build_pet_controls()
         # 「文件识别」域控件在本模块构建（行数预算原因），见 settings_file_interpret。
         self._build_file_interpret_controls()
+        # 「音乐播放器路径」控件同样在本模块构建（行数预算原因），见 settings_music。
+        settings_music.create_music_player_controls(self)
         # 「随桌宠启动 dsh 服务」开关（origin/main #80 合入带回）：构建留在
         # 对话框本体（upstream 代码所在宿主），供下方 launch_rows 引用。
         self.harness_autostart_check = ToggleSwitch(self)
@@ -451,15 +467,10 @@ class ModernSettingsDialog(QDialog):
                 ]
             )
         general_layout.addWidget(SettingsSection("窗口与系统", window_rows, general_content))
-        spawn_rows = [
-            SettingRow(
-                "single_process_spawn",
-                "单进程多开（省内存）",
-                "开启后「生小肥鱼」在同一进程内创建新桌宠，多窗共享解码链（同一段动画只解码一份），多开时内存与进程数显著降低；已有各只的设置存档保留不变。重启后生效。",
-                self.single_process_spawn_check,
-            ),
-        ]
-        general_layout.addWidget(SettingsSection("多开", spawn_rows, general_content))
+        # 拓扑收口 Phase A：「单进程多开」实验开关从设置页隐藏（多进程为唯一
+        # 多宠拓扑方向；开关控件已从 settings_pet_controls 移除，设置页不再
+        # 写该键；配置键 experimental_single_process_spawn 随 config.save()
+        # 原样回写，存量用户与回滚路径不受影响）。
         if self.balance_refresh_spin is not None:
             general_layout.addWidget(
                 SettingsSection(
@@ -518,12 +529,14 @@ class ModernSettingsDialog(QDialog):
                         "单击胶囊：展开快捷卡片（余额/最近消息/快捷按钮）或直接切换桌宠显隐。",
                         self.island_click_action_select,
                     ),
-                    SettingRow(
+                    *([SettingRow(
                         "dynamic_island_hidden_chat",
                         "隐藏时对话气泡",
                         "桌宠隐藏后岛变成对话入口：单击灵动岛弹出对话气泡，AI 回复到达时也会在岛上弹出预览（不抢焦点，超时自动收回）。",
                         self.island_hidden_chat_check,
-                    ),
+                    )] if _chat_feature_available() else []),
+                    # 纯桌宠版（无 pet.chat 打包变体）不展示该开关：开了也没有
+                    # 气泡可弹——运行时岛侧已由 chat_available 回退展开卡片
                     SettingRow(
                         "dynamic_island_event_effects",
                         "事件动效",
@@ -566,7 +579,7 @@ class ModernSettingsDialog(QDialog):
                         self.idle_low_fps_check,
                     ),
                     SettingRow("no_move", "不移动", "暂停桌宠在桌面上的自动移动。", self.no_move_check),
-                    SettingRow("mouse_through", "鼠标穿透", "开启后桌宠不接收鼠标事件，点击穿透到下层窗口。", self.mouse_through_check),
+                    # 鼠标穿透行归「互动 · 输入」（settings_interaction 构建）。
                 ],
                 behavior_content,
             )
@@ -576,7 +589,7 @@ class ModernSettingsDialog(QDialog):
                 "音乐关联",
                 [
                     SettingRow("music_sing", "音乐自动唱歌", "检测到后台播放音乐时，自动播放唱歌动画。", self.music_sing_check),
-                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制（SMTC），酷狗等需在播放器设置里手动开启。", self.music_lyric_check),
+                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制（SMTC），酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
                     SettingRow("music_lyric_lead", "歌词提前量", "歌词相对音频的时间偏移。正值让歌词抢先显示，负值让它延后；唱得比音乐早一点通常更自然。", self.music_lyric_lead_spin),
                 ],
                 behavior_content,
@@ -655,59 +668,8 @@ class ModernSettingsDialog(QDialog):
         self.collision_policy_note.setWordWrap(True)
         self.collision_policy_note.setContentsMargins(14, 0, 14, 0)
         behavior_layout.addWidget(self.collision_policy_note)
-        click_rows = [
-            SettingRow("click_sound", "点击音效", "点击桌宠时播放轻量反馈音效。", self.click_sound_check),
-            SettingRow("click_sound_pack", "音效音源", "选择预设音效包、自定义音频文件或文件夹随机播放。", self.click_sound_picker, stacked=True),
-            SettingRow("click_sound_volume", "音效音量", "调整点击音效播放音量。", self.click_sound_volume_spin),
-            SettingRow("click_sound_preview", "试听音效", "测试当前选择的点击音效。", self.click_sound_preview_btn),
-            SettingRow("click_self_talk", "点击触发自言自语", "点击时随机显示一条自言自语内容。", self.click_self_talk_check),
-            SettingRow(
-                "golden_spin_click",
-                "点击触发黄金回旋",
-                "开启后点击桌宠触发原地逆时针 360° 旋转；下方子开关可选择跳过点击动画直接回旋。",
-                self.golden_spin_click_check,
-            ),
-            SettingRow(
-                "golden_spin_direct",
-                "点击回旋跳过动画",
-                "开启后点击直接开始黄金回旋，不播放 Q 弹与点击素材；连续点击会累计旋转圈数并逐圈加速。",
-                self.golden_spin_direct_check,
-                stacked=True,
-            ),
-        ]
-        if self.click_balance_check is not None:
-            click_rows.insert(
-                4,
-                SettingRow(
-                    "click_balance",
-                    "点击显示余额",
-                    "点击桌宠时查询并用气泡展示模型服务余额。",
-                    self.click_balance_check,
-                ),
-            )
-        behavior_layout.addWidget(SettingsSection("点击反馈", click_rows, behavior_content))
-        behavior_layout.addWidget(
-            SettingsSection(
-                "自言自语",
-                [
-                    SettingRow("self_talk", "气泡自言自语", "让桌宠偶尔显示一条随机思考气泡。", self.self_talk_check),
-                    SettingRow("self_talk_duration", "显示时间", "每条文字或图片气泡保持显示的时间。", self.self_talk_duration_spin),
-                    SettingRow("self_talk_min", "最短间隔", "上一条气泡消失后，到下一条出现前的最短空闲时间。", self.min_spin),
-                    SettingRow("self_talk_max", "最长间隔", "上一条气泡消失后，到下一条出现前的最长空闲时间。", self.max_spin),
-                    SettingRow("self_talk_texts", "候选内容", "每行一条；留空时恢复内置文本。", self.texts_edit, stacked=True),
-                    SettingRow(
-                        "self_talk_images",
-                        "图片目录",
-                        "从目录中的常见图片格式随机选择；默认使用内置彩蛋图片池，留空时只显示文本。",
-                        self.self_talk_image_dir_picker,
-                        stacked=True,
-                    ),
-                    SettingRow("self_talk_image_scale", "配图大小", "气泡里配图的显示尺寸（100% 为默认）。", self.self_talk_image_scale_spin),
-                    SettingRow("click_talk_bindings", "点击动画台词绑定", "为每个点击动画设置专属自言自语台词。", self.click_talk_bindings_btn),
-                ],
-                behavior_content,
-            )
-        )
+        # 「点击反馈」与「自言自语」两组归「互动」域（settings_interaction 构建，
+        # 行数预算原因；组名与顺序的既有契约见 tests/test_menu_layout.py）。
         # Agent 联动：音效设置
         agent_sound_rows = [
             SettingRow("agent_sound_enabled", "Agent 音效联动", "当 Agent 开始工作、任务完成或发生错误时播放提示音。", self.agent_sound_check),
@@ -826,12 +788,7 @@ class ModernSettingsDialog(QDialog):
                         self.bubble_text_scale_spin,
                     ),
                     SettingRow("pet_opacity", "不透明度", "调整桌宠窗口的整体透明度；100% 为完全不透明。", self.pet_opacity_spin),
-                    SettingRow(
-                        "self_talk_bubble_style",
-                        "气泡方案",
-                        "选择气泡视觉与相对桌宠的位置；贴近屏幕边缘时自动换位。",
-                        self.bubble_style_select,
-                    ),
+                    # 「气泡方案」行归「互动 · 自言自语」（settings_interaction 构建）。
                 ],
                 appearance_content,
             )
@@ -1003,7 +960,9 @@ class ModernSettingsDialog(QDialog):
             self.pro_idle_check.toggled.connect(self._update_proactive_idle_controls)
         self.spawn_inherit_size_check.toggled.connect(self._update_spawn_size_controls)
         self.golden_spin_click_check.toggled.connect(self._update_golden_spin_controls)
+        self.click_self_talk_check.toggled.connect(self._update_click_self_talk_controls)
         self._update_self_talk_controls(self.self_talk_check.isChecked())
+        self._update_click_self_talk_controls(self.click_self_talk_check.isChecked())
         self._update_translucency_controls(self.menu_translucent_check.isChecked())
         self._update_island_controls(self.island_enabled_check.isChecked())
         self._update_egg_controls(self.egg_enabled_check.isChecked())
@@ -1284,6 +1243,12 @@ class ModernSettingsDialog(QDialog):
         return row
 
     def _update_self_talk_controls(self, enabled: bool) -> None:
+        """周期气泡（``self_talk``）的细项显隐。
+
+        点击侧（``click_self_talk*`` / ``click_talk_bindings``）**不在这里**：它们是
+        独立开关的后续项，见 :meth:`_update_click_self_talk_controls`。绑在一起会让
+        「只想点击听声」的用户在设置页里连开关都看不到。
+        """
         keys = (
             "self_talk_duration",
             "self_talk_min",
@@ -1291,10 +1256,22 @@ class ModernSettingsDialog(QDialog):
             "self_talk_texts",
             "self_talk_images",
             "self_talk_image_scale",
-            "click_self_talk",
-            "click_talk_bindings",
+            "self_talk_image_chance",
         )
         self._set_setting_rows_visible(keys, enabled)
+
+    def _update_click_self_talk_controls(self, enabled: bool) -> None:
+        """点击自言自语（``click_self_talk``）的后续项显隐。
+
+        预缓存也跟这里：只有点击链路才会把台词**读出来**（周期气泡只显示不朗读），
+        所以点击开关关着时预缓存没有意义。
+        """
+        keys = (
+            "click_self_talk_speak",
+            "click_self_talk_precache",
+            "click_talk_bindings",
+        )
+        self._set_setting_rows_visible(keys, enabled, dependency="click_self_talk")
 
     def _update_island_controls(self, enabled: bool) -> None:
         settings_pet_controls._update_island_controls(self, enabled)
@@ -1698,7 +1675,7 @@ class ModernSettingsDialog(QDialog):
             [
                 ("应用启动", claim("autostart", "harness_autostart")),
                 ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "stream_capture")),
-                ("多开", claim("single_process_spawn")),
+                # 「多开」分组已随拓扑收口 Phase A 隐藏（见上方注释）
             ]
         )
         # 碰撞音效 2 行按 2026-09-17 定稿口径留在「桌宠」：开关紧跟碰撞开关，
@@ -1715,7 +1692,8 @@ class ModernSettingsDialog(QDialog):
             [
                 ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
-                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead")),
+                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead")
+                 + settings_music.build_music_player_rows(self)),
                 ("拖拽与弹射", claim("drag_physics", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
                 ("边缘探头", claim("edge_probe")),
                 ("生小肥鱼", claim("spawn_inherit_size", "spawn_scale", "spawn_inherit_dynamic_island", "clear_spawned_pets")),
@@ -1723,27 +1701,10 @@ class ModernSettingsDialog(QDialog):
                 ("碰撞参数（高级）", collision_advanced, True),
             ]
         )
-        interaction = page_content(
-            [
-                ("输入", claim("mouse_through")),
-                # 点击音效 4 行按 2026-09-17 定稿口径留在「互动」：click_ 前缀整组
-                # 认领（原顺序即点击音效 4 行排在 click_self_talk 之前）。
-                ("点击反馈", claim_prefix("click_") + claim("golden_spin_click", "golden_spin_direct")),
-                (
-                    "自言自语",
-                    claim(
-                        "self_talk_bubble_style",
-                        "self_talk",
-                        "self_talk_duration",
-                        "self_talk_min",
-                        "self_talk_max",
-                        "self_talk_texts",
-                        "self_talk_images",
-                        "self_talk_image_scale",
-                    ),
-                ),
-            ]
-        )
+        # 「互动」域（2026-09-22 分页）：整页在本模块构建（settings_interaction，
+        # 行数预算原因），页内用任务标签分成「点击与音效 / 自言自语」两个同级任务；
+        # 行不进 all_rows 快照，因此不需要 claim，也不会掉进「待分类（开发期）」。
+        interaction = settings_interaction.build_interaction_domain(self)
         # 点击音效 4 行与 click_self_talk / click_balance / click_talk_bindings
         # 同享 click_ 前缀，按 2026-09-17 定稿口径整组留在 interaction 域。
         menu = SettingsTabContainer(self)
@@ -2169,6 +2130,9 @@ class ModernSettingsDialog(QDialog):
         if self.click_balance_check is not None:
             self.config.set("click_show_balance", self.click_balance_check.isChecked())
         self.config.set("click_show_self_talk", self.click_self_talk_check.isChecked())
+        self.config.set("self_talk_speak_enabled", self.click_self_talk_speak_check.isChecked())
+        self.config.set("self_talk_voice_precache_enabled",
+                        self.self_talk_voice_precache_check.isChecked())
         self.config.set("music_sing_enabled", self.music_sing_check.isChecked())
         if getattr(self, "music_lyric_check", None) is not None:
             self.config.set("music_lyric_enabled", self.music_lyric_check.isChecked())
@@ -2192,7 +2156,8 @@ class ModernSettingsDialog(QDialog):
             self.config.set("balance_tier_color_enabled", self.balance_tier_color_check.isChecked())
         if self.auto_hide_fullscreen_check is not None:
             self.config.set("auto_hide_fullscreen", self.auto_hide_fullscreen_check.isChecked())
-        self.config.set("experimental_single_process_spawn", self.single_process_spawn_check.isChecked())
+        # 「单进程多开」键不落盘控件值：开关已隐藏（拓扑收口 Phase A），
+        # 配置字典里加载的原值随 config.save() 原样回写（兼容保留）。
         if self.cursor_hidden_passthrough_check is not None:
             self.config.set("cursor_hidden_passthrough", self.cursor_hidden_passthrough_check.isChecked())
         if self.stream_capture_check is not None:
@@ -2208,6 +2173,7 @@ class ModernSettingsDialog(QDialog):
         self.config.set("self_talk_texts", texts or list(DEFAULT_SELF_TALK_TEXTS))
         self.config.set("self_talk_image_dir", self.self_talk_image_dir_picker.text())
         self.config.set("self_talk_image_scale", self.self_talk_image_scale_spin.value())
+        self.config.set("self_talk_image_chance", self.self_talk_image_chance_spin.value())
         self.config.set("bubble_text_scale", self.bubble_text_scale_spin.value())
         # Agent 联动：自定义 thinking 文案与音效（合并写回，不覆盖 agent_link 其他开关）
         self.config.set("dialogue_mode", str(self.dialogue_mode_select.currentData() or "legacy"))
@@ -2299,6 +2265,7 @@ class ModernSettingsDialog(QDialog):
         if self.ai_page is not None:
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
+        settings_music.save_music_player_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS
 

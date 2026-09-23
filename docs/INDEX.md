@@ -39,7 +39,8 @@
 | [`STABLE_BUILDS.md`](STABLE_BUILDS.md) | 稳定版构建冻结记录：受保护文件名、构建隔离规则、防止误覆盖稳定版产物。 | **改发布/构建工作流时必读**（AGENTS.md 口径）。注意其冻结对象是 onefile 时代的 `dist/*.exe`，现行发布形态已是 onedir（见文末过时清单）。 |
 | [`BUILD-CI-FAILURE-NOTES-2026-08.md`](BUILD-CI-FAILURE-NOTES-2026-08.md) | 三平台打包/CI 反复踩坑与最终解法汇总（持续更新）：脚本统一入口、资源漏收集、依赖只在叶子模块导入导致整族用例红等。 | CI 连续两轮红、或遇到"本机红 CI 绿"的依赖类假红时；动手重试之前先查这里是否已有同类记录。 |
 | [`ACCEPTANCE_TESTS.md`](ACCEPTANCE_TESTS.md) | 验收测试文件清单：设置窗口、DSH Bridge、Qt 生命周期/全量三条验收路径的精确命令与当前实测基线。 | 提 PR 前跑验收、或需要确认"这个改动该跑哪几个测试文件"时；改动测试边界后必须同步更新本文基线数字。 |
-| [`RELEASE-v4.2.0.md`](RELEASE-v4.2.0.md) | v4.1.0 → v4.2.0 的完整功能与修复汇总（含全部合入 PR 与各平台产物清单）。 | 写发布说明、回答"这个功能从哪个版本开始有"、或判断某行为是哪个 PR 引入时。 |
+| [`RELEASE-v4.2.0.md`](RELEASE-v4.2.0.md) | v4.1.0 → v4.2.0 的完整功能与修复汇总（含全部合入 PR 与各平台产物清单）。 | 写发布说明、回答"这个功能从哪个版本开始有"、或判断某行为是哪个 PR 引入时；**v4.2.0 之后的变更改看 [`RELEASE-v4.2.1.md`](RELEASE-v4.2.1.md)**。 |
+| [`RELEASE-v4.2.1.md`](RELEASE-v4.2.1.md) | **v4.2.0 → v4.2.1 的发布稿（2026-09-23 已发布）**：57 个已合并 PR / 192 个提交的完整汇总（含 #181 歌词代理修复、#182 流畅度与岛墙批次）。文件分两段：`## 📦 下载` 至 `## 🙏 致谢` 是**发布正文**，`RELEASE-BODY-END` 注释之后的**发布前测试清单**（勾选式）、**视频预演脚本**（逐段分镜）与维护者清单**只在仓库内使用、不随 Release 发布**。 | **准备发布、跑人工验收、或录制演示视频时必读**；改版本号、打 tag、换 Release 正文（用文件头那行命令生成 body.md，别整份贴）、或需要"这一版到底该验哪些行为"的清单时。 |
 | [`BUILD_ARTIFACTS-2026-08-22.md`](BUILD_ARTIFACTS-2026-08-22.md) | 单次构建产物记录：EXE 路径、大小、SHA-256 与启动验证结果。 | 需要核对历史 onefile 产物哈希时（README 仍引用此路径）；日常构建流程看 `ONEDIR_PACKAGING.md`。 |
 
 ---
@@ -77,6 +78,7 @@
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
 | [`CHAT-BACKGROUND-DISPLAY-2026-08-27.md`](CHAT-BACKGROUND-DISPLAY-2026-08-27.md) | AI 对话背景显示调整记录：两套窗口各自的背景图片/不透明度/填充模式，以及消息卡片可读性方案。 | 改对话窗口背景、`cover`/`contain`/`stretch` 语义、或消息区 QSS（`message-bubble` vs `message-surface`、`QScrollArea` 调色板）时。 |
+| [`ISSUE-EDGE-TTS-VOICE-DEPRECATION-2026-09-22.md`](ISSUE-EDGE-TTS-VOICE-DEPRECATION-2026-09-22.md) | 事故档案：edge 合成「没声音」的两条根因（微软下架音色 + 连发偶发空音频）与对策（音色表兜底、重试、非空缓存判定）。 | **改语音报时的合成/缓存路径、或再遇到「配置了却没声音」时必读**；它记录了 `NoAudioReceived` 为什么不等于网络问题的判断链。 |
 | [`grill-2026-08-21-ai-chat.md`](grill-2026-08-21-ai-chat.md) | AI 对话功能的需求对齐记录：多 Provider、流式、多轮上下文、JSON 会话、system prompt 优先级等已确认决策。 | 质疑"聊天窗口为什么这样设计/为什么用标准库 HTTP 而不是某个 SDK"时；这是原始决策依据。 |
 | [`ADDING-A-TTS-PROVIDER.md`](ADDING-A-TTS-PROVIDER.md) | 语音报时的 TTS **provider 接入指南**：`pet/tts` 的注册表/接口契约、四步接入流程、字段类型与红线。 | **新增、替换或修改任何合成后端（`pet/tts/*.py`）、或调整 `voice_chime_tts_*` 配置前必读**；改设置页的「合成后端」区之前也先看它，那里是 provider 声明驱动、不该写死后端。 |
 
@@ -110,6 +112,7 @@
 |---|---|---|
 | [`PROACTIVE_SCREEN_PLAN.md`](PROACTIVE_SCREEN_PLAN.md) | 主动识屏与多 Agent 感知的已验证设计方案 v1：低功耗、多开友好、默认关闭，逐条技术依据与出处。 | 追溯识屏机制（白名单、dHash 变化检测、软流控、负坐标多屏裁剪）的**设计依据与出处**时。 |
 | [`PROACTIVE_SCREEN_IMPLEMENTATION_MANUAL.md`](PROACTIVE_SCREEN_IMPLEMENTATION_MANUAL.md) | 主动识屏实施手册（K3 终审版）：分阶段实施步骤与验收清单。 | 需要了解识屏的分阶段实施顺序与原始验收项时；注意其"代码未动工"状态已失效（见文末过时清单）。 |
+| [`issue-draft-主动识屏v420.md`](issue-draft-主动识屏v420.md) | v4.2.0「主动识屏永不触发」的 issue 草稿（基线 v4.2.0）：`MultiWindowProxy._physics_mode` 返回 `bool` 破坏哨兵语义，G1 守卫恒为真从而每次 tick 静默拦截；附最小修复建议与同版本启动装配缺口。 | 排查 `proactive_screen` 不触发、或改 `multi_window_shared.py` 的 `_physics_mode` 聚合语义与启动装配时。 |
 
 ---
 
@@ -119,6 +122,7 @@
 |---|---|---|
 | [`ISSUE-111-WINDOWS-SESSION-END-FFMPEG-2026-09-12.md`](ISSUE-111-WINDOWS-SESSION-END-FFMPEG-2026-09-12.md) | issue #111 专项档案：Windows 关机/注销弹 `0xc0000142` 的根因（会话拆除期派生进程）与「会话结束冻结」闸门设计。 | **改 ffmpeg 派生（`webm_clip` 的 reader / 首帧 / meta / exe 探测）、预热调度、或任何在 Windows 关机/注销时运行的东西（`session_watcher`、`match_shutdown`、`AppShell._on_session_end`）时必读**（AGENTS.md 口径）。 |
 | [`PR-MERGE-LESSONS-2026-09-12.md`](PR-MERGE-LESSONS-2026-09-12.md) | PR 合并三则教训：叠放 PR 在 squash 父 PR 后必然冲突、预算/红线只在两 PR 组合时才破、时序测试 flake 纪律。 | **合并 PR 之前必读**（AGENTS.md 口径）。 |
+| [`NETWORK-PROXY-AND-VPN-2026-09-22.md`](NETWORK-PROXY-AND-VPN-2026-09-22.md) | 代理/VPN 影响面清单：歌词取词（代理下 20~41s 超时）、edge-tts 语音、更新检查（jsdelivr 只有代理能通）、余额/识屏/对话（用户自配端点）、localhost 类（本地 TTS / DSH 联动）各自该不该走代理，附 30 秒探针与推荐分流配置。 | **改任何联网功能，或用户报「某功能昨天还好好的 / 歌词没了 / 语音不出声 / 更新检查失败」时必读**（系统代理与 VPN 是一等嫌疑）；也用于回答"桌宠为什么不自己绕过代理"。 |
 
 > 注：`AGENTS.md` 的 "Context pointers" 还指向 `docs/ISSUE-42-POSIX-COLLISION-IPC-2026-08-31.md`（碰撞选举 / QLocal IPC / 协调者锁），但该文件在当前工作树中不存在。改动碰撞选举、QLocal IPC 或协调者锁之前，需要先确认该文档是被删除、改名还是从未入库——本索引无法为它登记有效条目。
 
@@ -128,12 +132,23 @@
 
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
+| [`PR-REPORT-ISLAND-HIDDEN-CHAT-DEADLOCK-2026-09-23.md`](PR-REPORT-ISLAND-HIDDEN-CHAT-DEADLOCK-2026-09-23.md) | 纯桌宠版岛隐藏死锁修复：无聊天构建 hidden_chat 单击路由回退展开卡片（岛能力开关 + 设置页开关按构建变体隐藏）。 | 改灵动岛单击路由 / hidden_chat 设置 / 打包变体（无 pet.chat）行为时。 |
+| [`PR-REPORT-TEMPLATE.md`](PR-REPORT-TEMPLATE.md) | PR 报告模板：三份交付证据（修改文件说明 / 性能分析 / 实机运行记录）的逐节骨架与判定标准。 | **开新 PR 写报告前必读并整份复制**；2026-09-22 起三份证据是硬要求（`AGENTS.md` Delivery evidence discipline），由 `tests/test_pr_report_discipline.py` 机器化校验。 |
 | [`PR-REPORT-PR76-2026-09-10.md`](PR-REPORT-PR76-2026-09-10.md) | PR76 批次的完整报告：事件汇报概率门 + Persona 模板升级 + 全链路错误语义统一（46 文件，+3004/−917）。 | 追溯 PR76 批次改了什么、以及概率门/persona 模板/错误语义三条线的组合动机时。 |
 | [`PR-REPORT-GATES-2026-09-10.md`](PR-REPORT-GATES-2026-09-10.md) | 汇报概率门专项 PR 报告：8 个门表、判决语义（`roll < probability`）、可注入 rng 的测试考量、提交点自检。 | 调整汇报概率门、或需要"为什么未知事件不抽稀/边界取小于"这类判决语义依据时。 |
-| [`PR-REPORT-VOICE-CHIME-2026-09-15.md`](PR-REPORT-VOICE-CHIME-2026-09-15.md) | 语音报时（voice_chime）PR 报告：六种调度模式、20s tick 判定与槽位盖戳幂等、edge-tts 合成与缓存、设置页接入。 | 改语音报时调度/合成/播放、或需要复用其"纯逻辑零 Qt 依赖可测"结构时。 |
+| [`PR-REPORT-VOICE-CHIME-2026-09-15.md`](PR-REPORT-VOICE-CHIME-2026-09-15.md) | 语音报时（voice_chime）PR 报告：六种调度模式、20s tick 判定与槽位盖戳幂等、edge-tts 合成与缓存、设置页接入。 | 改语音报时调度/合成/播放、或需要复用其"纯逻辑零 Qt 依赖可测"结构时；也要改共用音频通道的第三方（节日语音 / 点击台词朗读）时。 |
 | [`PR-REPORT-MIMO-TTS-2026-09-22.md`](PR-REPORT-MIMO-TTS-2026-09-22.md) | 接入小米 MiMo TTS 的实现报告：接口依据、可切换后端 + 失败回退、凭据入钥匙串、缓存隔离，以及**第二轮的后端接口化**（`pet/tts` 注册表）与真实 API 验证结论。 | 改合成后端选择/回退链、凭据存储、或想知道"为什么这样分层"时；接入指南见 `ADDING-A-TTS-PROVIDER.md`。 |
 | [`PR-REPORT-FESTIVAL-REMINDER-2026-09-16.md`](PR-REPORT-FESTIVAL-REMINDER-2026-09-16.md) | 节日提醒（festival_reminder）PR 报告：46 个日子、314 条节日文案、提醒时机二选一、与语音报时共用音频通道且报时让位。 | 改节日数据/文案/提醒时机，或调整与语音报时的让位规则时。 |
-| [`PR-REPORT-music-lyric-2026-09-16.md`](PR-REPORT-music-lyric-2026-09-16.md) | 歌词显示 + OBS 气泡朝向修复 + agent 计费的改动说明（含人工说明与 AI 生成的详细部分）。 | 改歌词显示/延迟设置、OBS 模式气泡朝向、或 agent 计费（余额差值法）时；注意文首人工说明标注了计费的已知偏差。 |
+| [`PR-REPORT-music-lyric-2026-09-16.md`](PR-REPORT-music-lyric-2026-09-16.md) | 歌词显示 + OBS 气泡朝向修复 + agent 计费的改动说明（含人工说明与 AI 生成的详细部分）。 | 改歌词显示/延迟设置、OBS 模式气泡朝向、或 agent 计费（余额差值法）时；注意文首人工说明标注了计费的已知偏差。歌词**取不到词**（有歌名没词、每首 9 秒）看 [`PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md`](PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md)。 |
+| [`PR-REPORT-SELF-TALK-PRECACHE-2026-09-20.md`](PR-REPORT-SELF-TALK-PRECACHE-2026-09-20.md) | 点击台词朗读 + 本机语音预缓存（`self_talk_speak_enabled` / `self_talk_voice_precache_enabled`）：复用报时音频通道、后台补齐、缓存命名契约与 0 字节残file 判定。 | 改点击朗读/预缓存触发点、台词语音缓存命名或残file 判定、或调整 `_chime_wanted` 的通道存在性条件时。 |
+| [`PR-REPORT-SELF-TALK-IMAGE-CHANCE-2026-09-20.md`](PR-REPORT-SELF-TALK-IMAGE-CHANCE-2026-09-20.md) | 自言自语「配图概率」（`self_talk_image_chance`，默认 30）：把"文本+图片等权随机"（实测出图 82.8%）改成先掷骰子再在池内等权选。 | 改 `show_random_self_talk` 的抽签逻辑、或需要"为什么默认值从等权变成 30%"的依据与回滚口径时。 |
+| [`PR-REPORT-MUSIC-PLAYER-PATHS-2026-09-22.md`](PR-REPORT-MUSIC-PLAYER-PATHS-2026-09-22.md) | 音乐播放器路径设置（`music_player_paths`）PR 报告：设置页两行路径 + 后台「自动检测」、路径变了才清缓存、菜单提示改指设置页；含真机端到端与缺陷注入记录。 | 改 `pet/settings_music.py`、`pet/music_players.py` 的路径解析/缓存、或右键菜单「打开…给主人放歌」的可用性与提示文案时。 |
+| [`PR-REPORT-SETTINGS-INTERACTION-TABS-2026-09-22.md`](PR-REPORT-SETTINGS-INTERACTION-TABS-2026-09-22.md) | 「互动」域设置页分页 PR 报告：页内任务标签（点击与音效 / 自言自语）+ 整域抽成 `pet/settings_interaction.py`（对话框净减 94 行、预算首次因拆分下调）；含"功能不丢"的机器化断言与三档宽度截图。 | 改互动域的行/分组/标签、把某个域也改成分页、或调整 `scripts/capture_settings_pages.py` 的截图入口时。 |
+| [`PR-REPORT-music-lyric-align-2026-09-22.md`](PR-REPORT-music-lyric-align-2026-09-22.md) | 歌词对齐（`music_lyric_align`）PR 报告：手动校准快进/半途起播、会话选择与会话粘滞、`advance` 与 `line_now` 的分工；含性能实测表与网易云「不上报进度」的实机复现记录。 | 改歌词位置来源/对齐入口/多播放器会话选择时；或需要「为什么不做自动识别快进」的排查证据（桌面歌词不可读探针）时。**「对齐菜单点不动 / 歌词整首不显示」看 [`PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md`](PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md)**（估算位置冒充真值 + 系统代理拖死取词两处修复）。 |
+| [`PR-REPORT-LOCAL-WIP-BATCH-2026-09-22.md`](PR-REPORT-LOCAL-WIP-BATCH-2026-09-22.md) | 本地 WIP 批次 PR 报告：交付证据纪律（三份证据 + 机器化校验）、`build_onedir.ps1` 的 Qt 绑定排他（不修则构建被 PyInstaller 中止）、产物 TTS 自检脚本（真产物假红 → 修掉）、`character_head_box()` 与 shenshen 头部框数据。 | 改 `scripts/build_onedir.ps1` 的排除清单、`scripts/verify_bundle_tts.py` 的闭包判定、`pet/catalog.py` 的 `body_box`/`head_box` 取值，或要写新的 PR 报告（含三个必备章节的实例）时。 |
+| [`PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md`](PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md) | 歌词取词被系统代理拖死 + 网易云「歌词对齐」被误关的 PR 报告：系统代理下三源 20~41s 全超时 → 每首未缓存曲目「0 行/9.00s」，改直连后 1.27s/62 行；估算位置不再冒充「播放器上报的真值」。 | 改歌词取词的网络出口/超时/失败日志时；或排查「歌词突然全都没有」「歌曲只有歌名没有词」「歌词对齐菜单点不动」这类反馈时（含现场日志判读口径）。**影响面与推荐设置见 [`NETWORK-PROXY-AND-VPN-2026-09-22.md`](NETWORK-PROXY-AND-VPN-2026-09-22.md)**。 |
+| [`PR-REPORT-ISLAND-RESHOW-NOCHAT-2026-09-23.md`](PR-REPORT-ISLAND-RESHOW-NOCHAT-2026-09-23.md) | 纯桌宠版「桌宠隐藏后单击灵动岛无反应」的发布后补丁报告（`1c3a59c`）：岛发 `chat_requested` → 无 Chat 变体的 `_show_island_chat` 可用性闸门静默返回，整次点击被吞；改为无对话能力时直接「显示桌宠」。 | 改灵动岛单击路由 / `_chat_from_island` / 隐藏态交互面 / 无 Chat 变体的可用性闸门时；或再遇「点了没反应」类反馈要先看这条链路（岛 → AppShell → 闸门）时。 |
+| [`PR-REPORT-PERF-ISLAND-CONSOLIDATED-2026-09-23.md`](PR-REPORT-PERF-ISLAND-CONSOLIDATED-2026-09-23.md) | 流畅度/解码减负 + 岛远端硬墙 + 音效缓存 + 设置收口的 PR 报告：走路帧间补点（位置交付 28.6Hz→~160Hz）、碰撞 >50ms 卡顿 133→3、子宠进程补挂远端硬墙、零拷贝消融的诚实记录（崩溃案机理=绘制重入，未结案）。 | 改 `movement.move_anim_tick`/走路位移、webm 冷路径/首帧缓存/meta 后台化、岛碰撞远端模式与静态成员发布、音效候选缓存、或「多开」设置项时；排查 Qt6Gui 绘制重入崩溃时也要读（含消融对比与取证指针）。 |
 
 ---
 

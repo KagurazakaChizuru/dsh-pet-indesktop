@@ -106,6 +106,30 @@ BACKEND_LABELS = tts.labels()
 DEFAULT_BACKEND = BACKEND_MIMO
 DEFAULT_TTS_FALLBACK = True
 
+#: 2026-09-22 实测已从微软在线音色表下线的音色（老清单里的 10 款）。只用于把
+#: 「你配的那个音色已经没了」说成人话——用户看到的应当是「晓涵」而不是音色 id。
+DEPRECATED_VOICE_LABELS = {
+    "zh-CN-XiaochenNeural": "晓辰",
+    "zh-CN-XiaohanNeural": "晓涵",
+    "zh-CN-XiaomengNeural": "晓梦",
+    "zh-CN-XiaomoNeural": "晓墨",
+    "zh-CN-XiaoqiuNeural": "晓秋",
+    "zh-CN-XiaoruiNeural": "晓睿",
+    "zh-CN-XiaoshuangNeural": "晓双",
+    "zh-CN-XiaoxuanNeural": "晓萱",
+    "zh-CN-XiaoyanNeural": "晓颜",
+    "zh-CN-XiaoyouNeural": "晓悠",
+}
+
+
+def voice_label(value) -> str:
+    """音色的中文名：内置清单 → 已下线映射 → 原样返回 id。给用户看的提示用它。"""
+    voice = str(value or "").strip()
+    for name, label in VOICE_OPTIONS:
+        if name == voice:
+            return label.split("（")[0]
+    return DEPRECATED_VOICE_LABELS.get(voice, voice)
+
 _CUSTOM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 # 中文时刻文本（12 小时制）。
