@@ -2339,10 +2339,13 @@ class ModernSettingsDialog(QDialog):
             self.config.set("user_customized", True)
         ok = self.config.save()
         if not ok:
+            reason = getattr(self.config, "last_save_error", "") or "未知错误"
             QMessageBox.warning(
                 self,
                 "保存失败",
-                "配置未能写入磁盘，改动可能在重启后丢失。\n\n配置路径：" + str(self.config.path),
+                "配置未能写入磁盘，改动可能在重启后丢失。\n\n配置路径：" + str(self.config.path)
+                + "\n\n原因：" + reason
+                + "\n\n（已自动重试数次；若是杀毒/同步软件或另一个桌宠实例正在占用，稍后重试即可。）",
             )
         return ok
 

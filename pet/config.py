@@ -7,6 +7,7 @@ import copy
 import json
 import logging
 import os
+import time
 import re
 import shutil
 import sys
@@ -641,6 +642,27 @@ def _clean_collision_data(value: dict) -> dict:
     return result
 
 
+# Windows 上杀软/索引服务/另一实例会短暂占用刚落盘的文件（WinError 5/32 →
+# PermissionError，实机与 CI windows-latest 都有实录），属可自愈的瞬时错误。
+# 同款先例见 pet/chat/session_store.py 的 _replace_with_retry。
+_REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
+
+
+def _replace_with_retry(temp, path) -> None:
+    """os.replace 带界退避重试：骑过目标文件的瞬时占用窗口。
+
+    只重试 PermissionError（真实权限错误多试几次代价仅秒级）；重试耗尽后最后一次
+    调用不捕获，真实失败照常上抛，由 save() 记 warning 并返回 False。
+    """
+    for delay in _REPLACE_RETRY_DELAYS:
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(temp, path)
+
+
 class Config:
     def __init__(self, base=None, instance_id: str | None = None):
         base = Path(base) if isinstance(base, str) else (base or _default_base())
@@ -654,6 +676,8 @@ class Config:
         # 的）一律不动——「生小肥鱼」复用旧槽位时同样保留原槽设置。
         if self.instance_id and not self.path.exists():
             self._seed_slot_config_from_main()
+        #: 最近一次 save() 的失败原因（空 = 上次成功）；设置页据此把话说清楚
+        self.last_save_error = ""
         self.data = {
             "version": 4,
             "rx": None,
@@ -1561,17 +1585,50 @@ class Config:
         写盘使用 _redacted_data() 的副本，self.data 本身不动，保证运行期
         key 在内存可见而不会明文落盘。
         临时文件名加入 PID 后缀，避免错误并发写入撞名。
+        落盘走 _replace_with_retry：Windows 上杀软/索引服务/另一个实例（设置进程
+        隔离时是独立进程）会短暂占用目标文件，`os.replace` 会以 WinError 5/32
+        拒绝访问——那是可自愈的瞬时占用，不该让用户看到「保存失败」。
+        失败原因记在 self.last_save_error，供上层把话说清楚。
         """
+        self.last_save_error = ""
+        temp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
         try:
             self._normalize_pet_settings()
             self.dir.mkdir(parents=True, exist_ok=True)
-            temp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
             temp.write_text(
                 json.dumps(self._redacted_data(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            os.replace(temp, self.path)
+            _replace_with_retry(temp, self.path)
         except OSError as exc:
-            logging.warning("保存配置失败: %s (%s)", self.path, exc)
+            # 失败时保留 tmp（里面是最新一份内容，可人工取回），并留下可排查的路径
+            logging.warning("保存配置失败: %s (%s)；临时文件保留在 %s",
+                            self.path, exc, temp)
+            self.last_save_error = str(exc)
             return False
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass  # replace 成功后 tmp 已不存在；这里只兜异常删除失败的情况
+        self._sweep_stale_temps(temp)
         return True
+
+    def _sweep_stale_temps(self, keep) -> None:
+        """成功落盘后清掉同目录里别的进程留下的陈旧 tmp。
+
+        失败的保存会故意保留 tmp 供人工取回（见 save 的注释）；既然本次已经
+        成功写出权威文件，那些更旧的 tmp 就没有价值了——不扫就会一直堆着
+        （实机见过 9/21 留下的两个）。只删名字匹配、且比刚写出的文件更旧的。
+        """
+        try:
+            # 基准是刚落盘的权威文件：replace 成功后那个 tmp 已经不存在了
+            newest = self.path.stat().st_mtime
+        except OSError:
+            return
+        for stale in self.path.parent.glob(f"{self.path.name}.*.tmp"):
+            try:
+                if stale == keep or stale.stat().st_mtime >= newest:
+                    continue  # 同刻/更新的 tmp 可能是别的进程正在写的，别碰
+                stale.unlink(missing_ok=True)
+            except OSError:
+                continue  # 别的进程正在用这个 tmp：跳过即可
