@@ -88,9 +88,8 @@ from .animation_thumbnail import decode_representative_frame
 from .speech_bubble import PetSpeechBubble, list_self_talk_images
 from .fun_image_popup import oijingjing_image_path, resolve_fun_asset
 from .context_menu import normalize_template_id, populate_context_menu as _populate_context_menu
-from .context_menus.shared import take_deferred_menu_callbacks
+from .context_menus.shared import release_menu_tree, take_deferred_menu_callbacks
 from . import physics as physics_mod
-from .collision_client import CollisionClient
 from .click_sound import (
     choose_sound, play_sound, resolve_click_sound_candidates, resolve_click_sound_pair,
     play_press_sound, play_release_sound,
@@ -342,6 +341,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     look_done = Signal(str, str, bool)
     fullscreen_changed = Signal(bool)  # 全屏 watcher 线程 → 主线程（隐藏/恢复桌宠）
     cursor_visibility_changed = Signal(str)
+    # 首帧就绪（一次性）：v4.2.1 起 GUI 线程不再同步解码首帧（da8f291），窗口刚
+    # show() 时 icon_pixmap() 还是空图——托盘图标需要这个信号在上线后补画。
+    frame_ready = Signal()
 
     # 类级兜底默认值：测试里有绕过 __init__ 的轻量子类桩（_SignalPet 等），
     # 它们继承真实 moveEvent/_on_squash_tick——这些属性必须有类级默认。
@@ -353,15 +355,15 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
     # 类级默认供测试轻量桩；实例永不原地 mutate，只整体替换。
     _draw_delta = QPoint(0, 0)
 
-    def __init__(self, lib: MovieLibrary, config: Config, collision_session=None,
-                 broker_facade=None, *, clock=None, single_process_spawn: bool = False, agent_link_manager=None, proactive_watcher=None) -> None:
+    def __init__(self, lib: MovieLibrary, config: Config,
+                 broker_facade=None, *, clock=None, agent_link_manager=None, proactive_watcher=None) -> None:
         super().__init__()
         self.lib = lib
         self.cfg = config
-        # 批5.2 N-1（复审阻塞项）：进程级 flag 快照必须在 __init__ 早期就位——
-        # 尾部 _restore_position() 会写/读 runtime 标记，若等构造返回后再注入，
-        # flag 开下每个窗的初始标记都会错用旧名（两窗互踩）。
-        self._single_process_spawn = bool(single_process_spawn)
+        # 4.4b：进程级共享子系统（agent_link / proactive / 全屏 watcher）常建，
+        # 全屏监视由共享 watcher 接管——建窗时由 app 置位（测试自建宿主缺席时
+        # 保留窗口自建 watcher 的旧路径）。
+        self.shared_fullscreen_watcher_active = False
         # 批5.3：ProcessShell 注入的共享解码 hook（DecodeFanoutHub，替代原
         # P3 BrokerFacade；默认 None = hub 关，窗口全部 broker 分支 no-op，
         # 与历史行为逐位一致）。
@@ -578,6 +580,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._switch_retry_timer.setInterval(_SWITCH_RETRY_DELAY_MS)
         self._switch_retry_timer.timeout.connect(self._on_switch_retry_timeout)
         self._frame_pixmap: QPixmap | None = None
+        self._frame_ready_emitted = False  # 首帧就绪信号（frame_ready）只发一次
         # 角色可见轮廓（窗口局部坐标）与逐像素命中缓存；贴边功能复用 _mask_bounds
         self._mask_bounds: QRect | None = None
         # 碰撞体稳定边界：当前动画各帧 _mask_bounds 的并集（只增不减，
@@ -674,6 +677,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._physics_timer.setTimerType(Qt.TimerType.PreciseTimer)  # 同上：抛掷/落地弹跳的位置节拍必须均匀
         self._physics_timer.timeout.connect(self._on_physics_tick)
         self._physics_mode: str | None = None  # None / 'drag' / 'throw'
+        # 多屏活动区域快照（window_placement.desktop_area）：一次拖拽/抛掷取一次，
+        # 物理 tick 里只读它，不重复枚举显示器；None = 单屏/几何异常，走本屏语义。
+        self._interaction_area = None
         self._phys_pos = [0.0, 0.0]
         self._phys_vel = [0.0, 0.0]
         self._drag_target: QPoint | None = None
@@ -711,16 +717,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._jank_timer.start()
             gui_stall_sampler.attach(self)  # 冻结现场采样（仅观测模式）
 
-        # ---- 碰撞客户端（组合）：会话/上报/快照/冲量/predicted 已迁至 CollisionClient（批 6-4）----
-        self._collision_app_session = None  # AppShell 持有的 IPC facade（重挂用）
-        self._collision_client = CollisionClient(
-            self,
-            thrown=THROWN,
-            dragging=DRAGGING,
-            slingshot_aiming=SLINGSHOT_AIMING,
-            hit_min_dv=COLLISION_HIT_MIN_DV,
-            contact_dv_floor=COLLISION_CONTACT_DV_FLOOR,
-        )
+        # 4.4a：碰撞客户端（CollisionClient）随多进程多宠退役层停用删除——
+        # 多宠碰撞归 overlay 拓扑的 SpriteCollisionWorld；本窗不再提交/接收
+        # 跨进程快照与冲量。撞岛反馈的"落地后重进边缘探头"标记仍归窗口自己。
+        self._reentry_after_throw_armed = False
 
         # ---- 尺寸与初始状态 ----
         self._apply_scale()
@@ -751,7 +751,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if self._awaiting_saved_screen:
             self._arm_screen_restore_retry()
 
-        self.attach_collision_session(collision_session)
         # 启动即按配置装配/同步可选服务（主动识屏、Agent 联动、效果控制器）。
         # 不能只调 _install_effect_services()：AgentLinkManager 是懒创建的，
         # 监视器真正启动靠 apply_config()，此前启动路径无人调用，导致重启后
@@ -1126,7 +1125,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # 原生窗口此刻已就绪：置位 WS_EX_NOACTIVATE，点击桌宠不夺前台（issue #98）。
         # 放在 showEvent 是因为改 flags / 重建原生窗口都可能丢掉扩展样式位。
         self._apply_windows_no_activate()
-        self._submit_collision_state(force=True)
         self._schedule_macos_window_level(bool(self.cfg.get('on_top', True)))
         self._apply_opacity()
         # 启动即登记 runtime 标记：否则没被拖动过的新生小肥鱼没有标记，
@@ -1141,7 +1139,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._hidden_paused = False
             self._phys_vel[:] = [0.0, 0.0]
             self._resume_activity()
-            self._submit_collision_state(force=True)
             # 恢复显示 = 用户重新看着桌宠：重置闲置计时，重新以全帧率呈现
             # （只有再闲置 idle_low_fps_threshold 秒才进入降帧）
             self.mark_activity()
@@ -1163,7 +1160,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._effects_on_hidden()
         self._pause_activity()
         super().hide()
-        self._submit_collision_state(force=True)
         if not notify:
             return
         if callable(getattr(self, "on_hidden", None)):
@@ -1260,17 +1256,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                     buttons=self._sticky_buttons,
                 )
 
-    def attach_collision_session(self, session) -> None:
-        """绑定 AppShell 持有的 IPC facade，GUI 不接触 socket。"""
-        self._collision_app_session = session
-        self._collision_client.attach(session)
-        # 批5.3：attach 尾部 bind —— 把注入且启用的 DecodeFanoutHub 绑到本窗口
-        # attach 的会话（hub 的 bind/unbind 为 no-op，保留签名平稳窗口调用点）。
-        facade = getattr(self, '_broker_facade', None)
-        if facade is not None and bool(getattr(facade, 'enabled', False)):
-            facade.unbind()
-            facade.bind(session)
-
     # ---- 共享解码：窗口侧接线（只经 DecodeFanoutHub 公开接口）-------------
     def _broker_active(self) -> bool:
         """fan-out 是否参与本窗口：facade（DecodeFanoutHub）注入且启用。
@@ -1333,19 +1318,19 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         except Exception:
             logging.exception('broker shareable_end 异常: %s', name)
 
-    def detach_collision_session(self) -> None:
-        """解绑碰撞会话：发 leave、断开信号、停定时器并清空客户端预测状态。
+    def detach_decode_sessions(self) -> None:
+        """本窗收尾：按注册身份收尾 broker 会话并摘掉素材的发布/订阅钩子。
 
-        P3 broker（P3A P2-2 + 终审 P1-2）：解绑 = broker teardown——先按
-        注册身份收尾当前 movie 的 broker 会话（unbind 为 no-op，hub 无会话
-        可绑；收尾由 _broker_unregister 驱动，不先收尾则运行期关碰撞后发布
+        4.4a 起本方法只做共享解码侧收尾（原 CollisionClient.detach 的碰撞
+        会话解绑随多进程多宠退役层删除）：
+        先按注册身份收尾当前 movie 的 broker 会话（unbind 为 no-op，hub 无会话
+        可绑；收尾由 _broker_unregister 驱动，不先收尾则运行期关闭后发布
         记录残留到 shutdown），再 facade.unbind()，最后摘掉当前 movie 的
         发布/订阅钩子，避免 broker 停用期间复用旧 clip（同素材重播/回退）
         时误用上一轮的 sink/feed。正在 stream 的 feed 由 movie 的 stop/
         自然结束收尾（reader 的 finally 必 close feed session），此处不
         打断播放。
         """
-        self._collision_client.detach()
         movie = getattr(self, 'movie', None)
         if movie is not None:
             self._broker_unregister(self.anim, movie, natural=False)
@@ -1364,101 +1349,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 movie._feed_source = None
             except Exception:
                 pass
-
-    def _sync_collision_policy(self) -> None:
-        """把当前配置的碰撞参数同步到会话 policy，运行中改动即时生效。"""
-        self._collision_client._sync_collision_policy()
-
-    # ---- 碰撞客户端委托（逻辑与状态已迁至 pet/collision_client.py 批 6-4）----
-    # 以下方法/属性仅为保持窗口既有调用面与测试断言不变而保留的薄委托；
-    # 任何碰撞数值路径都只存在于 CollisionClient，窗口不再持有碰撞字段。
-
-    @property
-    def _collision_session(self):
-        return self._collision_client.session
-
-    @_collision_session.setter
-    def _collision_session(self, value):
-        self._collision_client.session = value
-
-    @property
-    def collision_app_session(self):
-        """AppShell 持有的 IPC facade（只读 seam，供 CollisionClient 策略兜底同步）。"""
-        return self._collision_app_session
-
-    @property
-    def _collision_timer(self):
-        return self._collision_client.timer
-
-    @property
-    def _collision_last_submit_at(self) -> float:
-        return self._collision_client.last_submit_at
-
-    @_collision_last_submit_at.setter
-    def _collision_last_submit_at(self, value: float) -> None:
-        self._collision_client.last_submit_at = value
-
-    @property
-    def _collision_peer_snapshots(self) -> dict[str, dict[str, Any]]:
-        return self._collision_client.peer_snapshots
-
-    @_collision_peer_snapshots.setter
-    def _collision_peer_snapshots(self, value) -> None:
-        self._collision_client.peer_snapshots = value
-
-    @property
-    def _predicted_bounces(self) -> dict[str, float]:
-        return self._collision_client.predicted_bounces
-
-    @_predicted_bounces.setter
-    def _predicted_bounces(self, value) -> None:
-        self._collision_client.predicted_bounces = value
-
-    @property
-    def _collision_epoch(self) -> str:
-        return self._collision_client.epoch
-
-    @_collision_epoch.setter
-    def _collision_epoch(self, value: str) -> None:
-        self._collision_client.epoch = value
-
-    @property
-    def _pending_predicted_bounce(self):
-        return self._collision_client.pending_predicted_bounce
-
-    @_pending_predicted_bounce.setter
-    def _pending_predicted_bounce(self, value) -> None:
-        self._collision_client.pending_predicted_bounce = value
-
-    @property
-    def _pending_predicted_contact(self):
-        return self._collision_client.pending_predicted_contact
-
-    @_pending_predicted_contact.setter
-    def _pending_predicted_contact(self, value) -> None:
-        self._collision_client.pending_predicted_contact = value
-
-    @property
-    def _last_collision_squash_at(self) -> float:
-        return self._collision_client.last_collision_squash_at
-
-    def _submit_collision_state(self, force: bool = False) -> None:
-        client = getattr(self, '_collision_client', None)
-        if client is None:
-            return
-        client._submit_collision_state(force=force)
-
-    def _on_collision_impulse(self, message: dict[str, Any]) -> None:
-        self._collision_client._on_collision_impulse(message)
-
-    def _prune_collision_prediction_state(self, now: float) -> None:
-        self._collision_client._prune_collision_prediction_state(now)
-
-    def _collision_velocity(self) -> tuple[float, float]:
-        return self._collision_client._collision_velocity()
-
-    def _collision_flags(self) -> int:
-        return self._collision_client._collision_flags()
 
     @staticmethod
     def _fullscreen_geometry_hit(l: float, t: float, r: float, b: float,
@@ -1580,7 +1470,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if self.no_move and self._move_plan is not None:
             if self.idles:
                 self._switch(self._pick(self.idles))  # 打断进行中的移动
-        self._submit_collision_state(force=True)
 
     # ================================================================ 播放
     def _connect_movie(self, name: str, movie) -> None:
@@ -1695,7 +1584,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._pending_switch_link = False
             self._switch_retry_count = 0
             self._switch_retry_timer.stop()
-        self._submit_collision_state(force=True)
         # 动画切换是让路闸门的唯一事实来源之一：点击动画开始播放时持有、
         # 播完（_on_anim_ended 切走）时释放，覆盖所有早期返回路径。
         self._update_interaction_hold()
@@ -1739,7 +1627,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._ended_fired = False
             self.movie = prev_movie
             self._rebuild_frame()
-            self._submit_collision_state(force=True)
             self._update_interaction_hold()
         else:
             self._fallback_playable_idle(requested)
@@ -1782,7 +1669,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._click_hold = False
             self._update_interaction_hold()
             return
-        self._submit_collision_state(force=True)
         self._update_interaction_hold()
 
     def _schedule_switch_retry(self, requested: str, is_link: bool = False) -> None:
@@ -2118,6 +2004,14 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             # fromImage（浅共享）（P0 观测：重建的缩放段成本）。
             perfstats.time('rebuild.scale', perfstats.clock() - _scale_t0)
         self._frame_pixmap = pm
+        if not getattr(self, '_frame_ready_emitted', False):
+            # 首帧就绪：窗口刚 show() 时拿不到画面的下游（托盘图标）在此补画一次。
+            # 两层 getattr 兜底：测试里有只挂载 _rebuild_frame 的假窗口
+            #（_RebuildPet 等），既没有本标志也没有 frame_ready 信号。
+            self._frame_ready_emitted = True
+            signal = getattr(self, 'frame_ready', None)
+            if signal is not None:
+                signal.emit()
         # 命中测试复用这份缩放后的预乘图，避免 _is_transparent_at 再次 toImage
         self._hit_alpha_image = img
         self._frame_key = key
@@ -3050,7 +2944,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if self.drag_physics and self._drag_target is None:
             self._drag_target = QPoint(self._virtual_pos())
         self._start_slingshot_rebound(progress)
-        self._submit_collision_state(force=True)
         self.update()
 
     def _cancel_slingshot_to_anchor(self) -> None:
@@ -3094,7 +2987,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         # The launch changes both flags and velocity after move(anchor). Publish
         # it immediately; otherwise the first 50ms can remain behind the 500ms
         # idle heartbeat and a fast throw crosses a peer before registration.
-        self._submit_collision_state(force=True)
         self.update()
 
     def _is_in_interactive_area(self, local_pos) -> bool:
@@ -3295,8 +3187,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 return
             self._dragging = True
             self._interaction_state = "DRAGGING"
+            # 多屏：拖拽期间允许越屏（一次交互取一次快照，物理 tick 里只读它）
+            self._interaction_area = window_placement.desktop_area()
             self._effects_on_drag_started()
-            self._submit_collision_state(force=True)
             # 用户真正开始拖动 = 接管位置决策，撤销"等副屏上线自动恢复"
             # （必须在这里而不是按下时：普通点击/未过阈值/未按 SHIFT 不算接管）
             _disarm = getattr(self, '_disarm_screen_restore_retry', None)
@@ -3385,6 +3278,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 if self._grab_offset is not None:
                     self._move_window_towards(g.x() - self._grab_offset.x(),
                                               g.y() - self._grab_offset.y())  # 停在松手处
+                self._interaction_area = None  # 普通拖拽结束：多屏快照释放，回本屏语义
                 self._save_position()
             self._position_sync_now()  # 松手后的最终位置立即同步（气泡/监听器），不等去抖
             if self.idles and self._physics_mode != 'throw':
@@ -3413,7 +3307,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._cursor_restore_pending = False
             self._auto_cursor_hidden = False
         self._apply_effective_mouse_through()
-        self._submit_collision_state(force=True)
         # 松手后重算让路闸门：左键已释放，若点击动画仍在播放则继续保持持有
         self._update_interaction_hold()
         self._effects_on_release(was_dragging)
@@ -3745,40 +3638,9 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                     return
 
             menu.destroyed.connect(schedule_after_menu_destroyed)
-        # 菜单使用完毕即释放整棵菜单树：QMenu 以长命窗口为 parent，
-        # 不删除会随每次右键累积（子菜单/动作/线程池/图标 pixmap）。
-        # 先清掉尚未启动的解码任务，避免 QThreadPool 析构时在 GUI 线程
-        # 等待运行中的 worker。
-        pools = []
-        for submenu in menu.findChildren(QMenu):
-            pool = getattr(submenu, "_animation_icon_pool", None)
-            if pool is not None:
-                pool.clear()
-                pools.append(pool)
-
-        def delete_when_idle(_attempts: int = 0) -> None:
-            """非阻塞等待图标解码 worker 结束后再释放菜单树。
-
-            直接 pool.waitForDone(3000) 会阻塞 GUI 线程最多 3 秒，可能造成
-            右键菜单关闭时卡顿/假死；这里每 50ms 轮询一次，不阻塞事件循环。
-            总上限 3s（60×50ms）：解码 worker 病态不结束时也强制释放，
-            否则菜单树会永久滞留、deferred 回调永不派发（审查 DS-L16）。
-            """
-            if _attempts >= 60:
-                menu.deleteLater()
-                return
-            if any(not pool.waitForDone(0) for pool in pools):
-                # 绑定 menu 为 context：窗口/菜单在轮询途中销毁时定时器随
-                # context 失效被丢弃，否则回调会对已删 C++ 对象 deleteLater
-                #（GUI 线程 RuntimeError）。
-                QTimer.singleShot(50, menu, lambda: delete_when_idle(_attempts + 1))
-                return
-            menu.deleteLater()
-
-        if pools:
-            delete_when_idle()
-        else:
-            menu.deleteLater()
+        # 菜单使用完毕即释放整棵菜单树（overlay 路径共用同一收口，见
+        # context_menus.shared.release_menu_tree）
+        release_menu_tree(menu)
 
     def reopen_context_menu(self, menu: QMenu) -> None:
         """Close the old template and immediately show the newly selected one."""
@@ -3919,14 +3781,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             bubble.hide()
 
     def refresh_pet_settings(self) -> None:
-        collision_enabled = bool(self.cfg.get('collision_enabled', True))
-        if collision_enabled and self._collision_session is None:
-            self.attach_collision_session(getattr(self, '_collision_app_session', None))
-        elif not collision_enabled and self._collision_session is not None:
-            # 先让协调 worker 停止求解，再提交本地成员 leave。
-            self._sync_collision_policy()
-            self.detach_collision_session()
-        self._sync_collision_policy()
         desired_scale = float(self.cfg.get('scale', self.scale))
         self.change_scale(desired_scale)
         desired_speed = float(self.cfg.get('playback_speed', self.playback_speed))
@@ -4203,7 +4057,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self.cfg.set('mouse_through', self._user_mouse_through)
         self.cfg.save()
         self._apply_effective_mouse_through()
-        self._submit_collision_state(force=True)
         if on and self.isVisible() and not getattr(self, "_bubble_suppressed", False):
             tray_label = "点菜单栏托盘图标" if sys.platform == "darwin" else "右键系统托盘图标"
             self.show_bubble(
@@ -4250,7 +4103,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._grab_offset = None
             self._sync_drag_polling(False)
             self._stop_physics()
-        self._submit_collision_state(force=True)
         self._update_interaction_hold()  # 拖拽被锁定位置打断 → 释放让路
 
     def set_shift_drag(self, on: bool) -> None:
@@ -4277,12 +4129,20 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         was_throw = self._physics_mode == 'throw'
         self._physics_timer.stop()
         self._physics_mode = None
+        self._interaction_area = None  # 物理结束：多屏活动范围快照随之释放
         getattr(self, 'movie', None) and self.movie.set_playback_speed(float(getattr(self, 'playback_speed', 1.0)))  # 飞行期动画加速复位（回用户速率，非 1.0）
         self._unpin_landing_idles()  # 飞行结束：摘掉起飞首帧保护（pin 只在飞行期存在）
         if getattr(self, '_interaction_state', IDLE) == THROWN:
             self._interaction_state = IDLE
         self._phys_vel[:] = [0.0, 0.0]
-        self._submit_collision_state(force=True)
+        # 4.4a：撞岛/撞飞落地停稳 → 通知边缘探头开始重进倒计时（原由
+        # CollisionClient._submit_collision_state 承担；客户端退役后归窗口本侧）。
+        if getattr(self, '_reentry_after_throw_armed', False):
+            self._reentry_after_throw_armed = False
+            edge = getattr(self, '_edge_probe', None)
+            _on_settled = getattr(edge, 'on_throw_settled', None)
+            if callable(_on_settled):
+                _on_settled()
         _te = getattr(self, '_throw_egg', None)
         if _te is not None:
             _te.end()
@@ -4297,6 +4157,10 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         self._cancel_move()
         self._cancel_animation_gap()
         self._physics_mode = mode
+        # 多屏：拖拽/抛掷期间允许越屏。快照一次交互只取一次，物理 tick 里只读它。
+        self._interaction_area = (
+            window_placement.desktop_area() if mode in ('drag', 'throw') else None
+        )
         if mode == 'throw':
             self._throw_slow_switched = False  # 每次弹射只允许一次降速过渡
             self._warm_landing_idles()
@@ -4446,7 +4310,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         bounced_any = False
         px, py = self._phys_pos[0], self._phys_pos[1]
         vx, vy = self._phys_vel[0], self._phys_vel[1]
-        start_px, start_py = px, py
 
         while remaining > 1e-6:
             step_dt = min(max_sub_dt, remaining)
@@ -4464,9 +4327,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         _te = getattr(self, '_throw_egg', None)
         if _te is not None:
             _te.update(vx, vy, px <= left + 1e-6 or px >= right - 1e-6 or py >= bottom - 1e-6)
-        predict_bounce = getattr(self, '_predict_collision_bounce', None)
-        if callable(predict_bounce):
-            predict_bounce(start_px, start_py)
         self._move_window_towards(self._phys_pos[0], self._phys_pos[1])
         speed = math.hypot(self._phys_vel[0], self._phys_vel[1])
         # 飞行期动画随速度加速（叠加在用户播放速率之上；停飞由
@@ -4486,14 +4346,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._phys_pos[1], self._phys_vel[0], self._phys_vel[1], bottom, bounced_any, speed
         ):
             self._stop_physics()
-
-    def _predict_collision_bounce(self, start_x: float, start_y: float,
-                                  incoming_vx: float | None = None,
-                                  incoming_vy: float | None = None) -> None:
-        """throw 物理 tick 后的本地弹跳预测（实现已迁至 CollisionClient 批 6-4）。"""
-        self._collision_client._predict_collision_bounce(
-            start_x, start_y, incoming_vx=incoming_vx, incoming_vy=incoming_vy)
-
 
     def _request_quit(self) -> None:
         # 不在此保存位置，避免把自动移动/抛掷的随机终点写入记忆。
@@ -4540,7 +4392,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._refresh_frame_for_screen_dpr()
         # 非 force 节流提交：位置变化由去重 + 20Hz 限流兜底，运动期由
         # _collision_timer（50ms）强制上报，避免 60Hz 抛掷移动上报超标
-        self._submit_collision_state()
         # 气泡重定位与 position listeners 同帧合并：同一 GUI 帧内多次
         # moveEvent 只处理最后一次（0ms 去抖）；拖拽开始/松手关键帧由
         # 调用方 _position_sync_now() 立即同步，去抖回调随后被丢弃。
@@ -4619,7 +4470,7 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
             self._cancel_slingshot_to_anchor()
         self._disarm_screen_restore_retry()  # 窗口销毁前摘掉 screenAdded 监听/超时回调
         self._stop_fs_watch()
-        self.detach_collision_session()
+        self.detach_decode_sessions()
         if self._input_controller is not None:
             self._input_controller.stop()
             self._input_controller = None

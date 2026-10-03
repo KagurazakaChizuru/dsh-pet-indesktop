@@ -280,11 +280,54 @@ _POPEN_TYPE = subprocess.Popen
 # Windows 防句柄泄漏），不持有引用则子进程退出后无人 waitpid。
 _LAUNCHED_CHILDREN: list[subprocess.Popen] = []
 
+# 本进程**自拉起**的 harness pid 登记（退出收口 / 联动关闭收口的唯一依据）。
+# 为什么必须有：Windows 上子进程用 CREATE_NO_WINDOW 起，不带 DETACHED_PROCESS
+# 也不会随父进程退出而被杀（实机确认桌宠退出后 node.exe 仍活着）——「谁拉的谁
+# 收尾」只能靠这里记下的身份。存 pid 而不是 Popen 对象：收口时要用**当下**的
+# 命令行复核身份（防 pid 复用），句柄回收则由 _LAUNCHED_CHILDREN 负责。
+_SELF_LAUNCHED_PIDS: list[int] = []
+
+# 登记表与子进程列表的互斥锁（G2 并发补丁）：联动关闭的收口在 daemon 线程、
+# 自动拉起在 worker 线程、正常退出在主线程——三方可能并发读写这两个列表。
+# 粒度纪律：锁只护**列表读写瞬间**（record/forget/reap/child_for/快照/spawn 登记），
+# 慢操作（存活探测、命令行反查、taskkill、终止后等待）一律在锁外——
+# 拿锁做秒级系统调用等于把 G2 治好的阻塞换个地方复发。
+# 用 RLock：``_spawn`` 的两条登记需要在同一临界区完成，而
+# ``_record_self_launched`` 自身也进这把锁（同线程重入不许死锁）。
+_OWNERSHIP_LOCK = threading.RLock()
+
 
 def _reap_children() -> None:
-    for proc in list(_LAUNCHED_CHILDREN):
-        if proc.poll() is not None:
-            _LAUNCHED_CHILDREN.remove(proc)
+    with _OWNERSHIP_LOCK:
+        for proc in list(_LAUNCHED_CHILDREN):
+            if proc.poll() is not None:
+                _LAUNCHED_CHILDREN.remove(proc)
+
+
+def _record_self_launched(pid) -> None:
+    """登记一个自拉起的 harness pid（非正整数一律忽略：宁缺勿滥）。"""
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    with _OWNERSHIP_LOCK:
+        if pid not in _SELF_LAUNCHED_PIDS:
+            _SELF_LAUNCHED_PIDS.append(pid)
+
+
+def _forget_self_launched(pid: int) -> None:
+    with _OWNERSHIP_LOCK:
+        try:
+            _SELF_LAUNCHED_PIDS.remove(int(pid))
+        except ValueError:
+            pass
+
+
+def _child_for(pid: int):
+    """登记表 pid 对应的自拉起 Popen 句柄（无活体句柄 = 身份不可考，见收口 docstring）。"""
+    with _OWNERSHIP_LOCK:
+        for proc in list(_LAUNCHED_CHILDREN):
+            if getattr(proc, "pid", None) == pid:
+                return proc
+    return None
 
 
 def _spawn(command: list[str]) -> None:
@@ -299,6 +342,9 @@ def _spawn(command: list[str]) -> None:
     （/usr/bin/env node）的 shell 脚本，执行时用的是**子进程环境**的 PATH，
     而非 _which 用的增强 PATH——不注入增强 PATH 会静默失败
     （env: node: No such file or directory，45 秒后无反应）。
+
+    起成功后把 pid 记进自拉起登记表：桌宠退出不会带走这个子进程，收口
+    （``stop_self_launched_harness``）只认这里记下的身份。
     """
     kwargs: dict = {
         "cwd": str(Path.home()),  # dsh 以调用目录为默认工作区，用家目录保持中性
@@ -314,20 +360,34 @@ def _spawn(command: list[str]) -> None:
     _reap_children()
     proc = subprocess.Popen(command, **kwargs)
     if isinstance(proc, _POPEN_TYPE):
-        _LAUNCHED_CHILDREN.append(proc)
+        # 两条登记同进同出（R2 修复）：「pid 有登记 ⇒ 句柄有登记」的不变量
+        # 是 G3 身份门槛的前提，任何替身/补丁环境下都不许拆开。
+        # 且两条登记在同一临界区完成（RLock 重入），杜绝「pid 登了句柄没登」
+        # 与「句柄登了 pid 没登」两个半登记窗口（ds/sol R3）。
+        with _OWNERSHIP_LOCK:
+            _LAUNCHED_CHILDREN.append(proc)
+            _record_self_launched(getattr(proc, "pid", None))
 
 
-def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tuple[str, str]:
+def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True,
+                   cancel_check=None) -> tuple[str, str]:
     """启动 harness；open_browser=True 时确保浏览器被打开。
 
     open_browser=False（随桌宠自启动场景）：只起服务不开浏览器——已有实例
     直接返回，新起实例不等就绪、不开页面。注意旧版 dsh 不支持 --no-open
     时会自己开浏览器，此参数无法阻止（启动前无法可靠探测）。
 
+    ``cancel_check``（可选）：无参可调用对象，返回 True 表示「放弃拉起」。
+    在慢命令解析（``_find_launch_command``，npm 探测最长 15s）**之后**、
+    ``_spawn`` **之前**评估一次——自动拉起路径的退出/会话结束标记可能在
+    慢探测期间落地，没有这道闸就会在关机窗口里照样派生进程（astra 终审 P1）。
+    菜单手动启动不传（用户明示动作永远可用）。
+
     返回 (status, url)：
     - already   已有实例在运行（配置端口或官方默认 3080）；open_browser 时已打开浏览器
     - started   已后台启动；open_browser 且命令带 --no-open 时由桌宠等待就绪后
                 打开浏览器，否则由 dsh 自己开浏览器（桌宠不重复打开）
+    - aborted   cancel_check 命中：慢探测后放弃拉起（未 spawn）
     - not-found 未找到 dsh 命令
     - error     启动异常（info 为异常信息）
     """
@@ -341,6 +401,8 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tu
     command = _find_launch_command(port)
     if command is None:
         return "not-found", url
+    if cancel_check is not None and cancel_check():
+        return "aborted", url
     try:
         _spawn(command)
     except OSError as exc:
@@ -375,8 +437,19 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tu
 # 关闭它的唯一入口——以前关掉那个可见控制台窗口就等于关服务，现在窗口不存在了。
 
 # 命令行必须命中的特征：dsh 的包名/可执行名 + web 子命令。这是防「pid 复用
-# 误杀」的身份核验（实机教训见 child_pet_cleanup 里对 pid 复用的核验注释）。
+# 误杀」的身份核验（实机教训：杀前必须核对命令行/可执行路径，不能只看 pid）。
 _HARNESS_CMDLINE_TOKENS = ("dsh", "web")
+
+# 镜像提示（按端口反查路径）：持有监听 socket 的是 node（或 dsh 本体）。
+_HARNESS_IMAGE_HINTS = ("node", "dsh")
+# 自拉起收口专用的镜像提示（比上面多认 cmd）：Windows 上 dsh 是 npm 生成的
+# `.cmd` shim，``_wrap_cmd`` 会把它包成 ``cmd.exe /c <...>\dsh.CMD web``——
+# 于是**直接子进程**（我们记下 pid 的那个）镜像是 cmd.exe，真正监听端口的是它
+# 的 node 子进程（本机实测 ``which("dsh")`` == %APPDATA%\npm\dsh.CMD）。
+# 只对自拉起登记表放宽：那条路径另有更强的一重证据（pid 是本进程亲手 spawn 的，
+# 且登记表为空时一次 terminate 都不会发）；按端口反查面对的是任意监听者，仍只认
+# node/dsh 镜像，宁可不杀。
+_SELF_LAUNCHED_IMAGE_HINTS = ("node", "dsh", "cmd")
 
 
 @dataclass(frozen=True)
@@ -564,11 +637,15 @@ def _pid_image_path(pid: int) -> str | None:
         return None
 
 
-def _looks_like_harness(pid: int, command_line: str | None) -> bool:
-    """进程是否确为 dsh web（命令行两个特征都命中，且镜像是 node/dsh 一类）。
+def _looks_like_harness(pid: int, command_line: str | None,
+                        *, image_hints: tuple[str, ...] = _HARNESS_IMAGE_HINTS) -> bool:
+    """进程是否确为 dsh web（命令行两个特征都命中，且镜像是期待的宿主之一）。
 
     宁可放过（返回 False → 用户看到「端口被别的程序占用」）也不误杀：杀错
     进程的代价远高于多点一次启动。
+
+    ``image_hints`` 由调用方按证据强度选择：按端口反查用默认的 node/dsh；自拉起
+    收口传 ``_SELF_LAUNCHED_IMAGE_HINTS``（多认 cmd，理由见该常量）。
     """
     lowered = str(command_line or "").lower()
     if not lowered or not all(token in lowered for token in _HARNESS_CMDLINE_TOKENS):
@@ -577,7 +654,7 @@ def _looks_like_harness(pid: int, command_line: str | None) -> bool:
     if not image:
         # 读不到镜像路径（权限/受保护进程）：命令行已带 dsh + web，按可信处理
         return True
-    return any(hint in image for hint in ("node", "dsh"))
+    return any(hint in image for hint in image_hints)
 
 
 def find_harness_process(port: int = DEFAULT_PORT) -> HarnessProcess | None:
@@ -597,10 +674,10 @@ def describe_harness_process(port: int = DEFAULT_PORT) -> HarnessProcess | None:
     return find_harness_process(port)
 
 
-def _terminate_process_tree(pid: int) -> None:
-    """终止进程及其子进程树（Windows taskkill /T /F；POSIX 按进程组先 TERM 后 KILL）。
+def _terminate_process_tree(pid: int, proc=None) -> bool:
+    """终止进程及其子进程树，返回终止命令是否成功（Windows taskkill /T /F；POSIX 按进程组先 TERM 后 KILL）。
 
-    与 child_pet_cleanup._terminate_pet_process 同款：Windows 上的 .cmd shim
+    Windows 上的 .cmd shim
     会让 dsh 以「cmd → node」两层形态存在，/T 才能收干净；CREATE_NO_WINDOW
     防止 GUI 进程里凭空弹一个空白控制台窗口（实机反馈）。
     POSIX 上 dsh 常为「npx → node」两层：只 kill 顶层 pid 会留下 node 子进程，
@@ -610,7 +687,22 @@ def _terminate_process_tree(pid: int) -> None:
     `dsh web &` 这类后台启动的 dsh 属于脚本的组，killpg 会把整个脚本组连带
     终止——该场景回退单 pid kill（爆炸半径宁小勿大）。目标组恰为本进程组
     时同样回退单 pid kill，绝不向自己的组发信号。
+
+    返回值的语义（G1 修复）：Windows 取 taskkill 返回码——非零且目标仍存活
+    才算失败（非零但进程已不存在，如 128/查无此进程，说明它先死了，不算失败），
+    调用方**不得**把失败记成已终止；POSIX 以信号是否实际送达为返回值，
+    调用方的存活复核兜底（见 ``stop_self_launched_harness`` 的终止后复查）。
+
+    ``proc``（可选）：目标的 Popen 句柄。给出时 POSIX 的 TERM 后等待用
+    ``proc.poll()`` 判活——``is_running_pid`` 对未回收的僵尸返回存活，
+    会让 TERM 成功的常规路径白等 3s 再补一发对僵尸无效的 SIGKILL
+    （ds/sol R3）；poll 顺带完成回收，僵尸消失。且给出 ``proc`` 时**发信号前**
+    先查它：句柄已死说明「我们的子进程已被终止（可能由并发收口完成）」，
+    直接返回成功而**不向数字 pid 发任何信号**——数字 pid 此刻可能已被系统
+    复用给别的进程，信号会打错目标（astra 终审 P1 的过期身份绑定）。
     """
+    if proc is not None and proc.poll() is not None:
+        return True  # 我们的子进程已被终止（并发收口先完成）：身份绑定，不再发信号
     if os.name == "nt":
         result = subprocess.run(
             ["taskkill", "/PID", str(int(pid)), "/T", "/F"],
@@ -618,14 +710,18 @@ def _terminate_process_tree(pid: int) -> None:
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if result.returncode != 0:
+            if not is_running_pid(pid):
+                # 非零但目标已不存在（128/查无此进程）：它先死了，不算失败
+                return True
             logging.warning(
                 "停止 dsh：taskkill pid=%d 返回码 %s: %s%s",
                 pid, result.returncode,
                 (result.stdout or "").strip(), (result.stderr or "").strip(),
             )
-        return
+            return False
+        return True
 
-    def _group_kill(sig) -> None:
+    def _group_kill(sig) -> bool:
         try:
             pgid = os.getpgid(int(pid))
         except (OSError, ProcessLookupError):
@@ -634,28 +730,44 @@ def _terminate_process_tree(pid: int) -> None:
         if pgid is not None and pgid == int(pid) and pgid != os.getpgrp():
             try:
                 os.killpg(pgid, sig)
-                return
+                return True
             except (OSError, ProcessLookupError):
                 pass
         try:
             os.kill(int(pid), sig)
+            return True
         except OSError:
-            pass
+            return False
 
-    _group_kill(signal.SIGTERM)
+    delivered = _group_kill(signal.SIGTERM)
     deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and is_running_pid(pid):
+
+    def _still_alive() -> bool:
+        if proc is not None:
+            return proc.poll() is None  # 句柄判活顺带 reap（僵尸消失）
+        return is_running_pid(pid)
+
+    while time.monotonic() < deadline and _still_alive():
         time.sleep(0.05)
-    if is_running_pid(pid):
-        _group_kill(signal.SIGKILL)
+    if _still_alive():
+        delivered = _group_kill(signal.SIGKILL) or delivered
+    if not delivered and not is_running_pid(pid):
+        # 信号未送达但目标已不存在：它先死了，与 nt 的 128 豁免对称（ds R3）
+        return True
+    return delivered
+
+
+# 收口单飞标记（终审修复）：并发收口合并为一个执行体，见
+# ``stop_self_launched_harness`` docstring 的「单飞」节。
+_STOP_INFLIGHT = False
 
 
 def is_running_pid(pid: int) -> bool:
     """进程是否仍存活（供停止后确认用）。
 
     Windows 用 GetExitCodeProcess==STILL_ACTIVE：OpenProcess 能打开并不代表
-    进程活着（父进程持有句柄时，已死的子进程仍可被打开）——这条实机教训写在
-    child_pet_cleanup._pid_alive 的注释里，这里沿用同一判定。
+    进程活着（父进程持有句柄时，已死的子进程仍可被打开）——实机教训，
+    故这里以退出码判定而非"能否打开句柄"。
     """
     if pid <= 0:
         return False
@@ -715,10 +827,12 @@ def stop_harness(port: int = DEFAULT_PORT) -> tuple[str, str]:
             targets.append(pid)
         for pid in targets:
             try:
-                _terminate_process_tree(pid)
+                ok = _terminate_process_tree(pid)
             except Exception as exc:
                 logging.exception("停止 dsh 失败 pid=%s", pid)
                 return "error", f"终止 PID {pid} 失败：{exc}"
+            if not ok:
+                return "error", f"终止 PID {pid} 失败（终止命令未成功，详见日志）"
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline and is_running(candidate):
                 time.sleep(0.05)
@@ -726,6 +840,105 @@ def stop_harness(port: int = DEFAULT_PORT) -> tuple[str, str]:
                 return "error", f"已发送终止命令，但端口 {candidate} 仍在监听（PID {pid}）"
             return "stopped", f"已停止 DeepSeek Harness（PID {pid}，端口 {candidate}）。"
     return "not-running", "本机没有在运行的 DeepSeek Harness 服务。"
+
+
+def stop_self_launched_harness() -> list[int]:
+    """停掉**本进程自拉起**的 dsh web，返回真正终止的 pid 列表。
+
+    与 ``stop_harness`` 的区别：后者按端口反查「谁在监听」，会终止包括用户
+    自己在终端跑着的实例（所以它必须先弹确认框）；本函数是**无确认的收口**路径
+    （桌宠正常退出 / DSH 联动被关掉），因此只能动自己有把握的进程——三重条件
+    缺一不可，任何一条不成立就放过：
+
+    1. pid 在自拉起登记表里（``_spawn`` 记的）——用户手动起的实例永不在表中；
+    2. 进程仍存活（早已退出 / pid 复用给别的进程都不必动手）；
+    3. 终止前**重新读取**当下命令行并经 ``_looks_like_harness`` 复核（dsh + web
+       双特征 + 镜像是 node/dsh/cmd）。登记的是几分钟前记下的 pid，中间可能已被
+       系统复用；读不到命令行（PowerShell 超时/权限）同样放过——宁可不杀。
+
+    复核不过的 pid 保留在登记表里（下次收口再判）；已死或已终止的移出。
+
+    身份门槛（G3 修复）：登记表只记 pid 是不够的——原子进程死亡后 pid 可能被
+    系统复用给**用户自己的** dsh 实例，命令行复核会通过 → 误杀。所以收口只认
+    「登记表 pid + **仍活着的自拉起 Popen 句柄**」；原进程已退出（或句柄已被
+    回收）的 pid 一律只销登记不下刀——误杀用户实例的方向一次都不许发生。
+
+    终止确认（G1 修复）：``_terminate_process_tree`` 现在返回成败；失败或
+    终止后仍存活的 pid 保留登记（下次收口再试），**绝不**记成已终止。
+
+    已知边界（R2 评审提出）：直接子进程（cmd.exe）先死而 node 子树存活时，
+    登记 pid 按「原进程已退出」销记后，孤儿子树的身份不再可考——按「非我所有
+    不杀」放过；端口仍被占时可走 ``stop_harness`` 的端口反查路径（有用户确认
+    与命令行复核），无确认路径上绝不追杀孤儿。
+
+    单飞（终审修复）：并发收口（联动关闭线程 / 退出主线程 / 自动拉起补偿）
+    由 ``_STOP_INFLIGHT`` 合并——后到者直接返回空表。没有它，两条收口会共享
+    一份过期快照：一方已终止并回收，另一方仍凭旧检查结果向**数字 pid** 发信号
+    （POSIX 下 pid 可能已被复用 → 误杀，astra 终审 P1）。
+    """
+    global _STOP_INFLIGHT
+    with _OWNERSHIP_LOCK:
+        if _STOP_INFLIGHT:
+            logging.info("已有收口在进行，本次合并跳过（单飞）")
+            return []
+        _STOP_INFLIGHT = True
+    try:
+        return _stop_self_launched_harness_inner()
+    finally:
+        with _OWNERSHIP_LOCK:
+            _STOP_INFLIGHT = False
+
+
+def _stop_self_launched_harness_inner() -> list[int]:
+    terminated: list[int] = []
+    with _OWNERSHIP_LOCK:
+        registry_snapshot = list(_SELF_LAUNCHED_PIDS)
+    for pid in registry_snapshot:
+        _reap_children()
+        child = _child_for(pid)
+        if child is None or child.poll() is not None:
+            logging.info(
+                "自拉起登记 PID %s 的原进程已退出（pid 或已复用），仅销登记不终止",
+                pid,
+            )
+            _forget_self_launched(pid)
+            continue
+        if not is_running_pid(pid):
+            _forget_self_launched(pid)
+            continue
+        command_line = process_command_line(pid)
+        if not _looks_like_harness(
+            pid, command_line, image_hints=_SELF_LAUNCHED_IMAGE_HINTS,
+        ):
+            logging.info(
+                "跳过自拉起登记中的 PID %s：命令行复核未通过（%s）",
+                pid, command_line or "读不到命令行",
+            )
+            continue
+        try:
+            ok = _terminate_process_tree(pid, proc=child)
+        except Exception:
+            logging.exception("停止自拉起的 dsh 失败 pid=%s", pid)
+            continue
+        if not ok:
+            logging.warning(
+                "停止自拉起的 dsh：终止命令未成功 pid=%s（保留登记，下次收口再试）", pid)
+            continue
+        deadline = time.monotonic() + 2.0
+        # 用子进程句柄确认死亡（R2 修复）：POSIX 下 ``is_running_pid`` 对未回收的
+        # 僵尸返回存活（kill(pid,0) 成功），会白等 2s 再误判「没杀掉」；``poll()``
+        # 顺带完成回收（僵尸消失），Windows 上同样精确且更便宜。
+        while time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.05)
+        if child.poll() is None:
+            logging.warning(
+                "已发终止命令但 PID %s 仍存活（保留登记，下次收口再试）", pid)
+            continue
+        _forget_self_launched(pid)
+        terminated.append(pid)
+    if terminated:
+        logging.info("已停止自拉起的 dsh web：PID %s", terminated)
+    return terminated
 
 
 def restart_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> tuple[str, str]:

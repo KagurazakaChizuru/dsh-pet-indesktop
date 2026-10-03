@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from pet.config import Config
 
@@ -121,3 +122,64 @@ def test_reload_preserves_memory_api_key_when_keyring_unavailable(tmp_path, monk
     disk_after = raw_after["chat"]["providers"]["openai-main"]
     assert "api_key" not in disk_after
     assert "vision_api_key" not in disk_after
+
+
+# ------------------------------------------ 写盘瞬时共享冲突（Windows 实机 S1）
+def _flaky_replace(target, failures: int, *, exc_type=PermissionError):
+    """把 ``os.replace`` 换成"目标路径前 ``failures`` 次失败"的桩。
+
+    ``target`` 之外的替换原样转发给真 ``os.replace``（Config 只替换自己的
+    config.json，但同测试会话内别的模块也可能落盘）。返回 (桩, 计数)。
+    """
+    real = os.replace
+    seen = {"n": 0}
+
+    def fake(src, dst, *args, **kwargs):
+        if os.fspath(dst) == os.fspath(target) and seen["n"] < failures:
+            seen["n"] += 1
+            if exc_type is PermissionError:
+                raise PermissionError(13, "Permission denied")
+            raise exc_type(2, "No such file or directory")
+        return real(src, dst, *args, **kwargs)
+
+    return fake, seen
+
+
+def test_save_retries_transient_share_conflict(tmp_path, monkeypatch):
+    """实机：主进程读同一配置文件撞上设置进程 ``os.replace`` → WinError 5。
+
+    瞬时共享冲突（MSVCRT ``_wopen`` 共享模式不含 FILE_SHARE_DELETE）必须退避
+    重试后成功，而不是让「保存并退出」弹"配置未能写入磁盘"。
+    """
+    config = Config(base=tmp_path)
+    config.set("rx", 0.25)
+    fake, seen = _flaky_replace(config.path, 2)
+    monkeypatch.setattr(os, "replace", fake)
+
+    assert config.save() is True
+    assert seen["n"] == 2                     # 前两次冲突都重试掉了
+    assert json.loads(config.path.read_text(encoding="utf-8"))["rx"] == 0.25
+    assert list(config.dir.glob("*.tmp")) == []
+
+
+def test_save_gives_up_bounded_and_cleans_temp(tmp_path, monkeypatch):
+    """冲突不消失：有界重试（5 次）后返回 False，且不留 ``.tmp`` 残留。"""
+    config = Config(base=tmp_path)
+    fake, seen = _flaky_replace(config.path, 10 ** 6)
+    monkeypatch.setattr(os, "replace", fake)
+
+    assert config.save() is False
+    assert seen["n"] == 5                     # 有界：不是无限重试
+    assert list(config.dir.glob("*.tmp")) == []
+    assert not config.path.exists()
+
+
+def test_save_does_not_retry_non_conflict_error(tmp_path, monkeypatch):
+    """非共享冲突的 OSError（ENOENT 等）立即失败，不进重试循环。"""
+    config = Config(base=tmp_path)
+    fake, seen = _flaky_replace(config.path, 10 ** 6, exc_type=FileNotFoundError)
+    monkeypatch.setattr(os, "replace", fake)
+
+    assert config.save() is False
+    assert seen["n"] == 1                     # 一次定生死，不重试
+    assert list(config.dir.glob("*.tmp")) == []

@@ -24,7 +24,11 @@ from PySide6.QtWidgets import QApplication
 
 from pet import catalog
 from pet.config import Config
-from pet.movement import move_position_at_frame, quantize_move
+from pet.movement import (
+    curve_progress_at_time,
+    move_position_at_frame,
+    quantize_move,
+)
 import pet.window as window_mod
 from pet.window import PetWindow
 
@@ -106,6 +110,49 @@ def test_position_curve_monotonic():
         x = move_position_at_frame(CURVE_PLAN, f)[0]
         assert x >= prev
         prev = x
+
+
+# ============================================================================
+# curve_progress_at_time（纯函数，F3：墙钟 → 曲线进度）
+# ============================================================================
+
+
+def test_curve_progress_holds_on_still_segment():
+    """静帧段（曲线走平）墙钟推进但进度必须停在 0。"""
+    # 4 帧静止起步 + 6 帧匀速推进，单圈 2.0s → 每帧 0.2s
+    curve = [0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0]
+    assert curve_progress_at_time(curve, 10, 1, 0.0, 2.0) == 0.0
+    assert curve_progress_at_time(curve, 10, 1, 0.6, 2.0) == 0.0   # 帧 3：仍在静帧段
+    assert curve_progress_at_time(curve, 10, 1, 1.2, 2.0) == pytest.approx(0.5)
+    assert curve_progress_at_time(curve, 10, 1, 2.0, 2.0) == 1.0
+
+
+def test_curve_progress_multi_loop_and_clamp():
+    """多圈：进度 = (已完成圈数 + 圈内曲线值) / 总圈数；越界输入夹到 [0,1]。"""
+    curve = [0.0, 0.25, 0.5, 1.0]
+    assert curve_progress_at_time(curve, 4, 2, 0.5, 1.0) == pytest.approx(0.25)
+    assert curve_progress_at_time(curve, 4, 2, 1.0, 1.0) == pytest.approx(0.5)
+    assert curve_progress_at_time(curve, 4, 2, 2.0, 1.0) == 1.0    # 末圈末帧
+    assert curve_progress_at_time(curve, 4, 2, 99.0, 1.0) == 1.0   # 超时夹 1
+    assert curve_progress_at_time(curve, 4, 2, -1.0, 1.0) == 0.0   # 负时间夹 0
+
+
+def test_curve_progress_matches_move_position_at_frame():
+    """单一事实来源：进度必须与 move_position_at_frame 的曲线插值逐点一致。"""
+    curve = [0.0, 0.0, 0.25, 0.5, 0.5, 0.5, 0.75, 1.0, 1.0, 1.0]
+    plan = {'start_x': 0, 'target_x': 1, 'start_y': 0, 'target_y': 0,
+            'loops': 1, 'frames_per_loop': 10, 'total_frames': 10, 'curve': curve}
+    for frames in (0.0, 2.5, 3.0, 4.7, 7.0, 9.9, 10.0):
+        expected = move_position_at_frame(plan, frames)[0]
+        got = curve_progress_at_time(curve, 10, 1, frames * 0.2, 2.0)
+        assert got == pytest.approx(expected)
+
+
+def test_curve_progress_degrades_safely_on_empty_inputs():
+    """防御：无曲线走线性；零圈长（meta 未就绪）返回收口值，绝不除零。"""
+    assert curve_progress_at_time([], 10, 1, 1.0, 2.0) == pytest.approx(0.5)
+    assert curve_progress_at_time([], 10, 2, 4.0, 2.0) == pytest.approx(1.0)
+    assert curve_progress_at_time([0.0, 1.0], 2, 1, 1.0, 0.0) == 1.0
 
 
 # ============================================================================

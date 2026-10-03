@@ -13,7 +13,6 @@ from PySide6.QtWidgets import QApplication
 
 from pet.app import AppShell
 from pet.chat.service import ChatService
-from pet.collision_ipc import _stop_live_sessions_for_tests
 from pet.config import Config
 from pet.dynamic_island import DynamicIsland
 from pet.island_chat import IslandChatBubble
@@ -224,7 +223,7 @@ def _teardown_shell(shell) -> None:
             bubble.close()
             bubble.deleteLater()
         ChatService.unregister_global_finished(shell._on_global_chat_finished)
-        _stop_live_sessions_for_tests()
+        # 4.4b：collision_ipc 会话已随退役层删除，无需再收口
         QApplication.processEvents()
 
 

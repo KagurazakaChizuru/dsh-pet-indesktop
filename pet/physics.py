@@ -76,9 +76,20 @@ def slingshot_deformation(pull_x: float, pull_y: float, progress: float,
 
 # ---- 抛掷 ----
 GRAVITY = 1400.0          # px/s²
-RESTITUTION = 0.78        # 碰边恢复系数
+# 碰边恢复系数。0.78 → 0.68：thrown 的地面段长度 ≈ 2·RESTITUTION·(v0-STOP)/(g·(1-RESTITUTION))，
+# 0.78 时一次满屏高度的抛掷要在 ~11s / 15 次弹跳后才满足 is_at_rest——这段
+# 时间 interaction_state 一直挂在 "thrown"，行为机不重绑、抛掷 clip 播完停在
+# 最后一帧（实机"碰撞后画面卡住不动"的直接观感）。0.68 把同一场抛掷收敛到
+# ~5s / 8 次弹跳（"地面弹跳段不超过 5s"是这次的设计目标，见
+# docs/PR-REPORT-THROWN-ISLAND-PUMP-2026-09-24.md 的对照表）。
+RESTITUTION = 0.68        # 碰边恢复系数
 GROUND_FRICTION = 2.5     # 地面水平摩擦（/s）
 REST_VY = 40.0            # 落地时 |vy| 小于它直接停竖直
+# 地面小跳截止速度：落地那一刻 |vy| 低于它就按"已经落地"处理（不再模拟
+# 这一跳）。REST_VY=40 等效弹起高度只有 0.6px——纯亚像素抖动，却要多算
+# 3~4 次弹跳（每次 ~0.2s 的几何级数尾巴）；120 等效弹起高度 5px，肉眼
+# 不可辨，是"宠物已经站着不动"的合理判定点。
+GROUND_BOUNCE_STOP_VY = 120.0
 REST_VX = 15.0            # 地面上 |vx| 小于它认为已静止
 
 
@@ -194,8 +205,13 @@ def estimate_release_velocity(trail: list, now: float, cap: float = MAX_THROW_SP
 
 def throw_step(px: float, py: float, vx: float, vy: float, dt: float,
                left: float, top: float, right: float, bottom: float,
-               gravity: float = GRAVITY) -> tuple[float, float, float, float, bool]:
-    """抛掷单步积分 + 边界反弹。返回 (px, py, vx, vy, bounced)。"""
+               gravity: float = GRAVITY,
+               bounce_stop_vy: float = GROUND_BOUNCE_STOP_VY
+               ) -> tuple[float, float, float, float, bool]:
+    """抛掷单步积分 + 边界反弹。返回 (px, py, vx, vy, bounced)。
+
+    bounce_stop_vy：落地竖直速度截止（小跳不再模拟，见常量注释）。
+    """
     vy += gravity * dt
     px += vx * dt
     py += vy * dt
@@ -209,7 +225,7 @@ def throw_step(px: float, py: float, vx: float, vy: float, dt: float,
     elif py >= bottom:
         py = bottom
         vx *= max(0.0, 1.0 - GROUND_FRICTION * dt)
-        if abs(vy) < REST_VY:
+        if abs(vy) < bounce_stop_vy:
             vy = 0.0
         else:
             vy = -abs(vy) * RESTITUTION

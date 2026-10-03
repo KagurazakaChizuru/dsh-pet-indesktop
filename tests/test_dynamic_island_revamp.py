@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QEvent, QEventLoop, QPoint, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import QApplication
 
@@ -459,6 +459,82 @@ def test_expanded_mode_freezes_squish(tmp_path):
         island._squish = 0.85
         rect2, _ = island._squished_capsule_rect()
         assert rect2.width() > rect.width()
+    finally:
+        island.hide()
+        island.deleteLater()
+
+
+class _PaintingIsland(DynamicIsland):
+    """真实岛 + 真实 paintEvent 计数（不 mock 产品对象、不拦 update 调度）。"""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.paints = 0
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        self.paints += 1
+        super().paintEvent(event)
+
+
+def _spin_event_loop(ms: int) -> None:
+    """真事件循环跑 ms 毫秒（让真定时器/真 paintEvent 自然发生），不 sleep 赌时序。"""
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    loop.exec()
+
+
+def test_expanded_card_bump_does_not_spin_dead_repaints(tmp_path):
+    """展开卡片态受击/事件弹跳：不得拉起 60fps 整窗重绘空转。
+
+    展开态 paintEvent 丢弃 kick/tilt/scale/呼吸、``_squished_capsule_rect``
+    冻结 squish（见上面两个截边用例）——这些通道收敛到什么值都不改变像素，
+    却仍被 ``_animating()`` 判为"动画活跃"：每次 bump（岛被宠撞）/余额弹跳
+    都在半透明顶层窗上白跑 ~1s 的 60fps 重绘（实机每帧一次窗口合成）。
+    """
+    _qapp()
+    cfg = Config(base=tmp_path)
+    cfg.set("dynamic_island", {
+        "enabled": True, "show_icon": True, "show_name": True,
+        "show_info": True, "info_mode": "time", "custom_text": "",
+        "show_status": True, "style": "dark", "x": 400, "y": 300,
+    })
+    island = _PaintingIsland(cfg)
+    try:
+        island.show()
+        island.expand_card()
+        _drive_anim(island)  # 几何动画按真定时器节奏跑到位（不 sleep）
+        assert island._mode == "expanded"
+        assert not island._anim_timer.isActive()  # 稳态：无动画在跑
+
+        island.bump(2.0, 1.0, 0.0)  # 岛被宠撞（碰撞桥 bump 入口同路径）
+        for _ in range(5):          # 真动画 tick 节奏（dt=50ms/帧）
+            if not island._anim_timer.isActive():
+                break
+            island._anim_last = time.monotonic() - 0.05
+            island._on_anim_tick()
+        assert island._anim_timer.isActive() is False, \
+            "展开态 bump 拉起了 60fps 整窗重绘空转（像素零变化）"
+        assert island._kick_x == 0.0 and island._kick_y == 0.0  # 弹簧已复位
+        assert island._squish == 1.0
+
+        # 像素后果（真事件循环 + 真 paintEvent）：展开态受击后不再逐帧重绘
+        island.paints = 0
+        _spin_event_loop(200)
+        assert island.paints <= 3, f"展开态空转重绘 {island.paints} 次/200ms"
+
+        # 对照组：收起态同样 bump 必须照常播动画（不得连坐正常路径）
+        island.collapse_card()
+        _drive_anim(island)
+        island.paints = 0
+        island.bump(2.0, 1.0, 0.0)
+        for _ in range(5):
+            if not island._anim_timer.isActive():
+                break
+            island._anim_last = time.monotonic() - 0.05
+            island._on_anim_tick()
+        assert island._anim_timer.isActive() is True, "收起态 bump 的动画被误杀"
+        _spin_event_loop(200)
+        assert island.paints >= 3, f"收起态受击未重绘（{island.paints} 次/200ms）"
     finally:
         island.hide()
         island.deleteLater()

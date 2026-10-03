@@ -32,7 +32,7 @@ from . import catalog
 from . import perfstats
 
 
-def pick_from_pool(pool, exclude: str | None = None):
+def pick_from_pool(pool, exclude: str | None = None, *, rng=None):
     """排除 exclude 后均匀采样，池空回退原池（window.PetWindow._pick 委托此处，
     全仓单一事实来源——规格 A6 明令禁止复制概率/采样逻辑）。
 
@@ -40,10 +40,11 @@ def pick_from_pool(pool, exclude: str | None = None):
     抛 IndexError（各调用点均有非空守卫，差异不可达）。
     """
     entries = [n for n in pool if n != exclude] or pool
-    return random.choice(entries) if entries else None
+    chooser = (rng or random).choice
+    return chooser(entries) if entries else None
 
 
-def roll_next(pools, exclude: str | None = None) -> str | None:
+def roll_next(pools, exclude: str | None = None, *, rng=None) -> str | None:
     """纯函数（无副作用）：按 30% 待机 / 10% 转向 / 40% 动作 / 20% 移动
     返回「下一个动画」的候选名。
 
@@ -60,14 +61,15 @@ def roll_next(pools, exclude: str | None = None) -> str | None:
     turns = pools.get("turns") or []
     acts = pools.get("acts") or []
     moves = pools.get("moves") or []
-    roll = random.random()
+    source = rng or random
+    roll = source.random()
     if roll < catalog.P_IDLE:
-        return pick_from_pool(idles, exclude) if idles else pick_from_pool(acts, exclude)
+        return pick_from_pool(idles, exclude, rng=source) if idles else pick_from_pool(acts, exclude, rng=source)
     if roll < catalog.P_TURN:
-        return pick_from_pool(turns, exclude) if turns else pick_from_pool(acts, exclude)
+        return pick_from_pool(turns, exclude, rng=source) if turns else pick_from_pool(acts, exclude, rng=source)
     if roll < catalog.P_ACTS:
-        return pick_from_pool(acts, exclude)
-    return pick_from_pool(moves) if moves else pick_from_pool(acts, exclude)
+        return pick_from_pool(acts, exclude, rng=source)
+    return pick_from_pool(moves, rng=source) if moves else pick_from_pool(acts, exclude, rng=source)
 
 
 class PredictivePrewarm:

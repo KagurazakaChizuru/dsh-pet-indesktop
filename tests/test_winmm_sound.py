@@ -832,3 +832,86 @@ def test_real_device_smoke_click_wav_and_decoded_duck_mp3(capsys, monkeypatch):
     assert ok_duck
     assert pool.pending() == 0, "播放结束后 header 必须全部回收，不能泄漏"
     pool.clear()
+
+
+# ---------------------------------------------------------------------------
+# 9. 重复播放的解析/缩放缓存：密集碰撞下每次发声的 GUI 线程税（C1）
+#
+# 实机取证（.scratch/windows-parity-20260926-a/fix-20260928-C1/bench-before.json）：
+# 45.7KB 的 48k 立体声碰撞音，read_pcm16 0.11~0.22ms、scale_pcm16(0.5) 3.19ms；
+# 5 次/秒密集碰撞时这两项每次都重跑。
+# ---------------------------------------------------------------------------
+
+def test_read_pcm16_reuses_parse_for_unchanged_file(tmp_path):
+    """同一文件（同 mtime/size）重复解析必须复用结果；文件一变即失效。"""
+    sound_winmm._clear_live_pools_for_tests()
+    wav = _pcm16_wav(tmp_path / "click.wav", samples=1000)
+    first = sound_winmm.read_pcm16(wav)
+    assert first is not None
+    assert sound_winmm.read_pcm16(wav) is first, "重复播放同一音源不得再读盘再解析"
+
+    _pcm16_wav(wav, samples=2000)                      # 内容/大小变了
+    refreshed = sound_winmm.read_pcm16(wav)
+    assert refreshed is not first, "文件变化必须重新解析（不许把旧 PCM 钉死）"
+    assert len(refreshed.data) == 2 * len(first.data)
+
+
+def test_read_pcm16_does_not_cache_unreadable_file(tmp_path):
+    """读不了的 wav 不进缓存：转码/写入中途的失败必须下次还能重试。"""
+    sound_winmm._clear_live_pools_for_tests()
+    bogus = tmp_path / "bogus.wav"
+    bogus.write_bytes(b"RIFFnotreallyawave")
+    assert sound_winmm.read_pcm16(bogus) is None
+    _pcm16_wav(bogus, samples=500)                     # 同路径变成合法 wav
+    clip = sound_winmm.read_pcm16(bogus)
+    assert clip is not None and len(clip.data) == 1000
+
+
+def test_play_clip_scales_once_per_volume(tmp_path, monkeypatch):
+    """同 clip 同音量只缩放一次；换音量必须重算（缓存串味 = 播错音量）。"""
+    api = FakeWinmmApi()
+    pool = sound_winmm.WinmmSoundPool(api=api)
+    wav = _pcm16_wav(tmp_path / "click.wav", samples=600)
+    clip = sound_winmm.read_pcm16(wav)
+    real_scale = sound_winmm.scale_pcm16
+    calls: list[float] = []
+
+    def counting(pcm, volume):
+        calls.append(volume)
+        return real_scale(pcm, volume)
+
+    monkeypatch.setattr(sound_winmm, "scale_pcm16", counting)
+
+    assert pool.play_clip(clip, 0.5) is True
+    assert pool.play_clip(clip, 0.5) is True
+    assert len(calls) == 1, "同一段 PCM、同一音量第二次播放不得重跑逐样本缩放"
+    assert api.writes[0][1] == real_scale(clip.data, 0.5)
+    assert api.writes[1][1] == real_scale(clip.data, 0.5)
+
+    assert pool.play_clip(clip, 0.25) is True
+    assert len(calls) == 2, "音量变化必须重算"
+    assert api.writes[2][1] == real_scale(clip.data, 0.25)
+
+    assert pool.play_clip(clip, 0.5) is True            # 回到旧音量
+    assert api.writes[3][1] == real_scale(clip.data, 0.5), "不同音量之间不许串味"
+    pool.clear()
+
+
+def test_play_clip_skips_scaled_cache_for_large_clip(tmp_path, monkeypatch):
+    """大素材不进缩放缓存（内存有界）：每次现算，结果照样正确。"""
+    api = FakeWinmmApi()
+    pool = sound_winmm.WinmmSoundPool(api=api)
+    big = sound_winmm.WavClip(b"\x00\x10" * (300 * 1024), 1, 48000)   # 600KB > 512KB 上限
+    real_scale = sound_winmm.scale_pcm16
+    calls: list[float] = []
+
+    def counting(pcm, volume):
+        calls.append(volume)
+        return real_scale(pcm, volume)
+
+    monkeypatch.setattr(sound_winmm, "scale_pcm16", counting)
+    assert pool.play_clip(big, 0.5) is True
+    assert pool.play_clip(big, 0.5) is True
+    assert len(calls) == 2, "超过上限的素材不得钉进缓存"
+    assert api.writes[1][1] == real_scale(big.data, 0.5)
+    pool.clear()

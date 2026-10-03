@@ -30,361 +30,6 @@ from pet.chat.session_store import SessionStore
 from pet.chat.models import ChatMessage, ChatSession
 
 
-def _run_slot_worker_code(config_dir: Path, code: str, timeout: float = 10.0) -> subprocess.Popen:
-    """启动纯 Python 子进程运行一段测试脚本。"""
-    cmd = [
-        sys.executable,
-        "-c",
-        f"import sys, os\n"
-        f"sys.path.insert(0, {repr(str(Path(__file__).resolve().parents[1]))})\n"
-        f"{code}",
-    ]
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-
-def test_slot_locks_sequential_competition_and_preferred_fail(tmp_path):
-    """场景 1：三个真实子进程竞争同一临时配置根目录，依次获得 slot-0/1/2；指定槽竞争失败不降级，锁残留可复用。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-    release_flag = tmp_path / "release-slot-holders.flag"
-
-    # 启动第一个子进程获取首个空闲槽（应当是 0）并持锁到放行标记出现
-    worker1_code = f"""
-from pet.slot_manager import acquire_pet_slot
-from pathlib import Path
-import time
-slot, handle = acquire_pet_slot({repr(str(config_dir))})
-print(f"WORKER1:{{slot}}", flush=True)
-# 持锁直到主进程落放行标记（最多 60s）——固定 sleep(4) 在慢 CI 上 python
-# 启动即可达秒级，p1 提前释放后 pfail 拿到 slot-0 → 整条竞争序列假红
-deadline = time.monotonic() + 60
-timed_out = True
-while time.monotonic() < deadline:
-    if Path({repr(str(release_flag))}).exists():
-        timed_out = False
-        break
-    time.sleep(0.05)
-if timed_out:
-    # 兜底自释放必须响亮：静默超时会伪装成产品故障（与产品缺陷不可区分）
-    print("HOLDER_TIMEOUT", flush=True)
-"""
-    p1 = _run_slot_worker_code(config_dir, worker1_code)
-    line1 = p1.stdout.readline().strip()
-    assert line1 == "WORKER1:0"
-
-    # 启动第二个子进程获取下一个空闲槽（应当是 1）
-    worker2_code = f"""
-from pet.slot_manager import acquire_pet_slot
-from pathlib import Path
-import time
-slot, handle = acquire_pet_slot({repr(str(config_dir))})
-print(f"WORKER2:{{slot}}", flush=True)
-deadline = time.monotonic() + 60
-timed_out = True
-while time.monotonic() < deadline:
-    if Path({repr(str(release_flag))}).exists():
-        timed_out = False
-        break
-    time.sleep(0.05)
-if timed_out:
-    # 兜底自释放必须响亮：静默超时会伪装成产品故障（与产品缺陷不可区分）
-    print("HOLDER_TIMEOUT", flush=True)
-"""
-    p2 = _run_slot_worker_code(config_dir, worker2_code)
-    line2 = p2.stdout.readline().strip()
-    assert line2 == "WORKER2:1"
-
-    # 指定申请 slot-0，应当抛出 SlotLockError 失败退出，不能降级到其他槽位
-    worker_fail_code = f"""
-from pet.slot_manager import acquire_pet_slot, SlotLockError
-try:
-    slot, handle = acquire_pet_slot({repr(str(config_dir))}, preferred_slot=0)
-    print(f"UNEXPECTED:{{slot}}", flush=True)
-except SlotLockError:
-    print("EXPECTED_LOCK_FAIL", flush=True)
-"""
-    pfail = _run_slot_worker_code(config_dir, worker_fail_code)
-    line_fail = pfail.stdout.readline().strip()
-    assert line_fail == "EXPECTED_LOCK_FAIL"
-    pfail.wait()
-
-    # 启动第三个子进程自动竞争，应当获得 slot-2
-    worker3_code = f"""
-from pet.slot_manager import acquire_pet_slot
-slot, handle = acquire_pet_slot({repr(str(config_dir))})
-print(f"WORKER3:{{slot}}", flush=True)
-"""
-    p3 = _run_slot_worker_code(config_dir, worker3_code)
-    line3 = p3.stdout.readline().strip()
-    assert line3 == "WORKER3:2"
-    p3.wait()
-
-    # 放行持锁进程：flag 文件落下后 p1/p2 自行退出（不再固定 sleep 赌窗口）
-    release_flag.touch()
-    p1.wait(timeout=30)
-    p2.wait(timeout=30)
-    assert "HOLDER_TIMEOUT" not in p1.stdout.read(), "p1 必须是放行退出而非超时兜底"
-    assert "HOLDER_TIMEOUT" not in p2.stdout.read(), "p2 必须是放行退出而非超时兜底"
-    time.sleep(0.1)
-
-    # 确认锁文件残留但之后仍可成功复用 slot-0，且大小固定为 16 字节，PID 在头部
-    lock0 = sm.get_slot_lock_path(config_dir, 0)
-    assert lock0.exists()
-    assert lock0.stat().st_size == 16
-    assert lock0.read_bytes().strip() != b""
-    slot, handle = sm.acquire_pet_slot(config_dir)
-    assert slot == 0
-    assert lock0.stat().st_size == 16
-    handle.close()
-
-
-def test_concurrent_first_lock_creation_is_not_truncated(tmp_path):
-    """两个真实进程首次创建同一锁文件时，恰一方持锁且记录保持完整。
-
-    对负载不敏感：持锁方不再固定 sleep 1 秒后释放（全量负载下后到的进程
-    可能错过窗口、在锁释放后拿到锁，导致双双报 LOCKED）。改为持锁方一直
-    持有锁，直到失败方落一个「已尝试」标记（最多等 60s），保证无论调度
-    延迟多大，两进程的竞争窗口必然重叠、恰一方持锁。
-    """
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-    release = tmp_path / "lock-start"
-    attempted = config_dir / "loser-attempted.flag"
-    worker_code = f"""
-from pathlib import Path
-import time
-from pet.slot_manager import acquire_pet_slot
-
-config_dir = Path({str(config_dir)!r})
-release = Path({str(release)!r})
-attempted = Path({str(attempted)!r})
-print('READY', flush=True)
-while not release.exists():
-    time.sleep(0.001)
-try:
-    slot, handle = acquire_pet_slot(config_dir, preferred_slot=0)
-except Exception as exc:
-    # 失败方：先落标记（持锁方据此确认竞争已发生），再报告退出
-    attempted.write_text("1", encoding="ascii")
-    print(type(exc).__name__, flush=True)
-else:
-    print(f"LOCKED:{{slot}}", flush=True)
-    # 持锁等待对方确认尝试过（上限 60s），保证竞争窗口必然重叠
-    deadline = time.monotonic() + 60
-    while not attempted.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    handle.close()
-"""
-    p1 = _run_slot_worker_code(config_dir, worker_code)
-    p2 = _run_slot_worker_code(config_dir, worker_code)
-    assert p1.stdout.readline().strip() == "READY"
-    assert p2.stdout.readline().strip() == "READY"
-    release.write_text("go", encoding="ascii")
-    results = sorted([p1.stdout.readline().strip(), p2.stdout.readline().strip()])
-    assert results.count("LOCKED:0") == 1
-    assert results.count("SlotLockError") == 1
-    assert p1.wait(timeout=30) == 0
-    assert p2.wait(timeout=30) == 0
-    lock_file = sm.get_slot_lock_path(config_dir, 0)
-    assert lock_file.stat().st_size == sm.PID_RECORD_LEN
-    assert lock_file.read_bytes().strip() != b""
-
-
-def test_public_acquire_is_safe_when_two_processes_observe_stale_zero_size(tmp_path):
-    """强制两个进程都在初始化前读到 size=0，后到者不能重复追加 16 字节。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-    sync_dir = tmp_path / "stale-size-sync"
-    sync_dir.mkdir()
-    initialized = sync_dir / "first-initialized"
-
-    def worker_code(role: str) -> str:
-        return f"""
-from pathlib import Path
-import time
-from pet import slot_manager as sm
-role = {role!r}
-sync_dir = Path({str(sync_dir)!r})
-initialized = Path({str(initialized)!r})
-real_fstat = sm.os.fstat
-def synchronized_fstat(fd):
-    observed = real_fstat(fd)
-    (sync_dir / f"ready-{{role}}").write_text("ready", encoding="ascii")
-    deadline = time.monotonic() + 5
-    while len(list(sync_dir.glob("ready-*"))) < 2:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("peer did not reach fstat barrier")
-        time.sleep(0.001)
-    if role == "second":
-        while not initialized.exists():
-            if time.monotonic() >= deadline:
-                raise TimeoutError("first process did not initialize lock")
-            time.sleep(0.001)
-    return observed
-sm.os.fstat = synchronized_fstat
-try:
-    slot, handle = sm.acquire_pet_slot({str(config_dir)!r}, preferred_slot=0)
-except Exception as exc:
-    print(type(exc).__name__, flush=True)
-else:
-    if role == "first":
-        initialized.write_text("done", encoding="ascii")
-    print(f"LOCKED:{{slot}}", flush=True)
-    time.sleep(1)
-"""
-
-    first = _run_slot_worker_code(config_dir, worker_code("first"))
-    second = _run_slot_worker_code(config_dir, worker_code("second"))
-    assert first.stdout.readline().strip() == "LOCKED:0"
-    assert second.stdout.readline().strip() == "SlotLockError"
-    assert first.wait(timeout=5) == 0
-    assert second.wait(timeout=5) == 0
-    lock_file = sm.get_slot_lock_path(config_dir, 0)
-    assert lock_file.stat().st_size == sm.PID_RECORD_LEN
-
-
-def test_lock_initialization_is_idempotent_when_size_observation_is_stale(
-    tmp_path, monkeypatch
-):
-    """并发打开者都观察到旧 size=0 时，初始化也不能重复追加记录。"""
-    lock_file = sm.get_slot_lock_path(tmp_path / APP_DIR_NAME, 0)
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
-
-    class StaleStat:
-        st_size = 0
-
-    monkeypatch.setattr(sm.os, "fstat", lambda _fd: StaleStat())
-    first = sm._open_lock_file(lock_file)
-    first.close()
-    second = sm._open_lock_file(lock_file)
-    second.close()
-
-    assert lock_file.stat().st_size == sm.PID_RECORD_LEN
-
-
-def test_lock_acquisition_repairs_an_oversized_pid_record(tmp_path):
-    """旧竞态留下的 32 字节锁文件在下一次成功持锁后恢复为定长格式。"""
-    lock_file = sm.get_slot_lock_path(tmp_path / APP_DIR_NAME, 0)
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
-    lock_file.write_bytes(b" " * (sm.PID_RECORD_LEN * 2))
-
-    handle = sm.acquire_file_lock(lock_file)
-    assert handle is not None
-    try:
-        assert os.fstat(handle.fileno()).st_size == sm.PID_RECORD_LEN
-        handle.seek(0)
-        assert handle.read(sm.PID_RECORD_LEN).startswith(str(os.getpid()).encode("ascii"))
-    finally:
-        sm.release_file_lock(handle)
-
-
-def test_slot_reclaimed_after_process_killed_and_keeps_memory(tmp_path):
-    """场景 2：子进程持有 slot-1 后被终止；新子进程重新加锁 slot-1，读取原个体配置和 sessions，且未删 lock 文件。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    # 先锁住 slot-0，让后续进程拿 slot-1
-    slot0, handle0 = sm.acquire_pet_slot(config_dir, preferred_slot=0)
-
-    # 启动子进程拿 slot-1 并写个体记忆
-    worker_code = f"""
-from pet.slot_manager import acquire_pet_slot
-from pet.config import Config
-from pet.chat.session_store import SessionStore
-from pet.chat.models import ChatMessage
-import time
-
-slot, handle = acquire_pet_slot({repr(str(config_dir))})
-cfg = Config(base={repr(str(tmp_path))}, instance_id=f"slot-{{slot}}")
-cfg.set("rx", 0.77)
-cfg.save()
-
-store = SessionStore({repr(str(config_dir))}, instance_id=f"slot-{{slot}}")
-s = store.create("shenshen", "openai-main", "prompt")
-s.messages.append(ChatMessage("user", "hello-slot-1"))
-store.save(s)
-store.flush()  # 异步 writer 落盘后再 READY：主进程收到 READY 即 kill，等不起后台线程
-
-print(f"READY:{{slot}}", flush=True)
-time.sleep(10)
-"""
-    p = _run_slot_worker_code(config_dir, worker_code)
-    assert p.stdout.readline().strip() == "READY:1"
-
-    # 强制杀死子进程
-    p.kill()
-    p.wait()
-    time.sleep(0.1)
-
-    # 锁文件依然存在
-    lock1 = sm.get_slot_lock_path(config_dir, 1)
-    assert lock1.exists()
-
-    # 新子进程重新申请 slot-1 并读取配置与会话
-    slot1_again, handle1 = sm.acquire_pet_slot(config_dir, preferred_slot=1)
-    assert slot1_again == 1
-    cfg_again = Config(base=tmp_path, instance_id="slot-1")
-    assert cfg_again.get("rx") == 0.77
-
-    store_again = SessionStore(config_dir, instance_id="slot-1")
-    sessions = store_again.list("shenshen")
-    assert len(sessions) == 1
-    assert sessions[0].messages[0].content == "hello-slot-1"
-
-    handle0.close()
-    handle1.close()
-
-
-def test_concurrent_creation_and_save_pid_tmp(tmp_path):
-    """场景 3：并发首次创建配置与 save() PID 后缀 tmp 文件不撞名。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    # 写入主配置
-    master_cfg = Config(base=tmp_path)
-    master_cfg.set("character", "dundun")
-    master_cfg.save()
-
-    # 启动 2 个真实子进程分别创建 slot-1 与 slot-2 并保存
-    c1 = f"""
-from pet.slot_manager import acquire_pet_slot
-from pet.config import Config
-slot, handle = acquire_pet_slot({repr(str(config_dir))}, preferred_slot=1)
-cfg = Config(base={repr(str(tmp_path))}, instance_id="slot-1")
-cfg.set("scale", 1.25)
-for _ in range(5):
-    cfg.save()
-print("DONE1", flush=True)
-"""
-    c2 = f"""
-from pet.slot_manager import acquire_pet_slot
-from pet.config import Config
-slot, handle = acquire_pet_slot({repr(str(config_dir))}, preferred_slot=2)
-cfg = Config(base={repr(str(tmp_path))}, instance_id="slot-2")
-cfg.set("scale", 1.50)
-for _ in range(5):
-    cfg.save()
-print("DONE2", flush=True)
-"""
-    p1 = _run_slot_worker_code(config_dir, c1)
-    p2 = _run_slot_worker_code(config_dir, c2)
-
-    assert p1.stdout.readline().strip() == "DONE1"
-    assert p2.stdout.readline().strip() == "DONE2"
-    p1.wait()
-    p2.wait()
-
-    cfg1 = Config(base=tmp_path, instance_id="slot-1")
-    cfg2 = Config(base=tmp_path, instance_id="slot-2")
-    assert cfg1.get("scale") == 1.25
-    assert cfg2.get("scale") == 1.50
-
-
 def test_field_default_factory_and_individual_memory(tmp_path):
     """场景 4：新 slot 首次创建继承主配置（位置/自启除外），之后只保留个体记忆。"""
     config_dir = tmp_path / APP_DIR_NAME
@@ -558,30 +203,6 @@ def test_migrate_legacy_spawns_atomic_and_rollback(tmp_path):
     assert (config_dir / "migration-spawns.done").exists()
 
 
-def test_lock_file_fixed_size_and_pid_at_head(tmp_path):
-    """测试重复获取锁（不同进程/会话）后锁文件大小保持 16 字节不增长，PID 记录固定在头部。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    slot_id, h1 = sm.acquire_pet_slot(config_dir, preferred_slot=1)
-    lock_file = sm.get_slot_lock_path(config_dir, 1)
-    assert lock_file.exists()
-    assert lock_file.stat().st_size == sm.PID_RECORD_LEN
-    sm._unlock_file(h1)
-
-    content1 = lock_file.read_bytes()
-    assert content1.startswith(f"{os.getpid()}".encode("ascii"))
-
-    # 再次获取同一个槽位锁，大小不变
-    slot_id2, h2 = sm.acquire_pet_slot(config_dir, preferred_slot=1)
-    assert lock_file.stat().st_size == sm.PID_RECORD_LEN
-    sm._unlock_file(h2)
-
-    content2 = lock_file.read_bytes()
-    assert content2.startswith(f"{os.getpid()}".encode("ascii"))
-    assert lock_file.stat().st_size == sm.PID_RECORD_LEN
-
-
 def test_corrupt_config_backup_and_wiring_in_config_load(tmp_path):
     """测试 Config._load 对损坏的 slot 配置及主配置调用 backup_corrupt_config 备份而不静默覆盖。"""
     config_dir = tmp_path / APP_DIR_NAME
@@ -659,22 +280,6 @@ def test_migrate_legacy_spawns_recovers_staged_remnants(tmp_path):
     assert not staging_dir.exists()
 
 
-def test_migration_staging_remnant_is_kept_when_target_slot_is_occupied(tmp_path):
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-    staging_dir = config_dir / ".migration_staging"
-    staging_dir.mkdir()
-    staged = staging_dir / "config-slot-1.json"
-    staged.write_text(json.dumps({"character": "staged"}), encoding="utf-8")
-    _, handle = sm.acquire_pet_slot(config_dir, preferred_slot=1)
-    try:
-        assert sm.migrate_legacy_spawns(config_dir) is False
-        assert staged.exists()
-        assert staged.read_text(encoding="utf-8") == json.dumps({"character": "staged"})
-    finally:
-        sm._unlock_file(handle)
-
-
 def test_migration_staging_remnant_is_kept_when_target_already_exists(tmp_path):
     config_dir = tmp_path / APP_DIR_NAME
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -688,27 +293,6 @@ def test_migration_staging_remnant_is_kept_when_target_already_exists(tmp_path):
     assert sm.migrate_legacy_spawns(config_dir) is False
     assert staged.exists()
     assert json.loads(target.read_text(encoding="utf-8"))["character"] == "current"
-
-
-def test_migrate_legacy_spawns_skips_occupied_target_slot(tmp_path):
-    """测试迁移目标槽位若被占用（持有锁），跳过该槽位并尝试下一槽位，保留旧配置。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    # 锁住 slot-1
-    slot1, h1 = sm.acquire_pet_slot(config_dir, preferred_slot=1)
-
-    old_cfg = config_dir / "config-spawn100x1.json"
-    old_cfg.write_text(json.dumps({"character": "spawn1"}), encoding="utf-8")
-
-    assert sm.migrate_legacy_spawns(config_dir) is True
-
-    # slot-1 被占用，应该迁移到 slot-2
-    assert not (config_dir / "config-slot-1.json").exists()
-    assert (config_dir / "config-slot-2.json").exists()
-    assert json.loads((config_dir / "config-slot-2.json").read_text(encoding="utf-8"))["character"] == "spawn1"
-
-    sm._unlock_file(h1)
 
 
 def test_list_runtime_marker_files_returns_legacy_and_v2(tmp_path):
@@ -753,6 +337,150 @@ def test_migrate_legacy_spawns_skips_when_v2_marker_alive(tmp_path):
     assert not (config_dir / "migration-spawns.done").exists()
 
 
+# --------------------------------------------------------------------------
+# 缺陷 18：runtime 标记 / slot 落种的写侧非原子 + 读侧把解析失败一律当陈旧删除
+# --------------------------------------------------------------------------
+def test_runtime_marker_write_goes_through_atomic_replace(tmp_path, monkeypatch):
+    """缺陷 18（写侧）：标记必须 temp + 原子替换，成功路径不留 .tmp。
+
+    直写最终路径会被独立设置进程的 ``read_live_instances`` 读到半截 JSON。
+    """
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    seen: list[tuple[Path, Path]] = []
+    real = sm.atomic_replace_with_retry
+
+    def spy(temp, target, attempts=5):
+        seen.append((Path(temp), Path(target)))
+        real(temp, target, attempts)
+
+    monkeypatch.setattr(sm, "atomic_replace_with_retry", spy)
+    path = sm.write_runtime_marker(config_dir, "", 10, 20, 30, 40, versioned=True)
+
+    assert seen, "标记写入必须经原子替换（不得直写最终路径）"
+    temp, target = seen[0]
+    assert target == path
+    assert temp != path and temp.parent == config_dir
+    assert json.loads(path.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    assert not temp.exists(), "成功路径不得残留 .tmp"
+    assert list(config_dir.glob("*.tmp")) == []
+
+
+def test_runtime_marker_write_failure_keeps_old_file_and_no_tmp(tmp_path, monkeypatch):
+    """缺陷 18（写侧）：替换失败不得留下半写内容，且 .tmp 必须清掉。"""
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = sm.runtime_marker_path(config_dir, "", versioned=True)
+    path.write_text(json.dumps({"pid": os.getpid(), "x": 1, "y": 1, "w": 5, "h": 5}),
+                    encoding="utf-8")
+
+    def deny(temp, target, attempts=5):
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(sm, "atomic_replace_with_retry", deny)
+    sm.write_runtime_marker(config_dir, "", 99, 99, 99, 99, versioned=True)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["x"] == 1, \
+        "替换失败时旧内容必须完整保留（不得半写/覆盖）"
+    assert list(config_dir.glob("*.tmp")) == [], "失败路径同样不得残留 .tmp"
+
+
+def test_seed_slot_config_write_goes_through_atomic_replace(tmp_path, monkeypatch):
+    """缺陷 18（写侧）：slot 落种写盘同样走 temp + 原子替换。"""
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(json.dumps({"character": "shenshen"}),
+                                            encoding="utf-8")
+    seen: list[tuple[Path, Path]] = []
+    real = sm.atomic_replace_with_retry
+
+    def spy(temp, target, attempts=5):
+        seen.append((Path(temp), Path(target)))
+        real(temp, target, attempts)
+
+    monkeypatch.setattr(sm, "atomic_replace_with_retry", spy)
+
+    assert sm.seed_slot_config_from_main(config_dir, 1) is True
+    target = sm.get_config_path_for_slot(config_dir, 1)
+    assert seen and seen[0][1] == target, "落种必须经原子替换"
+    assert seen[0][0] != target and seen[0][0].parent == config_dir
+    assert json.loads(target.read_text(encoding="utf-8"))["character"] == "shenshen"
+    assert list(config_dir.glob("*.tmp")) == []
+
+
+def test_seed_slot_config_write_failure_reports_false(tmp_path, monkeypatch):
+    """缺陷 18（写侧）：落种替换失败如实返回 False，且不留目标文件/.tmp。"""
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(json.dumps({"character": "shenshen"}),
+                                            encoding="utf-8")
+
+    def deny(temp, target, attempts=5):
+        raise OSError("replace denied")
+
+    monkeypatch.setattr(sm, "atomic_replace_with_retry", deny)
+
+    assert sm.seed_slot_config_from_main(config_dir, 1) is False
+    assert not sm.get_config_path_for_slot(config_dir, 1).exists()
+    assert list(config_dir.glob("*.tmp")) == []
+
+
+def test_read_live_instances_keeps_truncated_marker(tmp_path):
+    """缺陷 18（读侧）：解析失败的标记只跳过、绝不删。
+
+    读写竞态窗口内那可能是活进程正在写的半截文件；删掉 = 活进程的避让标记
+    凭空消失（其它窗按错误几何避让）。
+    """
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    marker = config_dir / f"pet-runtime-v2-{os.getpid()}-slot-1.json"
+    marker.write_text(f'{{"pid": {os.getpid()}, "x": 10', encoding="utf-8")  # 半写截断
+
+    assert sm.read_live_instances(config_dir) == []
+    assert marker.exists(), "解析失败不得删标记"
+
+
+def test_read_live_instances_keeps_live_marker_with_bad_geometry(tmp_path):
+    """缺陷 18（读侧）：活 pid 但几何字段非法 → 不删（进程还活着，删了就永久失去避让）。"""
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    marker = config_dir / "pet-runtime-v2-4002-slot-2.json"
+    marker.write_text(json.dumps({"pid": 4002, "x": "abc", "y": 0, "w": 3, "h": 4}),
+                      encoding="utf-8")
+
+    assert sm.read_live_instances(config_dir, pid_alive_fn=lambda pid: pid == 4002) == []
+    assert marker.exists(), "活进程的标记不得因几何字段非法被删"
+
+
+def test_read_live_instances_ignores_non_dict_marker_without_deleting(tmp_path):
+    """缺陷 18（读侧）：JSON 合法但非对象（判不出 pid）→ 只跳过不删。"""
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    marker = config_dir / f"pet-runtime-v2-{os.getpid()}-slot-1.json"
+    marker.write_text("[]", encoding="utf-8")
+
+    assert sm.read_live_instances(config_dir) == []
+    assert marker.exists(), "字段非法判不出 pid：只跳过不删"
+
+
+def test_read_live_instances_reclaims_confirmed_dead_pid(tmp_path):
+    """缺陷 18（读侧）回归：pid 已确认死亡的标记仍被回收（死 pid 不虚增避让计数）。"""
+    config_dir = tmp_path / APP_DIR_NAME
+    config_dir.mkdir(parents=True, exist_ok=True)
+    dead = config_dir / "pet-runtime-v2-4001-slot-1.json"
+    dead.write_text(json.dumps({"pid": 4001, "x": 1, "y": 2, "w": 3, "h": 4}),
+                    encoding="utf-8")
+    alive = config_dir / "pet-runtime-v2-4002-slot-2.json"
+    alive.write_text(json.dumps({"pid": 4002, "x": 5, "y": 6, "w": 7, "h": 8}),
+                     encoding="utf-8")
+
+    live = sm.read_live_instances(config_dir, pid_alive_fn=lambda pid: pid == 4002)
+
+    assert live == [(4002, 5, 6, 7, 8)]
+    assert not dead.exists(), "死 pid 的标记必须被回收"
+    assert alive.exists(), "活 pid 的标记必须保留"
+
+
 def test_app_main_validates_slot_arg():
     """测试 app.main 校验 --slot 参数范围（0~127）及非法值。"""
     from pet import app as app_mod
@@ -766,17 +494,3 @@ def test_app_main_validates_slot_arg():
     # 缺少值
     assert app_mod.main(["dsh-pet", "--slot"]) == 1
 
-
-def test_autostart_slot0_fail_does_not_degrade(tmp_path):
-    """场景 8：开机自启入口指定 --slot 0，若被占用报错退出，不降级为 slot-1。"""
-    config_dir = tmp_path / APP_DIR_NAME
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    # 占住 slot-0
-    slot0, handle0 = sm.acquire_pet_slot(config_dir, preferred_slot=0)
-
-    # 尝试指定申请 slot-0
-    with pytest.raises(sm.SlotLockError):
-        sm.acquire_pet_slot(config_dir, preferred_slot=0)
-
-    handle0.close()

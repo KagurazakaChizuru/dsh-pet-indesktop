@@ -18,8 +18,13 @@ import shiboken6
 _fs_monotonic = time.monotonic
 
 def start_fs_watch(host) -> None:
-    """启动全屏监视线程（幂等）。"""
-    if host._single_process_spawn:  # 批5.2a：flag 开由共享 watcher 接管
+    """启动全屏监视线程（幂等）。
+
+    4.4b：多窗常开化后共享子系统恒建，进程级共享 watcher 一律接管全屏检测
+    （``AppShell`` 建窗时置 ``shared_fullscreen_watcher_active``）；窗口不再自建
+    fs 线程。标记缺席（测试自定义宿主）时保留旧的自建路径，行为逐位不变。
+    """
+    if getattr(host, "shared_fullscreen_watcher_active", False):
         return
     if host._fs_thread is not None and host._fs_thread.is_alive():
         return

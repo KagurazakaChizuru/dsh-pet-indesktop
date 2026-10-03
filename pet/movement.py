@@ -16,8 +16,9 @@ from __future__ import annotations
 # 静默失效——测试仍绿但确定性丢失。
 import random
 
-__all__ = ["body_reach", "choose_move_direction", "inward_facing",
-           "move_anim_tick", "move_position_at_frame", "quantize_move", "wander_target_y"]
+__all__ = ["body_reach", "choose_move_direction", "curve_progress_at_time",
+           "inward_facing", "move_anim_tick", "move_position_at_frame",
+           "quantize_move", "wander_target_y"]
 
 
 def wander_target_y(
@@ -156,6 +157,48 @@ def move_position_at_frame(plan: dict, frames_elapsed: float) -> tuple[float, fl
     x = plan['start_x'] + (plan['target_x'] - plan['start_x']) * progress
     y = plan['start_y'] + (plan['target_y'] - plan['start_y']) * progress
     return x, y
+
+
+def curve_progress_at_time(
+    curve,
+    frames_per_loop: float,
+    loops: int,
+    elapsed: float,
+    loop_duration: float,
+) -> float:
+    """按墙钟时刻算「圈内逐帧位移曲线」的累计进度（0..1）。
+
+    曲线语义的唯一事实来源是 move_position_at_frame（curve[i] = 源帧 i 的
+    圈内累计进度）：本函数只把墙钟 elapsed 折算成等效帧号再委托它插值，
+    绝不另写一份曲线插值逻辑。
+
+    相位源取舍：旧架构以解码帧号为准（window.py:1773-1778 帧到达时按
+    frames_elapsed 定位位置），新架构行为层只有墙钟（tick 累加的 dt）。
+    两者的漂移上界是一个解码节流周期（帧队列背压/闲置降帧时最多滞后
+    一帧），折算到圈内位移是**亚像素级**；曲线本身仍严格决定「静帧段
+    不走、动帧段推进」，故共享/拖拽等视觉语义不受影响。
+
+    无曲线：返回线性进度（与无 curve 素材的匀速语义一致）。loop_duration
+    ≤ 0（meta 未就绪）返回 1.0：调用方本就以此值判定「不建立计划」。
+    """
+    total_loops = max(1, int(loops))
+    if not curve:
+        if loop_duration <= 0:
+            return 1.0
+        return max(0.0, min(1.0, float(elapsed) / (loop_duration * total_loops)))
+    if loop_duration <= 0:
+        return 1.0
+    per_loop = max(1, int(frames_per_loop))
+    frames_elapsed = max(0.0, float(elapsed)) / float(loop_duration) * per_loop
+    plan = {
+        'curve': curve,
+        'frames_per_loop': per_loop,
+        'loops': total_loops,
+        'total_frames': per_loop * total_loops,
+        'start_x': 0.0, 'start_y': 0.0,
+        'target_x': 1.0, 'target_y': 0.0,
+    }
+    return max(0.0, min(1.0, move_position_at_frame(plan, frames_elapsed)[0]))
 
 
 def move_anim_tick(host) -> None:

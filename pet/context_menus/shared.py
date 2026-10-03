@@ -107,6 +107,47 @@ def defer_menu_callback(menu: QMenu, callback) -> bool:
     return True
 
 
+def release_menu_tree(menu: QMenu) -> None:
+    """释放整棵右键菜单树（``menu.exec()`` 返回后必须调用一次）。
+
+    菜单以**长命窗口**为 parent，只丢 Python 引用时 C++ 侧的整棵树（子菜单/动作/
+    动画图标解码池/图标 pixmap）会随每次右键永久累积——实测 offscreen 经 facade
+    构建 modern 全量菜单 10 轮：+153 QMenu / +780 QAction；走本函数后增量 0。
+    根因是 ``apply_modern_menu_style`` / ``install_modern_check_indicators`` 的
+    ``aboutToShow.connect(lambda menu=menu: ...)`` 自引用连接让 Python 侧也永不
+    释放（详见 ``tests/test_menu_tree_release.py``）。
+
+    流程与 window.py 原实现逐位一致：
+
+    1. 先 ``pool.clear()`` 掉各动画分类子菜单尚未启动的解码任务——否则
+       QThreadPool 析构时会在 GUI 线程等运行中的 worker；
+    2. 再有界轮询等 worker 收工（每 50ms 一次，总上限 3s，不阻塞事件循环；解码
+       worker 病态不结束时也强制释放，否则菜单树永久滞留），然后
+       ``menu.deleteLater()``。轮询定时器绑 menu 作 context：菜单先销毁时定时器
+       随之失效，不会对已删 C++ 对象再 ``deleteLater``。
+    """
+    pools = []
+    for submenu in menu.findChildren(QMenu):
+        pool = getattr(submenu, "_animation_icon_pool", None)
+        if pool is not None:
+            pool.clear()
+            pools.append(pool)
+
+    def delete_when_idle(_attempts: int = 0) -> None:
+        if _attempts >= 60:
+            menu.deleteLater()
+            return
+        if any(not pool.waitForDone(0) for pool in pools):
+            QTimer.singleShot(50, menu, lambda: delete_when_idle(_attempts + 1))
+            return
+        menu.deleteLater()
+
+    if pools:
+        delete_when_idle()
+    else:
+        menu.deleteLater()
+
+
 def connect_action(action, callback) -> None:
     def invoke(_checked=False, action=action, callback=callback) -> None:
         parent = action.parent()
@@ -438,15 +479,6 @@ def add_no_move(menu: QMenu, pet, *, icons: bool = True):
     return action
 
 
-def add_mouse_through(menu: QMenu, pet, *, icons: bool = True):
-    """鼠标穿透开关（上游重写时丢失的菜单入口，接回 set_mouse_through）。"""
-    action = add_action(menu, "鼠标穿透", "pin" if icons else None)
-    action.setCheckable(True)
-    action.setChecked(bool(getattr(pet, "mouse_through", False)))
-    action.toggled.connect(lambda enabled, pet=pet: pet.set_mouse_through(enabled))
-    return action
-
-
 def add_on_top(menu: QMenu, pet, *, icons: bool = True):
     action = add_action(menu, "窗口置顶", "pin" if icons else None)
     action.setCheckable(True)
@@ -520,6 +552,17 @@ def add_edge_probe(menu: QMenu, pet, *, icons: bool = True):
     return action
 
 
+def _dialog_parent(pet):
+    """模态对话框的父窗口。
+
+    ``pet`` 在窗口路径下就是 QWidget（PetWindow）；在 sprite 路径下是
+    ``SpriteMenuFacade`` 这样的 duck-typed 宿主，不能当 QMessageBox 的 parent，
+    此时用宿主自报的 ``dialog_parent``（overlay 窗）。PetWindow 没有该属性 →
+    原样返回自己，窗口路径逐位不变。
+    """
+    return getattr(pet, "dialog_parent", None) or pet
+
+
 def add_harness(menu: QMenu, pet, *, icons: bool = True):
     """DeepSeek Harness 子菜单：启动 / 重启 / 停止。
 
@@ -532,19 +575,25 @@ def add_harness(menu: QMenu, pet, *, icons: bool = True):
     """
     start_icon = "harness" if icons else None
     submenu = add_submenu(menu, "DeepSeek Harness", start_icon)
+
+    def _launch(action: str = "start") -> None:
+        # 父窗口在**点击时**解析：宿主（facade）可能在菜单关闭后被回收，
+        # 这里只读它自报的 dialog_parent 面，不缓存对象。
+        launch_harness_gui(_dialog_parent(pet), action=action)
+
     # 三个动作都 close_on_trigger：菜单先关闭、回调延迟到菜单关闭后执行——
     # 重启/停止的确认框是模态框，macOS 原生菜单跟踪会话中弹模态框会被
     # AppKit 抑制（与设置对话框首次点击无反应同源）。
-    add_action(submenu, "启动并打开页面", start_icon, lambda: launch_harness_gui(pet),
+    add_action(submenu, "启动并打开页面", start_icon, _launch,
                close_on_trigger=True)
     add_action(
         submenu, "重启服务", "play" if icons else None,
-        lambda: launch_harness_gui(pet, action="restart"),
+        lambda: _launch("restart"),
         close_on_trigger=True,
     )
     add_action(
         submenu, "停止服务", "quit" if icons else None,
-        lambda: launch_harness_gui(pet, action="stop"),
+        lambda: _launch("stop"),
         close_on_trigger=True,
     )
     return submenu

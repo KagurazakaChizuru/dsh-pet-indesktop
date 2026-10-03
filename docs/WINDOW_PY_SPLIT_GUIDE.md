@@ -147,29 +147,29 @@
 
 | 职责 | 模块 |
 |---|---|
-| 碰撞客户端（窗口侧为薄委托） | collision_client.py |
-| 碰撞物理 / 协议 / IPC | collision.py / collision_codec.py / collision_ipc.py |
+| 碰撞物理 / 进程内 sprite 碰撞世界 | collision.py / sprite_collision.py |
+| overlay 拓扑产品壳（sprite 世界/托盘/D12 指令通道） | overlay_shell.py / overlay_spawn_state.py |
 | 平台层 | platform_win.py / platform_mac.py |
 | 共享解码 fan-out | decode_fanout.py（窗口侧 `_broker_*` 块为接线+首播决策状态机，非纯转发） |
 | 帧缓存 / 性能打点 | frame_cache.py / perfstats.py |
 
-## 5. 参考范例：collision_client.py 的拆法
+## 5. 参考范例：功能驱动拆分的既有案例
 
-`collision_client.py` 是「功能驱动拆分」的完整范例，可直接对照阅读：
+4.4b 之前的 `collision_client.py` 曾是「功能驱动拆分」的完整范例（把窗口侧碰撞
+客户端整块抽成控制器）。该模块已随多进程多宠退役层删除，拆法本身仍可对照
+现行控制器（`edge_probe.py` / `sprite_collision.py` / `window_optional_services.py`）：
 
-1. 控制器持有已抽取的域状态（session / epoch / peer_snapshots /
-   predicted_bounces 等）；窗口保留组合对象、兼容委托 property 与必要的
+1. 控制器持有已抽取的域状态；窗口保留组合对象、兼容委托 property 与必要的
    宿主状态；
 2. 窗口保留同名委托 property（get/set 转发），既有测试与调用面零改动；
 3. 控制器需要的窗口常量在构造时注入，不做模块级 `import window`；
 4. 信号直接连接控制器方法，不经窗口转发；
-5. 需要兜底访问时，窗口侧增加只读公开 seam（如 `collision_app_session`
-   property）。
+5. 需要兜底访问时，窗口侧增加只读公开 seam。
 
 关于私有访问的真实边界（易误读，请注意）：CI 断言
 `test_window_private_surface_frozen` **只覆盖 `app.py` / `agent_link.py` /
 `context_menus/` 三个外围调用面**——这些模块不得访问 `win._xxx`。
-而 `collision_client.py`、`platform_win.py` 等窗口的近邻控制器目前仍
+而 `platform_win.py` 等窗口的近邻控制器目前仍
 按既有约定访问窗口私有成员（属当前事实而非违规），
 `agent_link.py` 也保留了一处有注释登记的例外
 （`win._bubble_busy_until`，见 `pet/agent_link.py:3820`）。新拆控制器时建议优先走公开 seam；确实

@@ -34,6 +34,13 @@ _WS_EX_TRANSPARENT = 0x00000020
 # Ctrl+C/Ctrl+V —— 观感就是"整机复制粘贴失效"，点回原窗口或退出桌宠才恢复。
 _WS_EX_NOACTIVATE = 0x08000000
 
+# ---- Win32：置顶重申（SetWindowPos）用常量 ----
+_HWND_TOPMOST = -1      # 插到 topmost 带最上（每次调用都重排，不只是置样式位）
+_HWND_NOTOPMOST = -2
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOACTIVATE = 0x0010
+
 
 class _WinRect(ctypes.Structure):
     _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long),
@@ -76,6 +83,38 @@ def _set_windows_no_activate(hwnd: int, user32=None) -> bool:
     return True
 
 
+def _set_windows_topmost(hwnd: int, on: bool, user32=None) -> bool:
+    """原生重设置顶：``SetWindowPos(HWND_TOPMOST / HWND_NOTOPMOST)``。
+
+    与 Qt ``WindowStaysOnTopHint`` 的差别正是这里存在的理由：Qt 只在 flags
+    **变化**时写一次 ``WS_EX_TOPMOST``，此后窗口只是"身在 topmost 带里"，而带内
+    先后仍由"谁最近被激活/显示"决定；带 ``WindowDoesNotAcceptFocus`` 的窗口
+    （灵动岛、桌宠）从不激活，一旦被别的 topmost 窗（本进程聊天窗/设置窗/气泡、
+    第三方置顶工具）盖住就再也不会自己回来。本函数**每次调用都重排 z 序**，
+    把窗口重新插到 topmost 带最上。
+
+    ``SWP_NOACTIVATE``：只改 z 序、不夺用户键盘焦点（与 issue #98 同口径）；
+    ``SWP_NOMOVE``/``SWP_NOSIZE``：不动几何，不产生重排/重绘。
+    ``user32=None`` 时取真实 user32 并声明 argtypes——64 位下 HWND 是指针，
+    不声明会被 ctypes 默认 int32 截断成无效句柄（口径同 6ebfd2b 的
+    ``window.py::_win_set_topmost``）。返回 API 是否成功。
+    """
+    if user32 is None:
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+    return bool(user32.SetWindowPos(
+        hwnd,
+        _HWND_TOPMOST if on else _HWND_NOTOPMOST,
+        0, 0, 0, 0,
+        _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE,
+    ))
+
+
 class WindowsPerPixelInputController:
     """根据光标所在像素动态切换 layered window 的输入穿透。
 
@@ -85,7 +124,23 @@ class WindowsPerPixelInputController:
     """
 
     NORMAL_POLL_INTERVAL_MS = 10
+    #: 光标在窗口包围盒外：逐像素判定必然「无命中 → 穿透」，低频空转即可
+    #: （overlay 铺满整屏时，命中判定还要每 tick 走一遍全部 sprite 的 alpha
+    #: 查询；小窗 legacy 更是绝大多数时间都在盒外）。
+    IDLE_POLL_INTERVAL_MS = 50
     DRAG_POLL_INTERVAL_MS = 100
+    #: 穿透态缓存不设过期时间，但每 N 次 refresh 无条件重读一次窗口样式
+    #: （低频校正）：旧实现每 10ms 读一次样式，任何外部改写都会在一个 tick
+    #: 内被纠正（window.py:4094-4096 的收敛契约就建立在这上面）；缓存后仍需
+    #: 兜住「不知道是谁改了样式」的情况，代价是 10ms 档 1 次读/秒。
+    RECHECK_EVERY_N_REFRESHES = 100
+
+    # 类级默认值：既有测试用 object.__new__ 绕过 __init__ 拼控制器，
+    # 读这些字段必须是安全的（未初始化 = 缓存无效，必然重放一次样式）。
+    _applied_through: bool | None = None
+    _applied_hwnd: int | None = None
+    _applied_mouse_through: bool | None = None
+    _refreshes_since_read: int = 0
 
     def __init__(self, window: "PetWindow") -> None:
         self._window = window
@@ -105,19 +160,95 @@ class WindowsPerPixelInputController:
             return False
         return win._is_transparent_at(local)
 
+    def _cursor_inside_window(self, global_pos: QPoint) -> bool:
+        """光标是否落在窗口包围盒内（两段式轮询的定档判据）。"""
+        win = self._window
+        local = win.mapFromGlobal(global_pos)
+        return QRect(0, 0, win.width(), win.height()).contains(local)
+
+    def _sync_poll_interval(self, inside: bool) -> None:
+        """按光标位置切档：盒内 10ms（逐像素跟手），盒外 50ms（低频）。
+
+        拖拽中（``_press_global`` 非 None）不参与定档：100ms 档由
+        ``set_drag_active`` 独占（拖拽期 should_click_through 恒 False，
+        轮询只是保活）。
+        """
+        if getattr(self._window, '_press_global', None) is not None:
+            return
+        target = (self.NORMAL_POLL_INTERVAL_MS if inside
+                  else self.IDLE_POLL_INTERVAL_MS)
+        if self._timer.interval() != target:
+            self._timer.setInterval(target)
+
     def refresh(self) -> None:
         try:
-            enabled = self.should_click_through(QCursor.pos())
-            _set_windows_click_through(int(self._window.winId()), enabled)
+            pos = QCursor.pos()
+            self._sync_poll_interval(self._cursor_inside_window(pos))
+            enabled = self.should_click_through(pos)
+            self._apply_through(enabled)
         except (AttributeError, OSError, RuntimeError):
             logging.debug("更新 Windows 逐像素鼠标穿透失败", exc_info=True)
+
+    def _apply_through(self, enabled: bool) -> None:
+        """把目标穿透态写进窗口样式；状态未变时不再读样式（O2）。
+
+        跳过条件（四个条件同时成立才跳过）：
+        1. 句柄未变——``setWindowFlags`` 之类的原生窗口重建会让样式归零，
+           句柄变了必须重放；
+        2. 目标态未变——逐像素命中的结论与上次相同；
+        3. ``window.mouse_through`` 未变——仓库内唯一的外部样式写入口
+           （``window.py:_apply_effective_mouse_through``）必定先改这个标志
+           再写样式，标志变了即说明样式可能已被改写，缓存立即作废；
+        4. 未到低频校正窗口——每 ``RECHECK_EVERY_N_REFRESHES`` 次 refresh
+           无条件重读一次，兜住未知的外部改写（见该类常量注释）。
+
+        为什么可以跳过 Win32 读：``_set_windows_click_through`` 的唯一作用就是
+        把样式收敛到目标态，它自己的早退判断（读到的样式 == 目标）正是我们要
+        省掉的那次读；缓存失效的四个入口覆盖了窗口重建/外部改写/停表恢复。
+        """
+        win = self._window
+        hwnd = int(win.winId())
+        mouse_through = bool(getattr(win, "mouse_through", False))
+        self._refreshes_since_read += 1
+        cache_valid = (
+            self._applied_through == enabled
+            and self._applied_hwnd == hwnd
+            and self._applied_mouse_through == mouse_through
+            and self._refreshes_since_read < self.RECHECK_EVERY_N_REFRESHES
+        )
+        if cache_valid:
+            return
+        _set_windows_click_through(hwnd, enabled)
+        self._applied_through = enabled
+        self._applied_hwnd = hwnd
+        self._applied_mouse_through = mouse_through
+        self._refreshes_since_read = 0
+
+    def _invalidate_through_cache(self) -> None:
+        """缓存作废（停表/恢复时调用）：下次 refresh 必然重读样式。"""
+        self._applied_through = None
+        self._applied_hwnd = None
+        self._applied_mouse_through = None
+
+    def resume(self) -> None:
+        """隐藏后恢复（与 ``stop()`` 对称）：重开轮询表并立即收敛一次穿透态。
+
+        停表期间窗口样式可能被外部改写、原生窗口也可能被重建，故先作废缓存
+        再 refresh —— 「显示即立刻写正确穿透态」是硬要求：显示后不能有一段
+        时间按陈旧样式吞掉点击。
+        """
+        self._invalidate_through_cache()
+        self._refreshes_since_read = 0
+        self.refresh()
+        self._timer.start()
 
     def set_drag_active(self, active: bool) -> None:
         """拖拽按下/松手时切换轮询频率。
 
         拖拽（_press_global 非 None）期间 should_click_through 恒返回 False，
         每 10ms 轮询纯属空转：降频到 100ms 减少 Win32/QCursor 调用。
-        松手后立即恢复原频率并强制刷新一次穿透状态；非拖拽状态重复调用是 no-op。
+        松手后立即按光标位置重新定档（盒内 10ms / 盒外 50ms）并强制刷新一次
+        穿透状态；非拖拽状态重复调用是 no-op。
         """
         if active:
             if self._timer.interval() != self.DRAG_POLL_INTERVAL_MS:
@@ -130,6 +261,9 @@ class WindowsPerPixelInputController:
 
     def stop(self) -> None:
         self._timer.stop()
+        # 停表期间样式可能被外部改写、原生窗口也可能被重建：缓存作废，
+        # 下次 refresh/resume 必然重新读一次样式（旧实现靠每次读兜住）。
+        self._invalidate_through_cache()
         if not self._window.mouse_through:
             try:
                 _set_windows_click_through(int(self._window.winId()), False)
@@ -183,8 +317,13 @@ def _fs_user_busy_state() -> tuple[bool, int]:
         hr = ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state))
         if hr != 0:  # S_OK
             return False, -1
-        # 2=QUNS_BUSY(全屏应用运行中) 3=QUNS_RUNNING_D3D_FULL_SCREEN 4=QUNS_PRESENTATION_MODE
-        return state.value in (2, 3, 4), state.value
+        # 3=QUNS_RUNNING_D3D_FULL_SCREEN 4=QUNS_PRESENTATION_MODE——只认这两个
+        # 无歧义「真全屏应用」信号。QUNS_BUSY(2) 不收：Win11 下它对任意全屏
+        # 置顶窗（包括本进程自己的 overlay 合成窗）都会报 BUSY——overlay 可见
+        # → BUSY=2 → 判全屏 → 隐藏 → BUSY 消退 → 显示 → BUSY=2……实机抓到
+        # 1Hz 自激频闪（2026-09-23，soak 日志逐秒翻转 64 次）。真全屏游戏/
+        # 视频仍由 QUNS=3 或几何判定（覆盖整屏+无标题栏/置顶）覆盖，不损失。
+        return state.value in (3, 4), state.value
     except Exception:
         return False, -1
 

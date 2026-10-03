@@ -10,7 +10,11 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +30,42 @@ from pet.voice_chime import (
     cache_key,
 )
 from pet.voice_chime_service import VoiceChimeService
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _run_python(script: str) -> subprocess.CompletedProcess:
+    """在**全新解释器**里跑一段脚本（cwd=仓库根，offscreen 免拖真实显示后端）。
+
+    进程级 import 断言（`edge_tts` 会不会被拉进 sys.modules）必须这么测：全量
+    套件是单进程的，别的用例的后台合成线程懒加载 edge_tts 的时机与本用例的断言
+    窗口撞车就会假红（2026-09-23：同一棵树 PR run 绿，push run 在 macOS 上连红
+    两次；本机连跑三轮全量全绿——属竞态而非回归）。子进程里"这个模块自己会不会
+    在顶层 import"是可确定判定的，与 `tests/test_winmm_sound.py` 的 QtMultimedia
+    同款写法。
+
+    两条硬约束（都为「不可能挂住」）：
+    1. 子进程脚本**只做 import 级断言**，不构造 AppShell / 不跑事件循环——裸
+       `python -c` 里没有 conftest 的弹窗桩，模态对话框在那儿没人能关；
+    2. 输出走**临时文件**而不是管道：`capture_output=True` 在超时杀进程后仍会
+       读管道等 EOF，子进程若留下持有该管道的孙进程就会永久挂住（CI 上已见
+       Linux 主套件卡死 20 分钟）。重定向到文件后，超时杀进程即返回，封闭有界。
+    """
+    env = dict(os.environ)
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    with tempfile.TemporaryFile("w+t", encoding="utf-8", errors="replace") as out:
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                text=True, cwd=str(ROOT), env=env, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            out.seek(0)
+            return subprocess.CompletedProcess(
+                [sys.executable, "-c", script], 124, out.read(), "")
+        out.seek(0)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out.read(), "")
 
 
 def _qapp() -> QApplication:
@@ -471,6 +511,7 @@ def test_about_to_quit_stops_voice_chime_service(tmp_path, monkeypatch):
     它的无主 QTimer 被 Qt C++ 侧强引用，退出期仍在跑 20s tick，且合成线程
     可能在窗口析构后回 GUI 线程回放。
     """
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")  # PetWindow 路径测试
     import pet.app as app_mod
     from pet.app import AppShell
 
@@ -758,9 +799,12 @@ def test_chime_speaks_normally_on_a_plain_day(tmp_path, monkeypatch):
 
 
 def test_service_module_top_level_does_not_import_edge_tts(monkeypatch):
-    """全新加载一份 voice_chime_service：不得把 edge_tts 本体拉进 sys.modules。"""
+    """首次 import 一份 voice_chime_service：不得把 edge_tts 本体拉进 sys.modules。
+
+    在进程内直接 exec 服务模块的文件：断言对象是"模块顶层有没有 import
+    edge_tts"，与子进程版（`_run_python`，用于启动路径）互补。
+    """
     import importlib.util
-    import sys
 
     import pet.tts.edge as edge_mod
     import pet.voice_chime_service as svc_mod
@@ -772,27 +816,38 @@ def test_service_module_top_level_does_not_import_edge_tts(monkeypatch):
     spec.loader.exec_module(fresh)
 
     assert "edge_tts" not in sys.modules, "模块顶层把 edge_tts import 进来了（白付 1.4s）"
-    # 惰性探测标志现在住在 provider 模块（服务层不再自己探）
+    # 惰性探测标志现在住在 provider 模块（服务层不再自己探）——上游 `_run_python`
+    # 子进程版断言的是 svc._EDGE_TTS_AVAILABLE，那在接口化改造后已不存在（该属性
+    # 落在 pet/tts/edge.py）。本例保留在进程内直接 exec 模块文件的口径，并改成查
+    # provider 的探测标志：改动的是"谁持有标志"，不是"有没有惰性"。
     assert edge_mod._EDGE_TTS_AVAILABLE is (
         importlib.util.find_spec("edge_tts") is not None
     ), "惰性探测结果必须与真实可导入性一致（否则会误报“请 pip install”）"
 
 
-def test_disabled_voice_chime_startup_does_not_import_edge_tts(tmp_path, monkeypatch):
-    """voice_chime_enabled=False 的启动路径：服务整个不 start，edge_tts 一次都不 import。"""
-    import sys
+def test_disabled_voice_chime_startup_does_not_import_edge_tts(tmp_path):
+    """voice_chime_enabled=False 的启动路径：服务整个不 start，edge_tts 一次都不 import。
 
+    两步走：**构造侧**在进程内判（确定：服务对象必须为 None）；**import 侧**在
+    子进程里判（理由见 `_run_python`）。子进程脚本刻意只 `import pet.app`——裸
+    `python -c` 里没有 conftest 的弹窗桩，构造 AppShell 有卡在模态对话框的风险，
+    而这条断言要的证据只是"import 链里没有 edge_tts"。
+    """
     from pet.app import AppShell
 
-    monkeypatch.delitem(sys.modules, "edge_tts", raising=False)
-    _qapp()
     cfg = Config(base=tmp_path)
     cfg.set("voice_chime_enabled", False)
     cfg.set("festival_reminder_enabled", False)
     shell = AppShell(_qapp(), cfg, enable_chat=False)
 
     assert shell.voice_chime_service is None
-    assert "edge_tts" not in sys.modules
+
+    proc = _run_python(
+        "import sys\n"
+        "import pet.app\n"
+        "assert 'edge_tts' not in sys.modules, '启动路径把 edge_tts import 进来了'\n"
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_tts_worker_reports_missing_edge_tts_instead_of_raising(tmp_path, monkeypatch):

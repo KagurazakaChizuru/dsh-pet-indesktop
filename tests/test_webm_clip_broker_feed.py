@@ -123,6 +123,12 @@ class _PacedFeedSession:
         self._lock = threading.Lock()
         self.close_count = 0
 
+    @property
+    def delivered(self) -> int:
+        """已交付帧数（= 消费端 poll 走几帧，暂停期背压的直接证据）。"""
+        with self._lock:
+            return self._delivered
+
     def release_next(self) -> None:
         self._permit.set()
 
@@ -393,6 +399,151 @@ def test_publish_sink_on_frame_called_exactly_once_per_frame(app):
         assert n >= 200  # 全素材 241 帧；至少接近完整
         assert sink.srcs == list(range(n))  # 每帧恰一次、按解码序
         assert n == clip.frameCount()  # 与实际素材帧数一致（仓库 = 241）
+    finally:
+        clip.cleanup()
+        app.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# 暂停期背压（feed/共享解码消费端同样不得丢帧）
+# ---------------------------------------------------------------------------
+def test_paused_feed_consumer_backpressures_instead_of_dropping(app):
+    """暂停期 feed 消费端必须阻塞入队，不得继续 poll 丢帧。
+
+    共享解码路径的丢帧分支改前无条件生效（只看节流 divisor）：订阅者暂停 =
+    本地队列写满 = reader 持续 poll 持续丢帧（每帧都已被共享解码解好，丢掉的
+    是订阅者自己的播放位置）——恢复后从暂停处续播的承诺同样被破坏。
+    """
+    assert SAMPLE_WEBM.exists()
+    clip = WebMClip(SAMPLE_WEBM)
+    clip._duration = 10.0  # 跳过 meta 探测（feed 模式不触 ffmpeg）
+    frame_count = 40
+    session = _PacedFeedSession(_FRAME, frame_count=frame_count)
+    feed = _StubFeed("feed-pause", str(SAMPLE_WEBM))
+    feed.complete(session)  # grant 已落定（feed-pending 直接放行）
+    clip._feed_source = feed
+    srcs: list = []
+    clip.frameChanged.connect(srcs.append)
+    try:
+        # 逐帧放行 8 帧（queue 容量）填满消费队列：读者手上没有在飞帧
+        # （permit 用尽 → poll 返回 none 在让步），暂停点因此是确定的。
+        assert clip.start() is True
+        deadline = time.monotonic() + 8.0
+        while session.delivered < clip._queue.maxsize \
+                and time.monotonic() < deadline:
+            session.release_next()  # 逐帧放行（permit 是电平，不能连按）
+            time.sleep(0.002)
+        assert session.delivered == clip._queue.maxsize
+        deadline = time.monotonic() + 8.0
+        while clip._queue.qsize() < clip._queue.maxsize \
+                and time.monotonic() < deadline:
+            time.sleep(0.002)
+        assert clip._queue.qsize() == clip._queue.maxsize
+
+        clip.pause()
+        # 暂停窗口里持续放行：改前每次放行都会被 reader poll 走后丢弃
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            session.release_next()
+            app.processEvents()
+            time.sleep(0.005)
+        assert session.delivered == clip._queue.maxsize + 1, \
+            f"暂停期 feed 消费端仍在取帧丢帧：delivered={session.delivered}"
+        assert srcs == [], "暂停期消费端不得上屏"
+
+        # 暂停期取走队列里的帧（reader 的阻塞 put 随腾出的槽位逐帧落地）：
+        # 交付序列必须连续——改前被丢掉的帧会在暂停边界留下跳号。
+        expected = clip._queue.maxsize + 6
+        deadline = time.monotonic() + 8.0
+        while len(srcs) < expected and time.monotonic() < deadline:
+            session.release_next()   # 逐帧放行（与消费节拍同步，不越队列容量）
+            clip._poll()
+            time.sleep(0.002)
+        assert len(srcs) >= expected, f"暂停期交付不足：{srcs}"
+        assert srcs == list(range(len(srcs))), f"暂停边界出现跳帧：{srcs}"
+        assert clip._reader_proc is None, "暂停期不得回退本地 ffmpeg"
+
+        clip.resume()
+        assert clip._timer.isActive() is True
+    finally:
+        clip.cleanup()
+        app.processEvents()
+
+
+class _WatchdogFeedSession(_PacedFeedSession):
+    """带"无帧无 end 超预算即 abort('watchdog')"的合成 feed 会话。
+
+    判据与 ``decode_fanout._FanoutFeedSession`` 一致（每交付一帧重置计时、
+    超时即 abort），用来锁定"暂停期阻塞不得被看门狗误判成源断流"。
+    """
+
+    def __init__(self, payload, frame_count=40, budget_s=0.2):
+        super().__init__(payload, frame_count=frame_count)
+        self._budget = float(budget_s)
+        self._stall_deadline = time.monotonic() + self._budget
+        self.reset_count = 0
+
+    def reset_stall(self) -> None:
+        self.reset_count += 1
+        self._stall_deadline = time.monotonic() + self._budget
+
+    def poll(self):
+        if time.monotonic() > self._stall_deadline:
+            return ("abort", None, None, "watchdog")
+        result = super().poll()
+        if result[0] == "frame":
+            self._stall_deadline = time.monotonic() + self._budget
+        return result
+
+
+def test_paused_feed_consumer_does_not_trip_source_watchdog(app):
+    """暂停 > 看门狗预算后恢复：不得被误判成源断流（否则回退本地帧 0 起播）。
+
+    阻塞入队期间 reader 不调 ``poll()``，而 feed 会话的看门狗按"无帧无 end"
+    计时——暂停一旦长过预算，放行后的第一次 poll 就会 abort('watchdog')，
+    订阅者当场落回本地 ffmpeg 帧 0 起播，「从暂停处续播」被破坏。
+    """
+    assert SAMPLE_WEBM.exists()
+    clip = WebMClip(SAMPLE_WEBM)
+    clip._duration = 10.0
+    session = _WatchdogFeedSession(_FRAME, frame_count=40, budget_s=0.2)
+    feed = _StubFeed("feed-pause-watchdog", str(SAMPLE_WEBM))
+    feed.complete(session)
+    clip._feed_source = feed
+    srcs: list = []
+    clip.frameChanged.connect(srcs.append)
+    try:
+        assert clip.start() is True
+        deadline = time.monotonic() + 8.0
+        while session.delivered < clip._queue.maxsize \
+                and time.monotonic() < deadline:
+            session.release_next()
+            time.sleep(0.002)
+        assert session.delivered == clip._queue.maxsize
+        deadline = time.monotonic() + 8.0
+        while clip._queue.qsize() < clip._queue.maxsize \
+                and time.monotonic() < deadline:
+            time.sleep(0.002)
+        assert clip._queue.qsize() == clip._queue.maxsize
+
+        clip.pause()
+        session.release_next()   # 第 9 帧到手后 reader 卡在阻塞入队上
+        deadline = time.monotonic() + 5.0
+        while session.delivered < clip._queue.maxsize + 1 \
+                and time.monotonic() < deadline:
+            time.sleep(0.002)
+        assert session.delivered == clip._queue.maxsize + 1, "reader 未进入背压阻塞"
+        time.sleep(0.5)          # 暂停时长 > 看门狗预算（0.2s）
+
+        expected = clip._queue.maxsize + 6
+        deadline = time.monotonic() + 8.0
+        while len(srcs) < expected and time.monotonic() < deadline:
+            session.release_next()
+            clip._poll()
+            time.sleep(0.002)
+        assert len(srcs) >= expected, f"暂停后交付不足：{srcs}"
+        assert srcs == list(range(len(srcs))), f"恢复后出现回退/跳帧：{srcs}"
+        assert clip._reader_proc is None, "看门狗误判导致回退本地 ffmpeg"
     finally:
         clip.cleanup()
         app.processEvents()

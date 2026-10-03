@@ -22,7 +22,7 @@ def modern_menu_stylesheet(appearance: dict | None = None, *, dark: bool = False
     disabled = "#787878" if dark else "#9a9a9a"
     font_size = max(10, min(18, int(appearance.get("ui_font_size") or 13)))
     requested_font = str(appearance.get("ui_font") or "system").replace('"', "")
-    font_stack = SYSTEM_FONT_STACK if requested_font == "system" else f'"{requested_font}", {SYSTEM_FONT_STACK}'
+    font_stack = SYSTEM_FONT_STACK if requested_font == "system" else f'"{requested_font}"'
     translucent = bool(appearance.get("translucent", True))
     opacity = max(0.72, min(1.0, float(appearance.get("opacity") or 0.94)))
     if translucent and background.startswith("#") and len(background) == 7:

@@ -66,6 +66,11 @@ issue 里的日志证据正好对上：`webm 圈边界宽限期满未续圈，re
 - 恒返回 `(False, 0)`：只观测、不拦截，**绝不 veto 关机**；
 - 只读 `MSG*` 的 `message` 字段用于比对，仅对关心的两个消息号解引用（非
   `WM_*` 消息的 `lParam` 是任意值，当指针解引用会触发访问违规）；
+- **2026-09-27 追加（不改上文）**：同一个过滤器现在还处理 `WM_WTSSESSION_CHANGE`（锁屏 7 / 解锁 8）
+  与 `WM_POWERBROADCAST`（挂起 4 / 恢复 0x12 / 7）——它们**同样只读 `message` 字段判定消息号**，
+  命中后才走挂起/恢复报告（`on_suspend_change`，只降档不拦消息），与关机两消息同一条窄读路径；
+  锁屏通知另需按 `WTSRegisterSessionNotification` 在 overlay 句柄上一次性注册（`WM_WTSSESSION_CHANGE`
+  只发给注册过的窗口，广播类消息不依赖注册），失败记日志降级为不支持锁屏探测；
 - POSIX 上不装原生过滤器，闸门与信号接线照旧。
 
 ### 4.3 编排与窗口收口

@@ -47,8 +47,9 @@ def test_petapp_enabled_default_services_still_constructed(tmp_path):
     app = _qapp()
     shell = AppShell(app, Config(tmp_path), enable_chat=False)
     assert shell.todo_service is not None
-    # 碰撞会话每窗自持（恒建）；共享解码 hub 进程级（默认 enabled 取决于 flag）。
-    assert shell.instance.collision_ipc is not None
+    # 4.4a：碰撞 IPC 会话已随多进程多宠退役层停用（多宠碰撞归 sprite 世界）；
+    # 共享解码 hub 仍为进程级（默认 enabled 取决于 flag/拓扑）。
+    assert not hasattr(shell.instance, "collision_ipc")
     assert shell._decode_hub is not None
 
 
@@ -63,13 +64,12 @@ def test_petapp_start_disabled_services_stay_stopped(tmp_path, monkeypatch):
     shell.instance._create_ui = lambda cid: None
     shell.instance._apply_spawn_offset = lambda: None
     shell._apply_balance_timer = lambda: None
-    shell.instance.collision_ipc = type("FakeCollision", (), {"start": lambda self: None})()
     shell.start()
     assert shell.todo_service is None
 
 
 def test_petwindow_disabled_optional_services_not_constructed(tmp_path):
-    from tests.test_collision_window import FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     app = _qapp()
     cfg = _disabled_config(tmp_path)
@@ -83,7 +83,7 @@ def test_petwindow_disabled_optional_services_not_constructed(tmp_path):
 
 
 def test_petwindow_lazy_ensure_creates_optional_services(tmp_path):
-    from tests.test_collision_window import FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     app = _qapp()
     cfg = _disabled_config(tmp_path)
@@ -106,7 +106,7 @@ def test_petwindow_startup_applies_configured_optional_services(tmp_path):
     已开启的 Agent 联动（含 custom_agents 通道）与主动识屏要等用户展开
     「Agent 联动」菜单或开关一次设置对话框才会启动。
     """
-    from tests.test_collision_window import FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     app = _qapp()
     cfg = _disabled_config(tmp_path)
@@ -127,7 +127,7 @@ def test_petwindow_agent_link_enabled_at_startup_constructs_manager(tmp_path):
     sync_optional_services()/apply_config()——重启后已开启的 Agent 联动
     必须手工展开一次联动菜单或开关一次设置对话框才生效。
     """
-    from tests.test_collision_window import FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     app = _qapp()
     cfg = _disabled_config(tmp_path)
@@ -146,7 +146,7 @@ def test_petwindow_agent_link_enabled_at_startup_constructs_manager(tmp_path):
 
 
 def test_petwindow_proactive_toggle_creates_watcher(tmp_path, monkeypatch):
-    from tests.test_collision_window import FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     app = _qapp()
     cfg = _disabled_config(tmp_path)
@@ -177,7 +177,7 @@ def test_petwindow_proactive_enabled_at_startup_starts_watcher(tmp_path, monkeyp
     """
     import sys
 
-    from tests.test_collision_window import FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     monkeypatch.setattr(sys, "platform", "win32")
     app = _qapp()

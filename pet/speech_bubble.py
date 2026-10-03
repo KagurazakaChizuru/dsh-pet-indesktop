@@ -87,6 +87,8 @@ __all__ = [
     "PAGE_DWELL_MAX_MS",
     "PAGE_DWELL_MIN_MS",
     "PAGE_RETURN_PAUSE_MS",
+    "SELF_TALK_IMAGE_BOX_H",
+    "SELF_TALK_IMAGE_BOX_W",
     "SELF_TALK_IMAGE_SUFFIXES",
     "BUBBLE_STYLE_PRESETS",
     "breath_bubble_size_for_anchor",
@@ -122,6 +124,14 @@ TITLE_FIRST_COLUMN = BUBBLE_TEXT_COLUMN
 # 由 agent_link 的多分支问题收集模式生成，SpeechBubble 负责渲染。
 SECTION_HEADER_LABEL = "__pet_section_header__"
 SECTION_HINT_LABEL = "__pet_section_hint__"
+
+# 配图气泡的显示盒（逻辑像素，**未乘**用户「配图大小」系数）：标准气泡按它
+# 把配图等比适配进 QLabel，呼吸气泡的内容安全区也由它推算。overlay 壳的配图
+# 解码缓存按「本盒长边 × 配图大小 × 屏幕 DPR × 余量」定目标像素
+# （``overlay_shell.self_talk_image_cache_edge``）——两处共用同一份数字，
+# 免得缓存尺寸与显示尺寸各改一半（N2）。
+SELF_TALK_IMAGE_BOX_W = 220
+SELF_TALK_IMAGE_BOX_H = 140
 
 
 class FlowLayout(QLayout):
@@ -350,6 +360,17 @@ class PetSpeechBubble(QFrame):
         self._shadow_alpha = 18
         self._tail_base = (QPointF(), QPointF())
         self._tail_tip = QPointF()
+        # F-PERF P2：表面几何/路径的输入签名缓存。跟随场景 30Hz 每拍一次
+        # ``reposition``，此前每拍重建 QPainterPath（addRoundedRect + 三角尾巴 +
+        # ``united().simplified()`` 布尔运算）并 ``update()`` 整窗重绘三层阴影路径。
+        # 签名覆盖全部绘制输入（样式/形态/局部矩形/表面框/尾巴顶点/配图）：签名
+        # 不变 = 像素逐位不变 → 跳过重建与重绘；任一变化照旧重建。
+        self._surface_geometry_key: tuple | None = None
+        self._breath_geometry_key: tuple | None = None
+        self._breath_geometry_pending = False
+        # 上一次真实落位用的 (锚点整数矩形, 窗口尺寸)：跟随拍重复来同一锚点时
+        # 直接跳过整条放置链（不动窗、不算可用区、不碰几何）。
+        self._placed_follow_key: tuple[QRect, QSize] | None = None
         self._shadow_offset_y = 2
         # QPainter has no cheap cross-platform blur for a translucent tool
         # window. Several restrained outline layers produce a softer, more
@@ -1008,8 +1029,12 @@ class PetSpeechBubble(QFrame):
         *,
         pet_scale: float | None = None,
         image_scale: float = 1.0,
+        pixmap: QPixmap | None = None,
     ) -> bool:
-        pixmap = QPixmap(str(image_path))
+        # pixmap 直供（调用方已解码/预热）：跳过同步磁盘读+解码——GUI 线程
+        # 上的 QPixmap(str(path)) 是大图 100ms+ 级慢帧源（py-spy 实测）。
+        if pixmap is None:
+            pixmap = QPixmap(str(image_path))
         if pixmap.isNull():
             return False
         self._content_kind = "image"
@@ -1024,7 +1049,8 @@ class PetSpeechBubble(QFrame):
         if self._preset.get("shape") == "breath_bubble":
             self._configure_breath_content(anchor_rect, pet_scale)
         else:
-            box = QSize(int(220 * self._image_scale), int(140 * self._image_scale))
+            box = QSize(int(SELF_TALK_IMAGE_BOX_W * self._image_scale),
+                        int(SELF_TALK_IMAGE_BOX_H * self._image_scale))
             target = pixmap.size()
             target.scale(box, Qt.AspectRatioMode.KeepAspectRatio)
             target.setWidth(max(int(96 * self._image_scale), target.width()))
@@ -1054,8 +1080,17 @@ class PetSpeechBubble(QFrame):
 
     def reposition(self, anchor_rect: QRect) -> None:
         # 鱼移动触发的跟随：直移零延迟（连续跟随走动画会拖尾滞后）。
-        if self.isVisible():
-            self._place(anchor_rect, animate=False)
+        if not self.isVisible():
+            return
+        # F-PERF P2a：锚点整数矩形与窗口尺寸都没变 = 上一次落位仍然成立，
+        # 整条放置链（可用区计算 + 目标矩形 + move + 几何重建）都可以跳过
+        # ——气泡原地不动就不动窗、不重绘。慢速移动时锚点（body_rect 整数化）
+        # 每拍都可能重复，这一跳省下的是每次一次整窗重绘。
+        anchor_rect = QRect(anchor_rect)
+        key = (anchor_rect, QSize(self.size()))
+        if key == self._placed_follow_key:
+            return
+        self._place(anchor_rect, animate=False)
 
     def _available_geometry(self, anchor_rect: QRect) -> QRect | None:
         """气泡可用区：普通模式取所在屏幕，直播捕获子模式收窄为主窗矩形。
@@ -1134,6 +1169,10 @@ class PetSpeechBubble(QFrame):
             if anim is not None:
                 anim.stop()
             self.move(target)
+        # F-PERF P2a：记录本次落位（锚点 + 当时的窗口尺寸）供跟随拍去重。
+        # 所有放置路径（show/reflow/跟随）都在这里收口，故该记录恒等于
+        # "控件当前所在位置对应的落位参数"。
+        self._placed_follow_key = (QRect(anchor_rect), QSize(self.size()))
         self._update_surface_geometry(rect)
 
     def _move_smooth(self, pos: QPoint) -> None:
@@ -1165,11 +1204,29 @@ class PetSpeechBubble(QFrame):
         anim.setEndValue(pos)
         anim.start()
 
+    def _image_paint_key(self) -> tuple:
+        """配图绘制的输入签名（配图内容 + label 几何）；纯文字气泡返回空元组。
+
+        配图由**父控件** paintEvent 直接绘制（QLabel 只是占位），故换图/挪 label
+        都必须让几何缓存失效；纯文字由 QLabel 自绘，不参与父控件绘制，不进签名。
+        ``QPixmap.cacheKey()`` 随每次 ``_source_pixmap`` 赋值变化（show_image 换图
+        必然失效），且是单调递增的 Qt 侧唯一键（不依赖对象地址复用）。
+        """
+        pm = self._source_pixmap
+        if self._content_kind != "image" or pm.isNull():
+            return ()
+        label = self.label.geometry()
+        return (pm.cacheKey(), label.x(), label.y(), label.width(), label.height())
+
     def _update_surface_geometry(self, global_rect: QRect) -> None:
         local = self.rect()
         if self._preset.get("shape") == "breath_bubble":
             self._build_breath_bubble_geometry(local)
-            self.update()
+            # F-PERF P2b：几何没重建（纯平移）就不必重绘——窗口被 WM 搬走，
+            # 控件自身像素没变。
+            if self._breath_geometry_pending:
+                self._breath_geometry_pending = False
+                self.update()
             return
         # 用目标矩形（而非 self 当前位置）换算锚点局部坐标：_place 先起滑动
         # 动画再算几何，此刻窗口还停在旧位置，mapFromGlobal 会把尾巴算歪且
@@ -1247,8 +1304,24 @@ class PetSpeechBubble(QFrame):
                     QPointF(tip_x + 6, self._surface_rect.top() + 2),
                 )
                 self._tail_tip = QPointF(tip_x, 4)
-        rounded = QPainterPath()
         radius = float(self._preset["radius"])
+        # F-PERF P2b：几何签名 = 全部绘制输入。跟随平移（锚点与窗口同步位移）
+        # 时相对几何逐位不变，跳过 QPainterPath 布尔运算（united/simplified）
+        # 与整窗重绘；几何真变（换边/夹取/尺寸/换图）照旧重建。
+        key = (
+            self._style_id,
+            local.x(), local.y(), local.width(), local.height(),
+            self._surface_rect.x(), self._surface_rect.y(),
+            self._surface_rect.width(), self._surface_rect.height(),
+            self._tail_base[0].x(), self._tail_base[0].y(),
+            self._tail_base[1].x(), self._tail_base[1].y(),
+            self._tail_tip.x(), self._tail_tip.y(),
+            radius,
+            self._image_paint_key(),
+        )
+        if key == self._surface_geometry_key:
+            return
+        rounded = QPainterPath()
         rounded.addRoundedRect(QRectF(self._surface_rect), radius, radius)
         self._main_bubble_path = QPainterPath(rounded)
         self._breath_paths = []
@@ -1258,10 +1331,27 @@ class PetSpeechBubble(QFrame):
         tail.lineTo(self._tail_base[1])
         tail.closeSubpath()
         self._surface_path = rounded.united(tail).simplified()
+        self._surface_geometry_key = key
         self.update()
 
     def _build_breath_bubble_geometry(self, local: QRect) -> None:
-        """Build the reference's organic bubble plus two detached breath bubbles."""
+        """Build the reference's organic bubble plus two detached breath bubbles.
+
+        F-PERF P2b：几何只依赖 ``local`` 与配图内容（见 ``_image_paint_key``），
+        签名不变即整体逐位不变 → 直接跳过重建（5 段三次贝塞尔 + 两个副泡 +
+        配图裁剪路径）。重建过一次就置 ``_breath_geometry_pending``，由
+        ``_update_surface_geometry`` 消费成一次 ``update()``——本方法自身也被
+        ``_place`` 的"按可见轮廓定位"路径单独调用（那时不该提前上屏）。
+        """
+        key = (
+            self._style_id,
+            local.x(), local.y(), local.width(), local.height(),
+            self._image_paint_key(),
+        )
+        if key == self._breath_geometry_key:
+            return
+        self._breath_geometry_key = key
+        self._breath_geometry_pending = True
         sx = max(0.01, local.width() / 240.0)
         sy = max(0.01, local.height() / 195.0)
         self._breath_scale = min(sx, sy)

@@ -23,70 +23,66 @@ classDiagram
       +movie(name)
       +movies()
     }
-    class CollisionIpcSession {
+    class OverlayShell {
       +start()
-      +submit_state(state)
-      +submit_leave()
-      +stop()
+      +spawn_pet()
+      +exit_pet(sprite)
+    }
+    class PetSprite {
+      +advance(dt)
+      +set_pos(pos)
+    }
+    class SpriteCollisionWorld {
+      +tick(sprites, dt)
+      +add_static_member(id, l, t, w, h)
     }
     class ChatService
 
     PetApp *-- Config
     PetApp *-- PetWindow
-    PetApp *-- CollisionIpcSession
+    PetApp *-- OverlayShell
+    OverlayShell *-- PetSprite
+    OverlayShell *-- SpriteCollisionWorld
     PetWindow --> MovieLibrary
+    PetSprite --> MovieLibrary
     PetApp ..> ChatService : optional UI
 ```
 
-The IPC facade belongs to the GUI thread; `_CollisionWorker` and every
-`QLocalServer`, `QLocalSocket`, and IPC timer belong to its dedicated `QThread`.
-The shared kernel file lock is the coordinator authority. On POSIX, a lock
-holder that fails to `listen()` because of a stale Unix socket first probes
-for a live listener, and only removes the stale endpoint when nobody answers.
+**Two render topologies, one process.** `PET_RENDER_TOPOLOGY=overlay` (dev env
+flag, read only in `pet/overlay_shell.is_overlay_topology`) renders every pet as a
+`PetSprite` inside a single `OverlayWindow`; multi-pet is in-process
+(`AppShell.spawn_in_process_window` / `OverlayShell.spawn_pet`, slot identity via
+`pet/overlay_spawn_state.py`). `PetWindow` is kept permanently for the capture-mode
+(streaming) surface and single-pet legacy runs — **fix crashes there only**.
 
-```mermaid
-sequenceDiagram
-    participant GUI as PetWindow / GUI thread
-    participant IPC as CollisionIpcSession
-    participant W as _CollisionWorker / QThread
-    participant L as coordinator file lock
-    participant Q as QLocalServer
+The multi-process multi-pet layer (cross-process collision IPC, slot file locks,
+instance launcher, child-pet taskkill cleanup, runtime-marker live consumers) was
+deleted in Phase 4.4b; `tests/test_architecture.py` guards that the retired modules
+stay gone and are never imported again. Collision math is pure (`pet/collision.py`
++ `pet/sprite_collision.py`); the island's stadium clamp lives in
+`sprite_collision.capsule_circles` via `pet/island_bridge.py`.
 
-    GUI->>IPC: submit_state(state)
-    IPC-->>W: queued signal
-    W->>L: try acquire
-    alt lock acquired
-        W->>Q: listen
-        alt listen fails (stale POSIX endpoint)
-            W->>Q: probe live server
-            alt no live listener
-                W->>Q: remove stale endpoint, listen
-            end
-        end
-        W-->>IPC: role_changed(true, epoch)
-    else lock busy
-        W->>Q: connect as client, hello
-        Q-->>W: welcome / snapshot / impulse
-    end
-```
+`pet/multi_window_shared.py` is always on: one process-wide agent_link /
+proactive / fullscreen watcher fanned out to every window or sprite. Under the
+overlay topology the shared fullscreen watcher is not started (the overlay shell
+owns its own `FullscreenCursorWatcher`), and `DshStateTracker` only runs while
+`agent_link.dsh` is enabled.
 
 ## Change discipline
 
 - Preserve user changes in a dirty worktree and keep generated build output out
   of commits.
-- Fix behavior test-first at a public seam. For Qt/IPC regressions, use real
+- Fix behavior test-first at a public seam. For Qt regressions, use real
   event loops and process boundaries; mock only operating-system or network
   boundaries that cannot run deterministically.
 - A fix is complete when the focused regression is red before the product
   change, green afterward, and verification matches the risk gate below.
 - Run the full suite for shared models/config migrations, application lifecycle,
-  threading/IPC, packaging/dependencies, platform branches, changes spanning
+  threading, packaging/dependencies, platform branches, changes spanning
   multiple test domains, or the final accumulated branch before merge.
 - Focused plus related tests are sufficient for a local presentation token or
   isolated widget behavior when interfaces, persisted data, lifecycle, and
   platform dispatch are unchanged. Record why the full suite was skipped.
-- Keep `CollisionIpcSession.stop()` ordering intact: stop producers, send leave,
-  close local endpoints and timers, then quit/wait for the worker thread.
 - Keep QLocal test server names short. POSIX converts names to Unix socket paths,
   whose limit includes the system temporary-directory prefix.
 
@@ -172,8 +168,6 @@ exact breakpoint there; see `docs/agents/handoff.md`.
 - Read `docs/ADDING-A-TTS-PROVIDER.md` when adding or replacing a speech-synthesis
   backend (`pet/tts/*.py`), changing the `voice_chime_tts_*` settings, or touching
   the 「合成后端」 settings card — it is provider-declaration driven, not hardcoded.
-- Read `docs/ISSUE-42-POSIX-COLLISION-IPC-2026-08-31.md` when changing collision
-  election, QLocal IPC, coordinator locking, or their process-level tests.
 - Read `docs/ISSUE-111-WINDOWS-SESSION-END-FFMPEG-2026-09-12.md` when changing
   ffmpeg spawning (`webm_clip` reader/first-frame/meta/exe probes), warm
   scheduling, or anything that runs during Windows shutdown/logoff

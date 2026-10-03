@@ -917,3 +917,137 @@ def test_bubble_reshow_after_dismiss_not_dragged_back():
     QTest.qWait(350)
     assert bubble._pos_anim.state() == QPropertyAnimation.State.Stopped
     bubble.dismiss()
+
+
+# ---------------------------------------------------------------- F-PERF P2：跟随平移不空转重建/重绘
+class RepaintCountingBubble(PetSpeechBubble):
+    """真实气泡 + ``update()`` 计数（不是替身：几何/绘制全走产品实现）。
+
+    跟随场景 30Hz 每拍一次 ``reposition``，若每次都重建 QPainterPath 并整窗
+    重绘，气泡窗口每秒要画 30 遍；计数是本类唯一加法。
+    """
+
+    def __init__(self, **kwargs):
+        # set_style 在 super().__init__ 内就会调一次 update()：计数字段必须先就位
+        self.updates = 0
+        super().__init__(**kwargs)
+
+    def update(self, *args):  # noqa: D102 - 计数包装，转发真实实现
+        self.updates += 1
+        super().update(*args)
+
+
+def _visible_bubble_with_text(text="跟随几何", anchor=None):
+    bubble = RepaintCountingBubble(style_id="classic_top")
+    bubble.show_text(text, anchor or QRect(300, 300, 120, 120), 5000)
+    return bubble
+
+
+def test_follow_translation_reuses_surface_path_without_repaint():
+    """纯平移（锚点与窗口同步位移）：几何逐位不变 → 不重建路径、不重绘。"""
+    _get_app()
+    anchor = QRect(300, 300, 120, 120)
+    bubble = _visible_bubble_with_text(anchor=anchor)
+    path_before = bubble._surface_path
+    main_before = bubble._main_bubble_path
+    tail_before = (bubble._tail_base, bubble._tail_tip)
+    local_before = bubble.rect()
+    updates_before = bubble.updates
+    pos_before = bubble.pos()
+
+    bubble.reposition(anchor.translated(6, 3))
+
+    assert bubble.rect() == local_before, "前提：窗口尺寸不变（纯平移）"
+    assert bubble.pos() != pos_before, "气泡窗口必须真的跟着平移"
+    assert bubble._surface_path is path_before, "纯平移不得重建表面路径"
+    assert bubble._main_bubble_path is main_before
+    assert bubble._tail_base == tail_before[0] and bubble._tail_tip == tail_before[1]
+    assert bubble.updates == updates_before, (
+        f"纯平移不得整窗重绘（update 次数 {updates_before} → {bubble.updates}）"
+    )
+    bubble.dismiss()
+
+
+def test_follow_reposition_is_skipped_when_anchor_unchanged():
+    """锚点整数矩形未变：原地不动的跟随拍不动窗、不重绘。"""
+    _get_app()
+    anchor = QRect(300, 300, 120, 120)
+    bubble = _visible_bubble_with_text(anchor=anchor)
+    bubble.reposition(anchor.translated(5, 0))
+    updates_before = bubble.updates
+    pos_before = bubble.pos()
+
+    bubble.reposition(anchor.translated(5, 0))    # 同一锚点重复跟随拍
+
+    assert bubble.pos() == pos_before
+    assert bubble.updates == updates_before, "锚点未变不得重绘"
+    bubble.dismiss()
+
+
+def test_follow_rebuilds_and_repaints_when_geometry_changes():
+    """几何真变（尺寸/相对位置变）仍必须重建路径 + 重绘。"""
+    _get_app()
+    anchor = QRect(300, 300, 120, 120)
+    bubble = _visible_bubble_with_text(anchor=anchor)
+    bubble.reposition(anchor.translated(4, 0))
+    path_before = bubble._surface_path
+    updates_before = bubble.updates
+
+    # 尺寸变化（缩放路径：reflow 前先改内容尺寸）→ 局部矩形变 → 几何变
+    bubble.resize(bubble.width() + 40, bubble.height() + 20)
+    bubble.reposition(anchor.translated(4, 0))
+
+    assert bubble._surface_path is not path_before, "尺寸变化必须重建表面路径"
+    assert bubble._surface_path.boundingRect().width() > path_before.boundingRect().width()
+    assert bubble.updates > updates_before, "几何变化必须重绘"
+    bubble.dismiss()
+
+
+def test_breath_bubble_follow_translation_skips_repaint():
+    """吐气水泡形态同口径：纯平移不重建几何、不重绘。"""
+    _get_app()
+    anchor = QRect(320, 320, 120, 120)
+    bubble = RepaintCountingBubble(style_id="breath_bubble")
+    bubble.show_text("跟随几何", anchor, 5000)
+    paths_before = (bubble._surface_path, bubble._main_bubble_path)
+    updates_before = bubble.updates
+    pos_before = bubble.pos()
+
+    bubble.reposition(anchor.translated(5, 2))
+
+    assert bubble.pos() != pos_before, "气泡窗口必须真的跟着平移"
+    assert bubble._surface_path is paths_before[0]
+    assert bubble._main_bubble_path is paths_before[1]
+    assert bubble.updates == updates_before, "纯平移不得整窗重绘"
+    bubble.dismiss()
+
+
+def test_image_bubble_same_geometry_still_repaints_on_new_pixmap():
+    """配图气泡：同锚点同尺寸换图仍必须重建 + 重绘（配图由父控件自绘）。
+
+    几何签名把配图内容（``QPixmap.cacheKey()`` + label 几何）算在内就是为这条：
+    纯文字由 QLabel 自绘，换图却要父控件 paintEvent 重画，漏签会让气泡永远停在
+    旧图。
+    """
+    from PySide6.QtGui import QColor, QPixmap
+
+    _get_app()
+    anchor = QRect(300, 300, 120, 120)
+    first = QPixmap(60, 40)
+    first.fill(QColor("#336699"))
+    second = QPixmap(60, 40)
+    second.fill(QColor("#993366"))          # 同尺寸、不同内容
+    assert first.cacheKey() != second.cacheKey()
+
+    bubble = RepaintCountingBubble(style_id="classic_top")
+    assert bubble.show_image("first.png", anchor, 5000, pet_scale=1.0, pixmap=first)
+    path_before = bubble._surface_path
+    local_before = bubble.rect()
+    updates_before = bubble.updates
+
+    assert bubble.show_image("second.png", anchor, 5000, pet_scale=1.0, pixmap=second)
+
+    assert bubble.rect() == local_before, "前提：换图不改变气泡尺寸（同尺寸配图）"
+    assert bubble._surface_path is not path_before, "换图必须重建表面路径"
+    assert bubble.updates > updates_before, "换图必须重绘"
+    bubble.dismiss()

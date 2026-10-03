@@ -14,6 +14,7 @@ GUI 线程永不同步解码首帧（实测定案：冷路径 100-337ms 冻结�
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import threading
 from pathlib import Path
@@ -384,8 +385,13 @@ def test_sweep_unconfirmed_keeps_tracking_when_poll_raises(app, monkeypatch):
 
 
 def test_sweep_unconfirmed_abandons_after_retry_limit(app, monkeypatch):
-    """R2 复审 P1 闭合：未确认退出达到重试上限时告警并标注 abandoned——
-    条目保留在追踪中但不再重试（绝不静默丢弃句柄）。"""
+    """R2 复审 P1 闭合：未确认退出达到重试上限时告警并标注 abandoned，条目先
+    保留一轮（不再重试），下一次 sweep 做终局处置（缺陷 21）。
+
+    「绝不静默丢弃句柄」的不变量由两段组成：达到上限前反复补杀 + 留痕；达到
+    上限后条目**不永久钉住**（否则 ``_has_unconfirmed_procs()`` 恒真 → clip
+    永远进不了注册表的 discard 分支，显示槽帧被强引用钉住）。
+    """
     clip = WebMClip("dummy.webm")
     proc = _UnkillableDecodeProc()
     with clip._reader_lock:
@@ -398,17 +404,115 @@ def test_sweep_unconfirmed_abandons_after_retry_limit(app, monkeypatch):
         webm_clip_mod._ORPHAN_REGISTRY.reap()
 
     entries = list(clip._unconfirmed_procs)
-    assert len(entries) == 1, "标注放弃后条目仍保留在追踪中"
+    assert len(entries) == 1, "标注放弃的当下条目仍在追踪中（终局处置在其后一轮）"
     assert entries[0][1] >= limit
     assert entries[0][2] is True, "达到上限必须标注 abandoned"
     assert proc.poll() is None, "病态进程仍未退出"
 
-    # 标注放弃后：后续 sweep 不再重试（attempts 不再递增）
+    # 标注放弃后的下一次 sweep：终局处置（不再重试、清出追踪 + 审计日志）
     webm_clip_mod._ORPHAN_REGISTRY.reap()
-    entries = list(clip._unconfirmed_procs)
-    assert entries[0][1] == limit, "标注放弃后不得再重试"
+    assert clip._unconfirmed_procs == [], "标注放弃后必须终局清出追踪（缺陷 21）"
+    assert clip._has_unconfirmed_procs() is False, "abandoned 条目不得再钉住 clip"
+    assert clip not in webm_clip_mod._ORPHAN_REGISTRY.holders(), "clip 必须能回到 discard 分支"
 
     clip.cleanup()
     clip._unconfirmed_procs = []
+    webm_clip_mod._ORPHAN_REGISTRY._clips.discard(clip)
+    app.processEvents()
+
+
+def test_cancel_registers_unconfirmed_when_terminate_not_confirmed(app, monkeypatch):
+    """缺陷 20：try-acquire 成功但 ``_terminate_proc`` 未确认退出（返回 False）时
+    句柄绝不静默丢弃——必须进 ``_unconfirmed_procs`` 交孤儿 sweep 重试/补杀。
+
+    修前该分支丢弃返回值：进程没确认退出却既不登记也不孤儿化，与同文件
+    「绝不静默丢弃句柄」的不变量矛盾（首帧进程成为无人追踪的残留）。
+    """
+    clip = WebMClip("dummy.webm")
+    proc = _UnkillableDecodeProc()
+    with clip._reader_lock:
+        clip._first_frame_procs.add(proc)
+    real_terminate = webm_clip_mod.WebMClip._terminate_proc
+
+    def terminate_but_unconfirmed(target, timeout=None):
+        real_terminate(target, 0.01)   # 真的试过一次（fake 进程 kill 后仍"存活"）
+        return False
+
+    monkeypatch.setattr(webm_clip_mod.WebMClip, "_terminate_proc",
+                        staticmethod(terminate_but_unconfirmed))
+
+    clip.cancel_first_frame_warm()
+
+    assert proc.terminated is True, "取消失败前仍须真的尝试 terminate"
+    entries = list(clip._unconfirmed_procs)
+    assert [e[0] for e in entries] == [proc], "未确认退出的句柄必须登记进未确认追踪"
+    assert entries[0][2] is False, "首次登记不得直接标注放弃"
+    assert clip in webm_clip_mod._ORPHAN_REGISTRY.holders(), \
+        "必须孤儿化，sweep 才有机会补杀确认"
+
+    clip.cleanup()
+    clip._unconfirmed_procs = []
+    webm_clip_mod._ORPHAN_REGISTRY._clips.discard(clip)
+    app.processEvents()
+
+
+def test_leak_warning_is_logged_once_per_crossing(app, monkeypatch, caplog):
+    """缺陷 21：越过泄漏阈值的告警只打一条，不再每 500ms sweep 重复刷屏。
+
+    病态 reader 一直不退时，``_orphan_reap_count`` 每轮 sweep 都递增；用
+    ``>=`` 判定会让同一条 warning 永久重复（日志被淹、真信号被稀释）。
+    """
+    clip = WebMClip("dummy.webm")
+    proc = _UnkillableDecodeProc()
+    with clip._reader_lock:
+        clip._unconfirmed_procs.append([proc, 0, False])
+    webm_clip_mod._register_orphan(clip)
+    monkeypatch.setattr(webm_clip_mod, "_PROC_LOCK_ACQUIRE_TIMEOUT", 0.01)
+    monkeypatch.setattr(webm_clip_mod._OrphanClipRegistry, "_LEAK_ATTEMPTS", 2)
+    # 补杀上限放宽：条目持续待重试 → clip 一直留在注册表（正是刷屏场景）
+    monkeypatch.setattr(webm_clip_mod, "_UNCONFIRMED_KILL_MAX", 1000)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(6):
+            webm_clip_mod._ORPHAN_REGISTRY.reap()
+
+    leak_lines = [r for r in caplog.records if "多次回收仍存活" in r.getMessage()]
+    assert len(leak_lines) == 1, f"越阈告警必须只打一条，实际 {len(leak_lines)} 条"
+    assert clip._orphan_reap_count >= 2, "前提：确实越过了阈值（计数继续递增）"
+
+    clip.cleanup()
+    clip._unconfirmed_procs = []
+    webm_clip_mod._ORPHAN_REGISTRY._clips.discard(clip)
+    app.processEvents()
+
+
+def test_abandoned_entry_terminal_disposal_logs_path_and_duration(app, monkeypatch, caplog):
+    """缺陷 21：abandoned 条目的终局处置——清出追踪 + 一条含 clip 路径与存活
+    时长的审计日志（进程已 terminate 过、确认杀不掉，不再钉住 clip）。"""
+    clip = WebMClip("dummy.webm")
+    proc = _UnkillableDecodeProc()
+    with clip._reader_lock:
+        clip._unconfirmed_procs.append([proc, 0, False])
+    webm_clip_mod._register_orphan(clip)
+    monkeypatch.setattr(webm_clip_mod, "_PROC_LOCK_ACQUIRE_TIMEOUT", 0.01)
+
+    limit = webm_clip_mod._UNCONFIRMED_KILL_MAX
+    for _ in range(limit):
+        webm_clip_mod._ORPHAN_REGISTRY.reap()
+    assert clip._unconfirmed_procs[0][2] is True, "前提：已标注 abandoned"
+
+    with caplog.at_level(logging.WARNING):
+        webm_clip_mod._ORPHAN_REGISTRY.reap()
+
+    assert clip._unconfirmed_procs == [], "终局处置必须清出追踪"
+    audit = [r for r in caplog.records if "首帧进程终局处置" in r.getMessage()]
+    assert len(audit) == 1, "终局处置必须留一条审计日志"
+    text = audit[0].getMessage()
+    assert str(clip.path) in text, "审计日志必须含 clip 路径"
+    assert "追踪时长" in text, "审计日志必须含句柄存活/追踪时长"
+    assert clip not in webm_clip_mod._ORPHAN_REGISTRY.holders(), \
+        "终局处置后 clip 必须可被 discard（显示槽帧不再被强引用钉住）"
+
+    clip.cleanup()
     webm_clip_mod._ORPHAN_REGISTRY._clips.discard(clip)
     app.processEvents()

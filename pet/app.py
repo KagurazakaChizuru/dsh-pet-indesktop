@@ -11,7 +11,7 @@
 批5.2 spike 扩成多窗集合（AppShell 持有 ``_instances`` 列表，``self.instance``
 指主窗 = 列表头，兼容既有调用面）：
 - ``AppShell``：进程级服务（托盘、灵动岛、dock 菜单、更新、余额、系统通知、
-  碰撞会话、broker、aboutToQuit 收口），持有 ``PetInstance`` 集合。
+  broker、aboutToQuit 收口），持有 ``PetInstance`` 集合。
 - ``PetInstance``：每窗容器（config/lib/win/聊天窗/设置窗/气泡），持 backref
   到 ``AppShell``，窗口级操作都从这里路由，``self.win`` 主窗单窗假设据此收敛。
 """
@@ -31,31 +31,29 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import shiboken6
-from PySide6.QtCore import QObject, QPoint, QTimer, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QRect, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
 from . import autostart as autostart_mod
-from . import balance as balance_mod
 from . import catalog
 from . import click_sound
+from . import overlay_instance_gate as overlay_gate_mod
 from . import self_talk_voice
 from . import slot_manager as slot_manager_mod
 from . import updater
 from . import webm_clip as webm_clip_mod
 from .config import APP_DIR_NAME, Config, _default_base
+from .context_menus.icons import vector_menu_icon
 from .context_menus.shared import open_deepseek_web
 from .desktop_notify import DesktopNotification, position_stack
 from .harness_launcher import launch_harness_gui
-from .instance_launcher import launch_new_pet
 from .library import MovieLibrary
 from .window import PetWindow
 from .fun_image_popup import restore_ojingjing_windows
 from .runtime_cleanup import cleanup_stale_runtime_dirs
 from .session_watcher import install_session_watcher
-from .collision_ipc import CollisionIpcSession
 from .decode_fanout import DecodeFanoutHub
-from .festival_service import FestivalReminderService
 from .todo_reminder import TodoReminderService
 from .voice_chime_service import VoiceChimeService
 from .dsh_state import DshStateTracker
@@ -64,8 +62,8 @@ from .persona_phrases import PhrasePicker
 
 _persona_pickers = weakref.WeakKeyDictionary()
 
-# 存活 AppShell 注册表（测试收口用，与 collision_ipc._live_sessions /
-# agent_link._LIVE_AGENT_LINK_MANAGERS 同一纪律）。多窗共享子系统与待办服务
+# 存活 AppShell 注册表（测试收口用，与 agent_link._LIVE_AGENT_LINK_MANAGERS
+# 同一纪律）。多窗共享子系统与待办服务
 # 持有无主 QTimer（`QTimer()` + timeout.connect），其连接从 Qt C++ 侧强引用
 # 住整个 shell 对象图，Python 的 gc.collect() 回收不掉；解释器退出时的 GC
 # 才最终化这些 Qt 对象 → 原生访问违规（Windows 0xC0000005，崩溃点落在
@@ -153,7 +151,14 @@ def _show_balance_payload(win, payload) -> None:
 
     网络查询、内存缓存、文件缓存三条路径统一走这里，避免缓存命中时
     没有副标题/不播动画导致的行为不一致。
+
+    pet.balance 按需导入（内存瘦身第二刀）：该模块自带整套档位文案/价格提示
+    表，实测独占 4.75MB Python 堆（tools/import_cost.py），而余额查询在
+    默认配置下从不发生（balance_refresh_minutes=0 且用户没点"看余额"）——
+    启动就不该为它付这份常驻。函数内 import 只在真正要显示余额时才付。
     """
+    from . import balance as balance_mod
+
     if win is None or not shiboken6.isValid(win):
         return
     if isinstance(payload, dict):
@@ -192,10 +197,65 @@ def _show_balance_payload(win, payload) -> None:
             win.request_link_anim(name)
 
 
+def _instance_config_identity(instance) -> str:
+    """实例的配置身份（"" = 主身份，``slot-N`` = 子宠；slot_manager 同口径）。
+
+    独立设置进程按这个身份选 ``config.json`` / ``config-slot-N.json``，进程内多窗
+    下也是"这个设置页属于哪只宠"的判据（``_launch_settings_process`` 与设置页占用
+    提示共用一处实现）。
+    """
+    return str(getattr(getattr(instance, "config", None), "instance_id", "") or "")
+
+
+class _OverlayChatHost:
+    """完整聊天窗的 pet 形宿主：overlay 拓扑没有 PetWindow，用壳拼出它真正读到的面。
+
+    只做转发，不新增机制（``overlay_shell`` 的 ``visible_content_rect`` /
+    ``icon_pixmap`` 已是 PetWindow 同契约的 sprite 等价物）：
+
+    - 定位 ``visible_content_rect``（``position_near_pet`` 的正路）；
+    - ``frameGeometry`` 兜底（身体框为空时才被读，拿合成窗几何顶替，避免
+      AttributeError）；
+    - 头像 ``icon_pixmap``（聊天窗标题栏取角色图）；
+    - ``add/remove_position_listener``（``chat_follow_pet`` 勾选时聊天窗跟随桌宠，
+      转发到合成窗的 sprite 位置监听）。
+    """
+
+    __slots__ = ("_shell",)
+
+    def __init__(self, shell) -> None:
+        self._shell = shell
+
+    def visible_content_rect(self) -> QRect:
+        fn = getattr(self._shell, "visible_content_rect", None)
+        return fn() if callable(fn) else QRect()
+
+    def frameGeometry(self) -> QRect:  # noqa: N802 (Qt 命名)
+        overlay = getattr(self._shell, "overlay", None)
+        return overlay.geometry() if overlay is not None else QRect()
+
+    def icon_pixmap(self, size: int = 64):
+        fn = getattr(self._shell, "icon_pixmap", None)
+        return fn(size) if callable(fn) else None
+
+    def add_position_listener(self, listener) -> None:
+        overlay = getattr(self._shell, "overlay", None)
+        sprite = getattr(self._shell, "sprite", None)
+        if overlay is not None and sprite is not None and callable(listener):
+            overlay.add_position_listener(sprite, listener)
+
+    def remove_position_listener(self, listener) -> None:
+        overlay = getattr(self._shell, "overlay", None)
+        sprite = getattr(self._shell, "sprite", None)
+        if overlay is not None and sprite is not None:
+            overlay.remove_position_listener(sprite, listener)
+
+
 class _UpdateBridge(_BackgroundResult):
-    def __init__(self, parent):
+    def __init__(self, parent, owner=None):
         super().__init__()
         self.parent = parent
+        self.owner = owner
         self.done.connect(self._show)
 
     def _show(self, ok: bool, payload) -> None:
@@ -214,9 +274,14 @@ class _UpdateBridge(_BackgroundResult):
         if alive:
             self.parent.show_bubble(
                 f"发现新版本 v{tag}（当前 {updater.APP_VERSION}）。"
-                "可从“更新与帮助”打开项目页下载。",
+                "正在打开“更新”页，可直接下载并安装。",
                 duration_ms=9000,
             )
+            owner = self.owner
+            instance = getattr(owner, "instance", None) if owner is not None else None
+            open_settings = getattr(instance, "open_modern_settings", None)
+            if callable(open_settings):
+                QTimer.singleShot(0, lambda: open_settings(initial_page="更新"))
 
 
 # 批5.2 §③.7：多窗日志用 [slot-N] 前缀区分。单进程多窗共享一份日志文件，
@@ -300,9 +365,9 @@ def _read_spawn_offset_env() -> int:
     """P0-1：读取 spawn 子进程路径写入的 DSH_PET_SPAWN_OFFSET_INDEX，显式传给
     主窗 PetInstance.spawn_offset（进程 spawn 路径依赖它错开落位）。
 
-    flag 关（生小肥鱼走独立进程）时 instance_launcher 写该 env、子进程 main()
-    启动须把它接到主窗的 spawn_offset 构造参数——否则 _apply_spawn_offset 的
-    index 恒为 0，新孵化的桌宠直接与母桌宠完全重叠（flag 关行为回归）。
+    该 env 是历史多进程 spawn 的落点错峰通道，4.4b 后不再有进程 spawn，但
+    **兼容解析保留**（T5）：存量快捷方式/外壳脚本仍可能带它，读到就照旧接到
+    主窗的 spawn_offset 构造参数。
     """
     try:
         return max(0, int(os.environ.get('DSH_PET_SPAWN_OFFSET_INDEX', '0') or '0'))
@@ -344,11 +409,10 @@ class PetInstance:
     """
 
     def __init__(self, shell: "AppShell", config: Config, enable_chat: bool = True,
-                 slot_handle=None, slot_id: int | None = None,
+                 slot_id: int | None = None,
                  spawn_offset: int = 0) -> None:
         self.shell: AppShell = shell
         self.config = config
-        self.slot_handle = slot_handle
         self.slot_id = slot_id
         self._spawn_offset = max(0, int(spawn_offset if spawn_offset is not None else 0))
         self.win: PetWindow | None = None
@@ -361,11 +425,9 @@ class PetInstance:
         self._pending_dialog_opens: set[str] = set()
         # E2（REVIEW_batch51）：enable_chat 单源在 AppShell（进程级），本类只读转发。
         self.enable_chat = bool(enable_chat)
-        # 批5.2 P1-1：碰撞会话移回**本窗**自持（每窗一个，经
-        # collision_ipc._local_election_names 同进程收敛成「一协调者 + N 客户端」），
-        # 每窗 runtime_id 由各自 instance_id 派生 → 两窗互撞与多进程双开等价；
-        # 「退出这只」只停本窗，switch_character 只重建本窗（C2 地雷随之消解）。
-        self.collision_ipc = CollisionIpcSession(config, self.shell)
+        # 4.4a 停用多进程多宠退役层：本窗不再自持碰撞 IPC 会话——多宠碰撞由
+        # overlay 拓扑的 SpriteCollisionWorld（进程内统一世界）承载；legacy
+        # 拓扑退化为单宠/进程内多窗渲染面，不再跨进程交换冲量。
         # 批5.3：进程级共享解码 hub（AppShell 持有，各窗共用同一份）。此前
         # broker 是每窗一个 shm facade；现换成进程级 DecodeFanoutHub（fan-out
         # 与碰撞角色解耦，不骑 QLocal），窗口调用点/参数名零改。
@@ -409,16 +471,19 @@ class PetInstance:
         # 随机动作池延迟 2s 补全，避免多开启动时 ffmpeg 进程洪峰。
         lib.schedule_high_priority_warm()
         lib.schedule_low_priority_warm()
+        # 首跑帧序列自动供给（B 档）：延迟 5s 后台低优转热集，静默 no-op 兜底
+        getattr(lib, 'maybe_provision_frameseq', lambda: None)()
         # 同批低优先级预热：播放器路径缓存（右键菜单只读缓存，冷缓存时后台先扫）。
         _schedule_music_player_warm()
         logging.info('素材加载完成：%s %d 段动画', character_id, len(lib.names()))
         return lib
 
     def _slot_wrap(self, fn):
-        """包一层：调用回调时把线程本地日志槽位设为本窗 slot（批5.2 §③.7）。
+        """包一层：多窗时把线程本地日志槽位设为本窗 slot（批5.2 §③.7）。
 
-        flag 关（单窗）时槽位为 None，日志格式与现状逐位一致；flag 开/多窗
-        时槽位为 'slot-N'，由 _SlotLogFilter 加 [slot-N] 前缀。
+        4.4b：进程内多窗常开化后不再有 flag 快照——按**活窗数**判定：单窗
+        （含 legacy 默认形态）槽位为 None，日志格式与历史逐位一致；≥2 窗时
+        槽位为 'slot-N'，由 _SlotLogFilter 加 [slot-N] 前缀。
         """
         if fn is None:
             return None
@@ -426,9 +491,7 @@ class PetInstance:
 
         def wrapper(*args, **kwargs):
             prev = getattr(_pet_log_slot, "slot", None)
-            # P1-2：窗级逻辑一律读进程级 flag 快照（shell._single_process_spawn），
-            # 不读每窗 config（第二窗 config-slot-N 里该键无效）。
-            if self.shell._single_process_spawn:
+            if len(getattr(self.shell, "_instances", ())) > 1:
                 _pet_log_slot.slot = slot
             else:
                 _pet_log_slot.slot = None
@@ -480,12 +543,9 @@ class PetInstance:
         win.on_toggle_festival = self._slot_wrap(self.shell.toggle_festival_reminder)
         win.on_restore_fun_windows = restore_ojingjing_windows
         win.on_hidden = self._slot_wrap(self._notify_pet_hidden)
-        # 批5.2 P0-2：右键「退出」注入窗级「退出这只」只在 flag 开（多窗）时；
-        # flag 关（单窗）不注入 → _request_quit 走旧 app.quit 分支，逐位一致。
-        if self.shell._single_process_spawn:
-            win.on_exit_window = self._slot_wrap(self._request_exit_window)
-        else:
-            win.on_exit_window = None
+        # 4.4b：窗级「退出这只」恒注入（多窗常开化；最后一窗退出即全进程退出，
+        # 与旧 flag 关时的 app.quit 分支语义等价）。
+        win.on_exit_window = self._slot_wrap(self._request_exit_window)
 
     def _build_window(self, character_id: str, lib: MovieLibrary | None = None,
                       build_tray: bool = True) -> PetWindow:
@@ -501,24 +561,22 @@ class PetInstance:
         """
         if lib is None:
             lib = self._create_library(character_id)
-        # 批5.2a：flag 开时各窗引用同一份进程级共享子系统（agent_link /
-        # proactive），flag 关时传 None → PetWindow 各自创建（现状逐位一致）。
+        # 4.4b：进程级共享子系统（agent_link / proactive / 全屏 watcher）常建，
+        # 各窗引用同一份；窗口全屏监视交由共享 watcher（本窗不再自建线程）。
         shared = getattr(self.shell, "_shared", None)
-        # 批5.2a §③.5：窗自身构造期日志（恢复位置/runtime 标记等）加 [slot-N] 前缀
-        #（P2-2 残余尽力而为——运行时动画/物理等 GUI 线程日志不动 window.py，预算仅 4360）。
+        # 批5.2a §③.5：**子窗**构造期日志加 [slot-N] 前缀（主窗 slot 0 保持
+        # 历史格式不变）；运行时动画/物理等 GUI 线程日志不动 window.py。
         _prev_slot = getattr(_pet_log_slot, "slot", None)
-        if shared is not None and self.slot_id is not None:
+        if self.slot_id:
             _pet_log_slot.slot = f"slot-{self.slot_id}"
         try:
-            win = PetWindow(lib, self.config, collision_session=self.collision_ipc,
+            win = PetWindow(lib, self.config,
                             broker_facade=self.broker_facade,
-                            single_process_spawn=self.shell._single_process_spawn,
                             agent_link_manager=shared.agent_link if shared else None,
                             proactive_watcher=shared.proactive if shared else None)
         finally:
             _pet_log_slot.slot = _prev_slot
-        # P1-2：窗级 runtime 标记版本化 / 日志前缀读进程级 flag 快照（不读每窗 config）。
-        # N-1：快照经构造参数在 _restore_position 之前生效（窗构造期就会写标记）。
+        win.shared_fullscreen_watcher_active = shared is not None
         self._wire_window(win)
         # 文件投喂（拖文件模拟吃掉）：PR73 引入的接线在批5.2 重构时被丢，
         # 必须随每只窗的创建（启动/切角色/多窗）挂载，缺失则拖放无效。
@@ -587,17 +645,11 @@ class PetInstance:
         # 只重建本窗的 session（detach 旧窗 client → 停/重建本窗会话 →
         # 新窗 attach 到新会话）。C2 前向地雷（多窗下任一窗热切换拆共享进程级
         # IPC）随「不再共享」自然消解。
+        # 4.4a：碰撞 IPC 会话随多进程多宠退役层停用；热切换只做解码侧收尾。
         # 批5.3 起共享解码为进程级 hub（DecodeFanoutHub），不随热切换停；
         # 窗侧只经 _broker_unregister 逐素材收尾。
         old_win = self.win
-        old_win.detach_collision_session()
-        # 停本窗旧碰撞会话并重建（影响仅限本窗，不碰其它窗）
-        try:
-            self.collision_ipc.stop()
-        except Exception:
-            logging.exception("切换角色：停止本窗碰撞会话失败")
-        self.collision_ipc = CollisionIpcSession(self.config, self.shell)
-        self.collision_ipc.start()
+        old_win.detach_decode_sessions()
         if getattr(old_win, 'agent_link_manager', None) is not None:
             old_win.agent_link_manager.shutdown()
         # 主窗热切换才换托盘（进程级单托盘）；非主窗热切换不动共享托盘。
@@ -649,6 +701,20 @@ class PetInstance:
         self.win.move(x, y)
 
     # ------------------------------------------------------------ 聊天窗
+    def _chat_host(self):
+        """完整聊天窗的宿主：主窗优先；overlay 拓扑退回 sprite 壳的 pet 形适配。
+
+        overlay 拓扑 ``self.win`` 恒为 None（不建 PetWindow），不退回宿主则
+        ``open_chat*`` 直接 return → 菜单「AI 对话」与快速气泡「全文见聊天窗」都
+        点了没反应（完整聊天窗完全不可达）。
+        """
+        if self.win is not None:
+            return self.win
+        shell = getattr(self.shell, "_overlay_shell", None)
+        if shell is None:
+            return None
+        return _OverlayChatHost(shell)
+
     def open_chat(self) -> None:
         """Open the configured chat UI; menus only need this stable dispatcher."""
         if str(self.config.get("chat_ui_style", "modern")) == "classic":
@@ -691,7 +757,8 @@ class PetInstance:
         self.quick_chat.show_for_pet(self.win)
 
     def open_legacy_chat(self) -> None:
-        if not self.enable_chat or self.win is None:
+        host = self._chat_host()
+        if not self.enable_chat or host is None:
             return
         if self._defer_while_popup_active("legacy-chat", self.open_chat):
             return
@@ -700,17 +767,18 @@ class PetInstance:
             self.legacy_chat_window = ChatWindow(
                 self.config,
                 str(self.config.get('character', catalog.DEFAULT_CHARACTER)),
-                pet_window=self.win,
+                pet_window=host,
                 notifier=self.shell.system_notify,
                 auth_callback=self.open_chat_settings,
             )
         else:
-            self.legacy_chat_window.set_pet_window(self.win)
+            self.legacy_chat_window.set_pet_window(host)
         self.chat_window = self.legacy_chat_window
-        self._present_dialog(self.legacy_chat_window, lambda: self.legacy_chat_window.position_near_pet(self.win))
+        self._present_dialog(self.legacy_chat_window, lambda: self.legacy_chat_window.position_near_pet(host))
 
     def open_modern_chat(self) -> None:
-        if not self.enable_chat or self.win is None:
+        host = self._chat_host()
+        if not self.enable_chat or host is None:
             return
         if self._defer_while_popup_active("modern-chat", self.open_modern_chat):
             return
@@ -719,14 +787,14 @@ class PetInstance:
             self.modern_chat_window = ChatWindow(
                 self.config,
                 str(self.config.get('character', catalog.DEFAULT_CHARACTER)),
-                pet_window=self.win,
+                pet_window=host,
                 notifier=self.shell.system_notify,
                 auth_callback=self.open_chat_settings,
             )
         else:
-            self.modern_chat_window.set_pet_window(self.win)
+            self.modern_chat_window.set_pet_window(host)
         self.chat_window = self.modern_chat_window
-        self._present_dialog(self.modern_chat_window, lambda: self.modern_chat_window.position_near_pet(self.win))
+        self._present_dialog(self.modern_chat_window, lambda: self.modern_chat_window.position_near_pet(host))
 
     def _defer_while_popup_active(self, key: str, callback) -> bool:
         """Avoid constructing a heavy dialog inside QMenu.exec()."""
@@ -822,11 +890,11 @@ class PetInstance:
         )
         self.win.set_bubble_suppressed(any_open)
 
-    def open_modern_settings(self) -> None:
+    def open_modern_settings(self, initial_page: str | None = None) -> None:
         # 默认路径：设置页拉到独立进程（关窗即进程退出，OS 回收首开留下的
         # 字体/样式/模块高水位）。只有开关关闭或 startDetached 失败时才回退
         # 下面的进程内路径——功能绝不丢。
-        if self._try_open_settings_process():
+        if self._try_open_settings_process(initial_page):
             return
         from .modern_settings_dialog import ModernSettingsDialog
         if self.modern_settings_dialog is None:
@@ -835,9 +903,14 @@ class PetInstance:
                 self.config,
                 self.win,
                 include_ai=self.enable_chat,
+                initial_page=initial_page,
             )
             dialog.finished.connect(self._modern_settings_finished)
             self.modern_settings_dialog = dialog
+        elif initial_page:
+            selector = getattr(self.modern_settings_dialog, "select_page", None)
+            if callable(selector):
+                selector(initial_page)
         self._update_bubble_suppression_for_settings()
         # 在 show 之前定位，避免 Windows 上窗口先显示默认位置再跳走（闪现小窗）
         self._present_dialog(
@@ -845,14 +918,18 @@ class PetInstance:
             before_present=self.modern_settings_dialog.move_away_from_pet,
         )
 
-    def _try_open_settings_process(self) -> bool:
+    def _try_open_settings_process(self, initial_page: str | None = None) -> bool:
         """尝试走独立设置进程；True = 已交给独立进程（不要再开进程内对话框）。"""
         shell = getattr(self, "shell", None)
         opener = getattr(shell, "open_settings_process", None)
         if not callable(opener):
             return False
         try:
-            return bool(opener(self))
+            try:
+                return bool(opener(self, page=initial_page))
+            except TypeError:
+                # 兼容旧测试桩/宿主：老 opener 只接受 instance。
+                return bool(opener(self))
         except Exception:
             logging.exception("独立设置进程链路异常，回退进程内设置页")
             return False
@@ -921,17 +998,33 @@ class PetInstance:
         预热开关已并入省电模式（省电 = 闲置降帧 + 不预热）：省电模式开启时
         关闭后台预热，关闭时恢复。上游 PR73 的独立 animation_prewarm_enabled
         键已移除（8MB 首帧预算下其省内存的价值主张不成立）。
+
+        overlay 拓扑没有 PetWindow（``self.win`` 恒 None），素材库挂在 sprite 壳上
+        ——漏掉这条回退，设置页保存省电模式后要等下次启动/切角色才生效。
         """
         win = self.win
-        lib = getattr(win, "lib", None) if win is not None else None
-        setter = getattr(lib, "set_prewarm_enabled", None)
-        if not callable(setter):
-            return
-        visible = None
-        is_visible = getattr(win, "isVisible", None) if win is not None else None
-        if callable(is_visible):
-            visible = bool(is_visible())
-        setter(not bool(self.config.get("idle_low_fps_enabled", False)), visible=visible)
+        if win is not None:
+            libs = [getattr(win, "lib", None)]
+            visible = None
+            is_visible = getattr(win, "isVisible", None)
+            if callable(is_visible):
+                visible = bool(is_visible())
+        else:
+            shell = getattr(self.shell, "_overlay_shell", None)
+            if shell is None:
+                return
+            # 主宠 + 已生子宠各自的库（口径同 overlay_shell 的退出收口遍历）
+            libs = [getattr(shell, "lib", None)]
+            libs.extend(lib for lib in getattr(shell, "_spawned_libs", {}).values())
+            visible = None
+            is_visible = getattr(shell, "isVisible", None)
+            if callable(is_visible):
+                visible = bool(is_visible())
+        enabled = not bool(self.config.get("idle_low_fps_enabled", False))
+        for lib in libs:
+            setter = getattr(lib, "set_prewarm_enabled", None)
+            if callable(setter):
+                setter(enabled, visible=visible)
 
     # ------------------------------------------------------------ 其它窗口级
     def sync_look_to_chat(self, user_text: str, reply: str) -> None:
@@ -994,7 +1087,7 @@ class PetInstance:
             self.shell.island.set_pet_visible(self.shell._aggregate_pet_visible())
         if self.shell.tray is None:
             return
-        if self.shell._single_process_spawn and self is not self.shell.instance:
+        if self is not self.shell.instance:
             message = "点击托盘菜单中该窗口的「显示 / 隐藏」即可恢复。"
         else:
             if sys.platform == "darwin" and not bool(self.config.get("show_dock_icon", True)):
@@ -1026,13 +1119,14 @@ class AppShell:
     """
 
     def __init__(self, app: QApplication, config: Config, enable_chat: bool = True,
-                 slot_handle=None, slot_id: int | None = None,
-                 spawn_offset: int = 0) -> None:
+                 slot_id: int | None = None,
+                 spawn_offset: int = 0, overlay_gate=None) -> None:
         self.app = app
         self.config = config
         self._enable_chat = bool(enable_chat)
         self._slot_id = slot_id
-        self.tray: QSystemTrayIcon | None = None
+        # 托盘本体（属性访问器在下方：overlay 拓扑回退到壳持有的托盘）
+        self._tray: QSystemTrayIcon | None = None
         # 托盘上下文菜单所有权（F5）：_build_tray 每次构建的 QMenu 必须由进程侧
         # 强引用保活——PySide6 下仅靠 tray.setContextMenu 持有 C++ 指针时，Python
         # wrapper 一旦被回收，之后的 act.menu()/contextMenu() 会命中 shiboken 缓存里
@@ -1059,6 +1153,11 @@ class AppShell:
         self._balance_cache = None
         self._balance_bridge = None
         self._on_about_to_quit_connected = False
+        # overlay 拓扑产品壳（4.1a）：仅 PET_RENDER_TOPOLOGY=overlay 时构造
+        self._overlay_shell = None
+        # D4：overlay 拓扑单实例进程门（由 main() 抢到后传入；legacy 拓扑恒为
+        # None）。释放挂在会话结束路径（_on_session_end）与 main() 的 finally。
+        self._overlay_gate = overlay_gate
         self._dsh_state_tracker = DshStateTracker(config.dir)
         # 订阅 DSH 统一状态（d04fc10 曾接线，post-merge 重构时丢失，本分支恢复）：
         # 收敛出的 thinking → 联动管线补 legacy 没有的思考气泡/对话开始反应；
@@ -1090,25 +1189,25 @@ class AppShell:
         self.festival_service = None
         if self._festival_wanted():
             self._ensure_festival_service()
-        # 批5.2 P1-2/P2-6：进程级 flag 快照——启动期从主窗 config 读一次存
-        # _single_process_spawn；窗级逻辑（runtime 标记版本化、日志前缀、
-        # 退出分派、spawn 分发）一律读本快照，不读每窗 config。第二窗的
-        # config-slot-N.json 里该键不再有任何作用，运行期手改 config.json
-        # 翻 flag 也因此失效（需重启）。
-        self._single_process_spawn = bool(config.get('experimental_single_process_spawn', False))
-        # 批5.3：进程级共享解码 hub（同角色帧扇出）——`experimental_shared_decode`
-        # 默认开，但 `experimental_single_process_spawn` 关时整条 fan-out 不激活
-        #（单窗无共享可言）。门关 = 每窗各自独立解码（批5.2 形态，hub 恒回 local）。
+        # 4.4b：`experimental_single_process_spawn` 键删除——进程内多窗从
+        # "实验开关"升格为**唯一**多宠形态（多进程多宠退役层已删除），
+        # 原先依赖该 flag 快照的窗级逻辑（runtime 标记版本化、日志前缀、
+        # 退出分派、共享子系统）一律常开/按活窗数派生。
+        # D0 门控解绑（PHASE4_DESIGN T3）：overlay 拓扑下 hub 必须**常开**——
+        # 多 sprite 同角色若各自建链会退化成 N 路独立 ffmpeg（硬指标③回退）。
+        # 拓扑判定唯一入口收口在 overlay_shell.is_overlay_topology（T5 的 dev
+        # 环境变量，不进 Config/设置页/schema）。
+        # 批5.3：进程级共享解码 hub（同角色帧扇出）——使能门收敛为
+        # `experimental_shared_decode` 这一个用户级总闸（flag 快照已删；
+        # overlay 拓扑不再需要额外门控，legacy 多窗同样受益）。
         self._decode_hub = DecodeFanoutHub(
-            enabled=bool(config.get('experimental_shared_decode', True))
-            and self._single_process_spawn)
-        # 批5.2a §③.1/.2：flag 开时进程级共享子系统（agent_link / proactive /
-        # 全屏 watcher），各窗经 PetWindow 构造参数引用同一份，崩溃/换角色不重建；
-        # flag 关时保持 None = 每窗各自创建（现状逐位一致）。
+            enabled=bool(config.get('experimental_shared_decode', True)))
+        # 4.4b（T6「multi_window_shared 不删，常开化」）：进程级共享子系统
+        # （agent_link / proactive / 全屏 watcher）**恒建**，各窗经 PetWindow
+        # 构造参数引用同一份，崩溃/换角色不重建。sprite 拓扑里共享子系统缺位
+        # 即静默缺失（agent_link/主动识屏/全屏 watcher 无人承载）。
         #（位置在 _instances 就绪之后，共享 manager 构造期即遍历窗集合）。
         self._shared = None
-        # 批5.2 P1-1：碰撞会话/broker 移回各 PetInstance 自持（不再由 AppShell 持有）；
-        # 每窗一个，经 collision_ipc._local_election_names 同进程收敛。
         # 每窗容器：批5.1 单进程单窗仅一个；批5.2 spike 扩成多窗集合
         #（self.instance 指主窗 = instances[0]，兼容既有调用面）。
         self._instances: list[PetInstance] = []
@@ -1118,19 +1217,21 @@ class AppShell:
         #（懒安装，见 _install_config_watcher）。默认关的键下完全不用它们。
         self._settings_child_active = False
         self._settings_launch_at = 0.0
+        # 本进程最近一次拉起的设置页归属实例身份（"" = 主身份 / "slot-N"）：
+        # 设置页已开着时据此说清"是哪只宠的设置"，None = 归属未知（外部拉起）。
+        self._settings_owner_instance_id = None
         self._config_watcher = None
         self._config_reload_timer = None
         self._settings_watch_timer = None
         self._last_config_signature = None
         self.instance = PetInstance(
-            self, config, enable_chat=self.enable_chat, slot_handle=slot_handle,
+            self, config, enable_chat=self.enable_chat,
             slot_id=slot_id, spawn_offset=spawn_offset,
         )
         self._instances.append(self.instance)
-        if self._single_process_spawn:
-            from .multi_window_shared import SharedSubsystems
+        from .multi_window_shared import SharedSubsystems
 
-            self._shared = SharedSubsystems(self)
+        self._shared = SharedSubsystems(self)  # 4.4b：常开化（T6）
         _LIVE_SHELLS.add(self)
 
     @property
@@ -1156,10 +1257,24 @@ class AppShell:
 
     # --- 进程级功能（todo 提醒等）的鸭式访问器：转发到主窗实例 ---
     @property
-    def win(self) -> PetWindow | None:
-        """主窗窗口（TodoReminderService 的气泡锚点；无窗时 None）。"""
+    def win(self):
+        """主窗窗口；overlay 拓扑下退回 sprite 壳（PetWindow 形的呈现宿主）。
+
+        三个进程级提醒服务（TodoReminderService / VoiceChimeService /
+        FestivalReminderService）经 ``app.win`` 取气泡锚点，只读
+        ``show_bubble`` / ``isVisible`` / ``cfg`` / ``_speech_bubble`` /
+        ``visible_content_rect`` / ``scale``——OverlayShell 逐条提供同契约
+        （见 overlay_shell「PetWindow 形宿主面」段），故 overlay 拓扑
+        （``instance.win`` 恒 None）下退回壳；不退回则三条提醒全部落到系统通知
+        （报时/节日还不过 system_notifications_enabled 门）。
+
+        legacy 拓扑 ``_overlay_shell`` 为 None → 恒返回 PetWindow，逐位不变。
+        """
         inst = getattr(self, 'instance', None)
-        return inst.win if inst is not None else None
+        win = inst.win if inst is not None else None
+        if win is not None:
+            return win
+        return getattr(self, '_overlay_shell', None)
 
     @win.setter
     def win(self, value) -> None:
@@ -1167,6 +1282,22 @@ class AppShell:
         inst = getattr(self, 'instance', None)
         if inst is not None:
             inst.win = value
+
+    @property
+    def tray(self):
+        """托盘对象：legacy = 本进程建的 QSystemTrayIcon；overlay = 壳的托盘。
+
+        overlay 拓扑进程级托盘由 OverlayShell 持有（``self.tray`` 恒 None），
+        不看向壳则「隐藏桌宠 → 点托盘恢复」提示与 Dock 隐藏指路都读不到托盘。
+        """
+        tray = getattr(self, '_tray', None)
+        if tray is not None:
+            return tray
+        return getattr(getattr(self, '_overlay_shell', None), 'tray', None)
+
+    @tray.setter
+    def tray(self, value) -> None:
+        self._tray = value
 
     @property
     def modern_settings_dialog(self):
@@ -1225,7 +1356,7 @@ class AppShell:
         音频通道。避免给用不到的场景常驻一条音频通道。
         """
         return bool(
-            self.config.get("self_talk_speak_enabled", True)
+            self.config.get("self_talk_speak_enabled", False)
             and self.config.get("click_show_self_talk", False)
         )
 
@@ -1366,8 +1497,16 @@ class AppShell:
         return bool(self.config.get("festival_reminder_enabled", False))
 
     def _ensure_festival_service(self):
-        """懒创建节日提醒服务（仅在开启提醒/手动触发时创建）。"""
+        """懒创建节日提醒服务（仅在开启提醒/手动触发时创建）。
+
+        pet.festival_service 连带 festival/festival_calendar/festival_data 与
+        五份节日文案表，实测 2.95MB Python 堆（tools/import_cost.py）。总开关
+        默认关闭（主动打扰型功能），关闭时整套文案表都不该常驻——import 收到
+        构造点，开启/试听时按需付一次。
+        """
         if getattr(self, "festival_service", None) is None:
+            from .festival_service import FestivalReminderService
+
             self.festival_service = FestivalReminderService(self)
         return self.festival_service
 
@@ -1390,6 +1529,35 @@ class AppShell:
         # 故必须连带同步通道生命周期（关掉节日语音后若报时也关，通道应释放）。
         self._sync_chime_service()
 
+    # ------------------------------------------------------------ DSH 状态跟踪
+    def _dsh_tracker_wanted(self) -> bool:
+        """DSH 状态跟踪器的功能门：``agent_link.dsh``（默认关）。
+
+        跟踪器读的是 DSH 桥接插件写的事件文件、探的是 DSH 端口，输出经
+        ``_on_dsh_state_changed`` / ``_on_dsh_user_message`` 只喂 DSH 联动管线
+        （``notify_dsh_state`` 在 DSH 监视器未运行时直接 no-op）；桥接插件本身也
+        只在开启 DSH 联动时安装（``DshMonitor.install_bridge``，关联动即卸载）。
+        联动没开时它 3s 一轮探端口、1.2s 一轮读桥目录，全是空转。
+        """
+        agent_cfg = self.config.get("agent_link", {})
+        return bool(agent_cfg.get("dsh", False)) if isinstance(agent_cfg, dict) else False
+
+    def _sync_dsh_state_tracker(self) -> None:
+        """按功能门启停 DSH 状态跟踪器（幂等；启动与设置保存链共用）。
+
+        门开 → ``start()``（幂等，已在跑则 no-op）；门关 → ``stop()``（停两张表
+        + 作废在途探测）。开关变动经 ``_apply_external_config_change`` 到达
+        （设置页保存走它；右键菜单改 ``agent_link.dsh`` 落盘后由 config watcher
+        收敛到同一入口）。
+        """
+        tracker = getattr(self, "_dsh_state_tracker", None)
+        if tracker is None:
+            return
+        if self._dsh_tracker_wanted():
+            tracker.start()
+        else:
+            tracker.stop()
+
     # ------------------------------------------------------------ 设置进程隔离
     def _apply_external_config_change(self) -> None:
         """把「配置已在别处落盘」同步到运行期（独立设置进程 / watcher 路径）。
@@ -1402,12 +1570,30 @@ class AppShell:
             win = getattr(inst, "win", None)
             if win is not None:
                 win.refresh_pet_settings()
+        overlay_shell = getattr(self, "_overlay_shell", None)
+        if overlay_shell is not None:
+            refresh = getattr(overlay_shell, "refresh_settings", None)
+            if callable(refresh):
+                refresh()  # overlay 拓扑的窗口能力重应用（4.1b）
         self._sync_dynamic_island()
         self._apply_balance_timer()
         # Phase 1/2：设置保存后按配置同步可选服务（todo 懒启停）与动画预热
         self._sync_todo_service()
         self._sync_chime_service()
         self._sync_festival_service()
+        # 外部配置变更也可能改了 agent_link.dsh（右键菜单开关落盘后同样收敛到
+        # 这里）→ DSH 状态跟踪器按功能门同步启停。
+        self._sync_dsh_state_tracker()
+        # 联动被关掉 → 桌宠自拉起的 dsh web 立即收口：它唯一的消费者就是这条
+        # 联动管线，关掉后留着只是常驻内存。顺序放在跟踪器停表之后（先停探测再
+        # 停服务，免得跟踪器在服务消失的那一刻又报一轮 offline）；只动自拉起
+        # 登记表里的 pid，用户手动起的实例不受影响。
+        # 进程反查（PowerShell ~10s 超时）与 taskkill（~15s 超时）是秒级阻塞：
+        # 本方法跑在配置去抖回调（GUI 线程）上，收口与后续设置同步没有依赖，
+        # 放 daemon 线程做，不许卡死所有桌宠共用的 GUI 线程（审查缺口 G2）。
+        if not self._dsh_tracker_wanted():
+            threading.Thread(target=self._stop_harness_if_still_unwanted,
+                             daemon=True, name="pet-harness-stop").start()
         for inst in getattr(self, "_instances", []):
             prewarm = getattr(inst, "_sync_animation_prewarm", None)
             if callable(prewarm):
@@ -1418,7 +1604,7 @@ class AppShell:
                 refresh()
         _mac_set_dock_icon_visible(bool(self.config.get("show_dock_icon", True)))
 
-    def open_settings_process(self, instance=None) -> bool:
+    def open_settings_process(self, instance=None, page: str | None = None) -> bool:
         """拉起独立设置进程；True = 已交给独立进程（不得再开进程内对话框）。
 
         False = 开关关闭或 startDetached 失败，由调用方回退进程内设置页。
@@ -1431,16 +1617,51 @@ class AppShell:
             # 但仍按"设置开着"抑制气泡并盯住它的锁文件。
             logging.info("独立设置进程已在运行，不重复拉起")
             self._mark_settings_child(True)
+            if not self._settings_launch_pending():
+                # 拉起窗口之外 = 用户再次点了「桌宠设置」（可能是另一只宠的）：
+                # 静默 return True 会让这次点击表现为"什么都没发生"。
+                self._notify_settings_already_open(instance)
             return True
         if self._settings_launch_pending():
             # 刚拉起、子进程还没来得及建锁：连点场景视为已在启动，避免双开。
             self._mark_settings_child(True)
             return True
-        if not self._launch_settings_process(instance):
+        if not self._launch_settings_process(instance, page=page):
             return False
         self._settings_launch_at = time.monotonic()
+        self._settings_owner_instance_id = _instance_config_identity(instance)
         self._mark_settings_child(True)
         return True
+
+    def _notify_settings_already_open(self, instance) -> None:
+        """设置页已开着时的可见反馈（此前是静默 no-op，右击另一只宠像没反应）。
+
+        独立设置进程是**单实例**：进程内多窗共用同一份 Config，所有宠的设置页
+        走的都是那一个设置进程，无法再开第二扇窗，也无法从主进程把它前置——
+        能做的只有说清现状。文案按归属分三种：同一只（"已经打开"）、另一只
+        （"先关闭"）、归属未知（外部拉起的设置进程）。
+
+        走 self-drawn 右下角通知而不是桌宠气泡：设置页开着时气泡本来就被抑制
+        （_update_bubble_suppression_for_settings），冒泡必被丢弃；通知沿用
+        「系统通知」总开关（与待办提醒的 notify 分支同口径）。
+        """
+        if not bool(self.config.get("system_notifications_enabled", True)):
+            return
+        owner = getattr(self, "_settings_owner_instance_id", None)
+        requested = _instance_config_identity(instance)
+        if owner is not None and owner == requested:
+            message = "桌宠设置已经打开（独立设置窗口不会重复打开）：请切换到已打开的窗口。"
+        elif owner is not None:
+            message = "已有一只桌宠的设置窗口开着：请先关闭它，再打开这只的设置。"
+        else:
+            message = "桌宠设置已经打开：请先关闭已打开的设置窗口再试。"
+        logging.info("设置页已在运行，提示用户：%s", message)
+        notify = getattr(self, "system_notify", None)
+        if callable(notify):
+            try:
+                notify("桌宠设置", message)
+            except Exception:
+                logging.exception("设置页占用提示失败")
 
     def _settings_process_running(self) -> bool:
         """settings.lock 是否被活着的设置进程持有。
@@ -1472,7 +1693,7 @@ class AppShell:
         started = float(getattr(self, "_settings_launch_at", 0.0) or 0.0)
         return bool(started) and (time.monotonic() - started) <= 5.0
 
-    def _launch_settings_process(self, instance=None) -> bool:
+    def _launch_settings_process(self, instance=None, *, page: str | None = None) -> bool:
         """startDetached 独立设置进程；冻结包与源码运行分流。
 
         源码运行要走 `-m pet`（工作目录取仓库根），冻结包直接复用 exe 的参数
@@ -1491,9 +1712,11 @@ class AppShell:
         if not program:
             logging.warning("sys.executable 为空，无法拉起独立设置进程")
             return False
-        instance_id = str(getattr(getattr(instance, "config", None), "instance_id", "") or "")
+        instance_id = _instance_config_identity(instance)
+        if page:
+            arguments += ["--settings-page", str(page)]
         if instance_id and instance_id != (os.environ.get("DSH_PET_INSTANCE") or "").strip():
-            # 进程内多窗（experimental_single_process_spawn）下第二窗的 instance_id
+            # 进程内多窗下第二窗的 instance_id
             # 不等于进程级 env：显式传参，否则独立设置进程会打开主窗的配置。
             # 主窗/独立槽位进程 env 已一致，命令保持 ["--settings"] 原样。
             arguments += ["--instance", instance_id]
@@ -1516,6 +1739,8 @@ class AppShell:
                     timer.start()
             else:
                 self._settings_launch_at = 0.0
+                # 设置页已关闭：归属身份作废（下次占用提示按"外部拉起"口径说）
+                self._settings_owner_instance_id = None
                 timer.stop()
         for inst in getattr(self, "_instances", []):
             update = getattr(inst, "_update_bubble_suppression_for_settings", None)
@@ -1527,7 +1752,9 @@ class AppShell:
                 logging.exception("同步设置期气泡抑制状态失败")
 
     def _poll_settings_process(self) -> None:
-        """设置进程存活轮询：崩溃/漏事件时兜底解除气泡抑制。"""
+        """设置进程存活轮询：崩溃/漏事件时兜底解除气泡抑制；顺带消费指令。"""
+        # 4.4a：D12 指令消费的轮询兜底（目录 watcher 漏事件/网络盘等场景）。
+        self._consume_settings_command()
         if not bool(getattr(self, "_settings_child_active", False)):
             return
         if self._settings_process_running():
@@ -1537,6 +1764,48 @@ class AppShell:
         if self._settings_launch_pending():
             return
         self._mark_settings_child(False)
+
+    def _consume_settings_command(self) -> None:
+        """消费独立设置进程写下的指令（D12；4.4a 起 legacy 拓扑也走这条通道）。
+
+        退役前 legacy 的「一键退出子肥鱼」由设置进程直接 ``child_pet_cleanup``
+        （runtime 标记 + taskkill）杀子进程；多进程多宠退役层停用后不存在跨进程
+        子宠，统一改「写指令文件 → 主进程消费」。target 为空 = 退出全部子肥鱼；
+        否则只退那个 slot 身份（身份已不在登记表 = 空操作，只留日志）。
+
+        **overlay 拓扑下让路**：壳（``OverlayShell._consume_settings_command``）
+        独占这条通道。两份消费者盯同一个配置目录、都走 ``consume_command``
+        （消费即删），谁先跑谁把指令摘走——而本类的 ``clear_spawned_pets`` /
+        slot 身份在 overlay 下都没有目标（子宠是 sprite，不在 ``_instances``
+        里），抢到就是静默丢一次用户点击。
+        """
+        if getattr(self, "_overlay_shell", None) is not None:
+            return
+        config_dir = getattr(self.config, "dir", None)
+        if config_dir is None:
+            return
+        from . import overlay_settings_command
+
+        command = overlay_settings_command.consume_command(config_dir)
+        if command is None:
+            return
+        if command.get("command") != overlay_settings_command.CMD_EXIT_SPAWNED_PETS:
+            return  # consume 已按白名单过滤，这里只是防御
+        target = command.get("target")
+        if target is None:
+            logging.info("收到设置进程指令 → 退出全部子肥鱼")
+            self.clear_spawned_pets()
+            return
+        for inst in list(self._instances):
+            if inst is self.instance:
+                continue
+            slot = overlay_settings_command.slot_from_instance_id(
+                str(getattr(inst.config, "instance_id", "") or ""))
+            if slot == int(target):
+                logging.info("收到设置进程指令 → 退出子肥鱼 slot-%s", target)
+                self._on_window_exit_requested(inst, defer_heavy_teardown=True)
+                return
+        logging.info("收到设置进程指令 → slot-%s 已不在活跃清单，跳过", target)
 
     def _install_config_watcher(self) -> None:
         """盯 config.json 所在目录 + 文件，把外部写盘合并进运行期（幂等）。
@@ -1610,6 +1879,8 @@ class AppShell:
 
     def _on_config_dir_changed(self, path: str) -> None:
         self._watch_config_file()
+        # 4.4a：D12 指令通道的目录侧消费（原子 os.replace 会在目录里产生事件）。
+        self._consume_settings_command()
         if self._config_signature() != getattr(self, "_last_config_signature", None):
             self._arm_config_reload()
         # 锁文件出现 = 设置进程已起来（启动窗口结束）；锁文件消失 = 设置进程
@@ -1660,11 +1931,45 @@ class AppShell:
         if not self._on_about_to_quit_connected:
             self.app.aboutToQuit.connect(self._on_about_to_quit)
             self._on_about_to_quit_connected = True
-        self.instance.collision_ipc.start()
-        self._dsh_state_tracker.start()
+        # DSH 状态跟踪器按功能门懒启（agent_link.dsh，默认关）：它的全部输出只
+        # 喂 DSH 联动管线，联动没开时 3s 端口探测 + 1.2s 桥目录轮询纯空转。
+        self._sync_dsh_state_tracker()
         character_id = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
         logging.info('当前形象: %s', character_id)
-        self._create_ui_with_character_fallback(character_id)
+        # 拓扑分流（T5/4.1a）：PET_RENDER_TOPOLOGY=overlay（dev flag，唯一
+        # 读取点在 overlay_shell.is_overlay_topology）→ 单合成窗产品壳
+        # 接管渲染，不建 PetWindow；默认路径逐行不变
+        from .overlay_shell import is_overlay_topology
+        if is_overlay_topology():
+            from .overlay_shell import OverlayShell
+            # 4.3 后半：把进程级共享子系统（agent_link / proactive）注入 sprite
+            # 世界的壳——overlay 拓扑下 instances[].win 恒为 None，扇出目标就是
+            # 这个壳（见 multi_window_shared.presentation_targets）。D0 已保证
+            # overlay 拓扑下 _shared 常建；拿不到时传 None，壳内呈现面静默
+            # 空转（绝不因注入缺失阻断启动）。legacy 分支逐行不变。
+            shared = getattr(self, "_shared", None)
+            self._overlay_shell = OverlayShell(
+                self.app, self.instance,
+                agent_link_manager=getattr(shared, "agent_link", None),
+                proactive_watcher=getattr(shared, "proactive", None))
+            # 点击自言自语的朗读走同一条音频通道（AppShell 持有，进程内唯一）；
+            # overlay 拓扑没有 PetWindow 可注入（app.py:481 的 legacy 落点是
+            # PetInstance._wire_window，那里用 self.shell），本类就是那个
+            # AppShell，故直接取 self.speak_self_talk——写 self.shell 会
+            # AttributeError（见 _precache 段同款注释）。
+            self._overlay_shell.on_self_talk_speak = self.speak_self_talk
+            self._overlay_shell.start()
+            # 拖文件解读：legacy 由 PetWindow.install_file_interpreter 注入
+            # （window_optional_services.py:96-105）；overlay 无 PetWindow，
+            # 由壳作宿主（cfg/show_bubble/show_alert/resolve_alert 同名面）。
+            try:
+                from .file_interpret import FileInterpretController
+                self._overlay_shell.set_file_interpret_offer(
+                    FileInterpretController(self._overlay_shell).offer)
+            except Exception:  # noqa: BLE001 - 可选服务，缺失不阻断启动
+                logging.exception("overlay: 拖文件解读接线失败")
+        else:
+            self._create_ui_with_character_fallback(character_id)
         # 批5.2a：进程级共享全屏 watcher 在主窗就绪后启动（自省任一窗是否需要，
         # 无需窗——环则空转）；flag 关时 _shared 为 None，no-op。
         if self._shared is not None:
@@ -1733,8 +2038,18 @@ class AppShell:
         """
         if getattr(self, "_session_end_done", False):
             return
-        self._session_end_done = True
+        # 「真会话结束」才置位（ops5.5 终审 C2）：SessionWatcher 把 aboutToQuit 也
+        # 汇进同一条 arm 回调——那只是正常退出的兜底，不是关机/注销。靠
+        # ``_on_about_to_quit`` 先行置下的标记区分（Qt 按连接序调槽，主退出先到）。
+        # 不区分的话，:2137/:2185/:2369 三处会把「正常退出」误当「会话结束」跳过。
+        if not getattr(self, "_plain_about_to_quit", False):
+            self._session_end_done = True
         self._mark_session_ending()
+        # D4：会话结束（关机/注销）路径释放 overlay 单实例进程门。与下面的
+        # 「不做会话保存/写盘/槽位解锁」不冲突——本模块的释放是一次 unlink +
+        # 关句柄，O(1)、不派生进程、不写盘；不显式释放则只剩"进程被拆掉后由
+        # OS 回收句柄 + 下次启动按 QLockFile pid 陈旧判定接管"这条兜底链。
+        self._release_overlay_gate()
         stopped = 0
         for inst in self._instances:
             win = getattr(inst, "win", None)
@@ -1756,12 +2071,25 @@ class AppShell:
             "会话结束：已停止全部 ffmpeg reader（%d 个素材库收口），进入静默退出", stopped,
         )
 
+    def _release_overlay_gate(self) -> None:
+        """释放 overlay 单实例进程门（D4；幂等，legacy 拓扑下恒为 no-op）。"""
+        gate = getattr(self, "_overlay_gate", None)
+        if gate is None:
+            return
+        try:
+            gate.release()
+        except Exception:
+            logging.exception("释放 overlay 进程门失败")
+
     def _mark_session_ending(self) -> None:
         """置位进程级 ffmpeg spawn 闸门（webm_clip.set_session_ending）。
 
         覆盖「已进入退出流程、但原生 WM_QUERYENDSESSION 未被观测到」的路径
         （如托盘退出、Qt aboutToQuit、测试直接调收口）。
         """
+        # 退出标记与闸门同源（R3-gemini P1）：只走 aboutToQuit 置位会漏掉
+        # 会话结束观察路径（:2042），在途 autostart worker 会无视退出继续拉起。
+        self._quitting = True
         try:
             webm_clip_mod.set_session_ending(True)
         except Exception:
@@ -1788,24 +2116,111 @@ class AppShell:
         机器级语义：仅主窗就绪时调度一次（进程内新窗不重复触发）；本机已有
         实例（含官方默认 3080）则跳过。静默 = CREATE_NO_WINDOW 隐藏控制台 +
         launch_harness(open_browser=False) 不开浏览器，无任何弹窗。
+
+        门控见 ``_harness_autostart_wanted``（本批收紧：DSH 联动没开不拉）。
+        注：``launch_harness`` 本身不带门——菜单「启动并打开页面」是用户明示
+        动作，必须照常可用。
         """
-        if not self.enable_chat or not bool(self.config.get("harness_autostart", False)):
+        if not self._harness_autostart_wanted():
             return
 
         def _run() -> None:
             try:
                 from . import harness_launcher as harness_mod
+                # 拉起窗口期竞态（审查缺口 G4）：慢探测期间联动可能已被关掉，
+                # 门必须在每个耗时步骤后重核，而不是只在调度时查一次。
+                # 正常退出同理（R2 第五缺口）：退出标记置位后绝不再拉起。
+                if getattr(self, "_quitting", False):
+                    return
+                if not self._harness_autostart_wanted():
+                    return
                 if any(harness_mod.is_running(p) for p in harness_mod._candidate_ports()):
                     return
-                harness_mod.launch_harness(open_browser=False)
+                if not self._harness_autostart_wanted() or getattr(self, "_quitting", False):
+                    return
+                harness_mod.launch_harness(
+                    open_browser=False,
+                    cancel_check=lambda: (
+                        getattr(self, "_quitting", False)
+                        or getattr(self, "_session_end_done", False)
+                    ),
+                )
+                if getattr(self, "_session_end_done", False):
+                    # 关机/注销窗口：只标记不补偿——补偿收口会派生 PowerShell/
+                    # taskkill，撞 issue #111「静默、快速、不再派生」纪律（ds/sol R3）
+                    return
+                if not self._harness_autostart_wanted() or getattr(self, "_quitting", False):
+                    # 拉起刚完成联动就被关/进程在退出：立刻收口，不留「关了还在跑」
+                    harness_mod.stop_self_launched_harness()
             except Exception:
                 logging.exception("随桌宠自动拉起 dsh 服务失败")
 
         threading.Thread(target=_run, daemon=True, name="pet-harness-autostart").start()
 
+    def _harness_autostart_wanted(self) -> bool:
+        """「随桌宠启动 dsh 服务」的功能门：三个条件同时成立才自动拉起。
+
+        1. ``enable_chat``——旧口径；无 Chat 的变体连 Harness 菜单都不显示；
+        2. 用户显式开了 ``harness_autostart``；
+        3. **DSH 联动确实启用**（``agent_link.dsh``，复用 ``_dsh_tracker_wanted``
+           这个单一口径）。
+
+        第 3 条是本批的收紧。dsh web 的真实消费者只有 DSH 联动这一条管线：
+        桥接插件只在开启联动时安装（关闭时卸载）、``DshMonitor`` 只在联动开启时
+        运行、``DshStateTracker`` 也按同一个门前述停表——联动没开时它没有任何
+        消费者，只是一个常驻的 node.exe（实机 41.9MB）。旧口径只看前两条，
+        于是"联动全关 + 开了自启"的用户白烧一份内存。
+
+        复用 ``_dsh_tracker_wanted`` 而不是就地再读一遍 config：同一个功能门在两处
+        各自实现，早晚会漂移（跟踪器跟联动走、服务不跟）。
+        """
+        if not self.enable_chat:
+            return False
+        if not bool(self.config.get("harness_autostart", False)):
+            return False
+        return self._dsh_tracker_wanted()
+
+    def _stop_harness_if_still_unwanted(self) -> None:
+        """G2 异步收口的门复核：窗口期内联动又被打开，则作废本次收口。
+
+        联动关闭触发的收口是 daemon 线程：PowerShell 反查 + taskkill 有秒级
+        延迟，期间用户可能已把联动重新打开——裸调 ``_stop_self_launched_harness``
+        会把用户刚恢复的服务杀掉（ds/sol R2 发现的反向竞态）。线程入口先复核。
+
+        **诚实残余（ds/sol R3）**：本复核只覆盖「派发 → 线程入口」一段；
+        复核通过后收口慢操作（命令行反查 ~0.7s 上限 10s、taskkill 上限 15s）
+        期间重开联动不在防护内——服务会被停一次，且不会自动重拉（自启只在
+        主窗就绪时调度一次），用户可从菜单手动启动。把复核嵌进逐 pid 的
+        收口循环属于另一次设计变更，本批不夹带。
+        """
+        if getattr(self, "_session_end_done", False):
+            # 关机/注销窗口：纪律是静默、快速、不再派生任何进程操作
+            # （与主退出收口的跳过语义一致，ds/sol R3）
+            return
+        if self._dsh_tracker_wanted():
+            return
+        self._stop_self_launched_harness()
+
+    def _stop_self_launched_harness(self) -> list[int]:
+        """收掉本进程自拉起的 dsh web，返回被终止的 pid（见 harness_launcher 归属收口）。
+
+        只认自拉起登记表 + 终止前命令行复核：用户自己在终端跑着的实例不在表中，
+        永远不受影响。这是**无确认**的收口路径（退出 / 联动关闭），宁可漏杀。
+        """
+        try:
+            from . import harness_launcher as harness_mod
+            return harness_mod.stop_self_launched_harness()
+        except Exception:
+            logging.exception("停止自拉起的 dsh 服务失败")
+            return []
+
     # ------------------------------------------------------------ DSH 状态接线
     def _dsh_link_manager(self):
-        """当前主窗的 Agent 联动管理器（无窗/未创建时为 None）。"""
+        """当前主窗的 Agent 联动管理器（无窗/未创建时为 None）。
+
+        overlay 拓扑经 ``self.win`` 拿到 sprite 壳，返回的是壳持有的**同一个**
+        共享 agent_link（AppShell.start() 注入的那份），DSH 离线收口照常生效。
+        """
         win = self.win
         if win is None:
             return None
@@ -1859,8 +2274,15 @@ class AppShell:
         from .chat import session_store as _session_store
         # issue #111：先关 ffmpeg spawn 闸门，再走正常退出收口——正常退出路径
         # （托盘退出/最后窗口关闭）同样落在关机前后，绝不能在里面再派生 reader。
+        # 「正常退出兜底」标记（ops5.5 终审 C2）：本槽先于 SessionWatcher 的
+        # aboutToQuit→arm 执行（Qt 按连接序调槽），``_on_session_end`` 凭它区分
+        # 「真会话结束」与「正常退出兜底」，只有前者才置 ``_session_end_done``。
+        self._plain_about_to_quit = True
         self._mark_session_ending()
-        # 窗级收口：逐窗保存位置、停本窗预热与 Agent、提交本窗会话、释放本窗 slot 锁
+        # 退出标记（R2 第五缺口）：在途自动拉起 worker 凭它中止或补偿收口——
+        # 否则「退出时登记表为空 → worker 随后 spawn 登记」会留下永远无人收的进程。
+        self._quitting = True
+        # 窗级收口：逐窗保存位置、停本窗预热与 Agent、提交本窗会话
         for inst in self._instances:
             win = inst.win
             if win is not None:
@@ -1873,6 +2295,15 @@ class AppShell:
                         win.lib.pause_warm()
                 except Exception:
                     logging.exception("退出时暂停预热失败")
+                # issue #111：供给线程不是预热线程——``pause_warm`` 管不到它，而它
+                # 自己派生转换 ffmpeg。退出同样是"再派生进程"的坏时机（与 overlay 的
+                # ``_on_about_to_quit`` 同一收口位置），库随窗口销毁时活线程还会被
+                # 一起析构（Qt fatal）。库侧自带幂等 + 有界等待 + 超时孤儿兜底。
+                try:
+                    if getattr(win, 'lib', None) is not None:
+                        win.lib.cancel_frameseq_provision()
+                except Exception:
+                    logging.exception("退出时取消帧序列供给线程失败")
                 if getattr(win, 'agent_link_manager', None) is not None:
                     try:
                         win.agent_link_manager.shutdown()
@@ -1887,21 +2318,11 @@ class AppShell:
                             _store.save(_session)
                         except Exception:
                             logging.exception("退出前保存会话失败")
-            if inst.slot_handle is not None:
-                try:
-                    slot_manager_mod._unlock_file(inst.slot_handle)
-                except Exception:
-                    pass
-                inst.slot_handle = None
-            # 批5.2 P1-1：每窗自持碰撞会话与 broker，逐窗收口（「全部退出」逐窗停）
+            # 批5.2 P1-1：每窗自持 broker，逐窗收口（「全部退出」逐窗停）
             try:
                 inst.broker_facade.shutdown()
             except Exception:
                 logging.exception("退出时关闭 broker facade 失败")
-            try:
-                inst.collision_ipc.stop()
-            except Exception:
-                logging.exception("退出时停止碰撞会话失败")
         # 果冻墙：岛的静态碰撞体随「全部退出」收口（主动 leave 即时移出碰撞世界）
         body = getattr(self, "island_collision", None)
         if body is not None:
@@ -1953,6 +2374,15 @@ class AppShell:
             self._dsh_state_tracker.stop()
         except Exception:
             logging.exception("退出时停止 DSH 状态跟踪器失败")
+        # 退出收口：停掉本进程自拉起的 dsh web（父进程退出不带走 CREATE_NO_WINDOW
+        # 的子进程，实机确认桌宠退出后 node 仍活着——只能由宿主自己收）。
+        # 只杀自拉起登记表里且命令行复核通过的那个：用户手动起的实例不受影响。
+        #
+        # 会话结束（关机/注销）路径整段跳过：那条路径的纪律是「静默、快速、不再
+        # 派生任何进程」（issue #111 的 0xc0000142 就是关机窗口里派生进程引起的），
+        # taskkill 与 Get-CimInstance 同样属于派生，且机器马上断电、收口无收益。
+        if not getattr(self, "_session_end_done", False):
+            self._stop_self_launched_harness()
         try:
             if not _session_store.close_all_writers(permanent=True):
                 logging.warning("退出时会话写盘 worker 未干净关闭")
@@ -2108,6 +2538,10 @@ class AppShell:
         if not enabled:
             if getattr(self, "island", None) is not None:
                 self.island.hide()
+            # 4.3：overlay 拓扑摘岛桥（岛停用即撤墙）
+            overlay_shell = getattr(self, "_overlay_shell", None)
+            if overlay_shell is not None:
+                overlay_shell.attach_island(None)
             body = getattr(self, "island_collision", None)
             if body is not None and body.has_local_island:
                 body.stop()
@@ -2151,22 +2585,37 @@ class AppShell:
         # 批5.2a：灵动岛按**聚合**可见态同步（任一窗可见 = 可见），替代只看主窗。
         self.island.set_pet_visible(self._aggregate_pet_visible())
         self.island.show()
+        # 4.3：overlay 拓扑下岛墙由 sprite 碰撞世界的岛桥接管（attach 幂等）。
+        # 岛自己的 collision_enabled 门只能在这里判：旧 body 路径
+        # （_sync_island_collision）读到该键后走 overlay 分支直接 return，键值被
+        # 丢弃，到达桥的唯一通道是本调用点。关着时按岛桥的文档化口径传 None
+        # （attach_island(None) = 摘桥）——不建桥，岛 hide/show 也不会复活墙；
+        # 键缺失/非 dict 一律按 True（与 _sync_island_collision 的清洗口径一致）。
+        overlay_shell = getattr(self, "_overlay_shell", None)
+        if overlay_shell is not None:
+            wall_enabled = bool(island_cfg.get("collision_enabled", True)) \
+                if isinstance(island_cfg, dict) else True
+            overlay_shell.attach_island(self.island if wall_enabled else None)
         self._sync_island_collision(island_cfg)
 
     def _sync_island_collision(self, island_cfg) -> None:
         """果冻墙：按配置创建/启停岛的碰撞体（island_collision.py）。
 
-        本进程有岛（宿主）：同步硬墙直连 + 岛几何经碰撞 IPC 发布成静态成员
-        （attach_publisher），复制给远端进程。本进程无岛（多进程子宠进程）：
-        建远端模式碰撞体——几何由碰撞客户端从快照回喂，本地硬墙照常挂上
-        （stale-keep TTL 兜底，快照静默不撤墙）。
-        同步硬墙（无 30Hz 检测/结算）：岛作为屏幕边界式位置墙，在统一位置
-        出口 move_window_towwards 里逐次钳制——身体框任何移动都进不了岛区，
+        本进程直连硬墙：岛作为屏幕边界式位置墙，在统一位置出口
+        move_window_towwards 里逐次钳制——身体框任何移动都进不了岛区，
         杜绝采样间隙导致的穿透抽搐；岛被拖到桌宠身上由 on_geometry_changed
         事件驱动推出。
+        4.4a：跨进程几何发布/远端复制（attach_publisher / on_remote_snapshot）
+        随多进程多宠退役层停用——岛上桌宠的碰撞反馈只在本进程结算。
         """
         enabled = bool(island_cfg.get("collision_enabled", True)) \
             if isinstance(island_cfg, dict) else True
+        # 4.3：overlay 拓扑下旧果冻墙整体让路——墙已由 sprite 碰撞世界的
+        # 岛桥（pet/island_bridge.py，attach_island 接线）接管；旧 body 的
+        # pets_provider 只认 PetWindow（overlay 无窗），且 on_geometry_changed
+        # 是单槽，被它抢占后岛桥几何断更
+        if getattr(self, "_overlay_shell", None) is not None:
+            return
         body = getattr(self, "island_collision", None)
         if not enabled:
             if body is not None:
@@ -2184,22 +2633,8 @@ class AppShell:
             if self.island is not None:
                 self.island.on_geometry_changed = body.submit
                 self.island.on_pet_visibility_changed = body.set_own_pet_visible
-        # 宿主进程：几何发布走第一个持有碰撞会话的实例（无会话=碰撞总开关
-        # 关，静默跳过——本进程直连硬墙不受影响）；远端模式无需 attach。
-        # 无可用会话时显式 detach（A5）：清掉残留发布通道与 2s 心跳，
-        # 否则总开关关闭后仍向已停会话持续发报。
-        attached = False
-        if self.island is not None and bool(self.config.get("collision_enabled", True)):
-            for inst in self._instances:
-                session = getattr(inst, "collision_ipc", None)
-                if session is not None:
-                    body.attach_publisher(session)
-                    attached = True
-                    break
-        if not attached:
-            detach = getattr(body, "detach_publisher", None)
-            if callable(detach):
-                detach()
+        # 4.4a：岛几何的跨进程发布通道（attach_publisher / detach_publisher）
+        # 随多进程多宠退役层停用——本进程直连硬墙不再向碰撞世界注册静态成员。
         try:
             body.start()
         except Exception:
@@ -2347,12 +2782,24 @@ class AppShell:
 
     def _aggregate_pet_visible(self) -> bool:
         """是否有任一窗可见（聚合可见态——灵动岛按它同步 set_pet_visible）。"""
+        overlay = getattr(self, "_overlay_shell", None)
+        if overlay is not None:
+            # overlay 拓扑：instances[].win 恒为 None（PetWindow 不构造），
+            # 聚合可见态由唯一合成窗承担。
+            return overlay.overlay.isVisible()
         return any(
             inst.win is not None and getattr(inst.win, "isVisible", lambda: True)()
             for inst in self._instances
         )
 
     def _toggle_pet_from_island(self) -> None:
+        # overlay 拓扑：inst.win 全为 None，旧循环拿不到任何窗——路由到
+        # OverlayShell（其 set_pet_visible 自带岛状态同步与共享子系统
+        # pause/resume，语义 = 下方 legacy 全窗 toggle 的单窗形态）。
+        overlay = getattr(self, "_overlay_shell", None)
+        if overlay is not None:
+            overlay._toggle_pet_visible()
+            return
         # 批5.2a §③.4：灵动岛单击 toggle **全部**窗（任一可见 → 全部隐藏；否则全部显示），
         # 并按聚合可见态同步 set_pet_visible（替代 spike 只 toggle 主窗的 P2-5 缺口）。
         wins = [inst.win for inst in self._instances if inst.win is not None]
@@ -2375,17 +2822,34 @@ class AppShell:
             self._balance_timer.start(minutes * 60000)
 
     def _island_icon_pixmap(self):
-        """灵动岛"鱼本体头像"：取首个桌宠窗的当前帧图标；无窗/无帧返回 None（岛侧会重试）。"""
+        """灵动岛"鱼本体头像"：取首个桌宠窗的当前帧图标；无窗/无帧返回 None（岛侧会重试）。
+
+        4.4a overlay 拓扑：``instances[].win`` 恒为 None（单合成窗，桌宠在
+        OverlayShell 里），图标改从壳的主 sprite 当前帧取（``OverlayShell.icon_pixmap``
+        与旧 ``PetWindow.icon_pixmap`` 同款裁剪/缩放）；两处都取不到才返回 None，
+        岛侧按 provider 契约（dynamic_island._icon_pixmap 不缓存 None）稍后重试。
+        """
         for inst in getattr(self, "_instances", []):
             win = getattr(inst, "win", None)
             if win is not None:
                 pm = win.icon_pixmap(64)
                 if pm is not None and not pm.isNull():
                     return pm
+        overlay_shell = getattr(self, "_overlay_shell", None)
+        if overlay_shell is not None:
+            pm = overlay_shell.icon_pixmap(64)
+            if pm is not None and not pm.isNull():
+                return pm
         return None
 
     def _island_tier_hint(self) -> str:
-        """灵动岛余额峰谷提示文案（与 _update_island_balance / 静默查询共用）。"""
+        """灵动岛余额峰谷提示文案（与 _update_island_balance / 静默查询共用）。
+
+        pet.balance 按需导入：本函数只在"岛卡片展开 / 余额查询返回"时才被调用，
+        启动路径（_sync_dynamic_island）不碰它（见 _show_balance_payload）。
+        """
+        from . import balance as balance_mod
+
         peak_label, idle_label = balance_mod.resolve_tier_labels(
             str(self.config.get("balance_tier_labels_mode", "default") or "default"),
             str(self.config.get("balance_tier_label_peak", "") or ""),
@@ -2469,7 +2933,13 @@ class AppShell:
 
     # ------------------------------------------------------------ 余额
     def show_balance(self, parent=None) -> None:
-        win = parent or (self.instance.win if self.instance is not None else None)
+        # 宿主判定：必须是能冒泡的 pet 形宿主。overlay 菜单把合成窗
+        # （OverlayWindow，无 show_bubble）当 parent 传下来，直接用它会在
+        # _show_balance_payload 里 AttributeError；overlay 拓扑下 ``instance.win``
+        # 又恒为 None——两条都收敛到 ``self.win``（原生 Win 或 sprite 壳）。
+        win = parent
+        if win is None or not callable(getattr(win, "show_bubble", None)):
+            win = self.win
         if win is None or self._balance_busy or not win.isVisible():
             return
         now = time.monotonic()
@@ -2515,6 +2985,7 @@ class AppShell:
             QTimer.singleShot(0, lambda message=error_message: bridge.done.emit(False, message))
 
     def _balance_worker(self, bridge, base_url: str, api_key: str, verify_ssl: bool, provider_key: str = '', *, quiet: bool = False) -> None:
+        from . import balance as balance_mod  # 按需导入（见 _show_balance_payload）
         try:
             info = balance_mod.fetch_balance(base_url, api_key, verify_ssl=verify_ssl)
             text = balance_mod.format_balance(info)
@@ -2585,7 +3056,7 @@ class AppShell:
         target = parent or (self.instance.win if self.instance is not None else None)
         if target is not None:
             target.show_bubble("正在检查更新…", duration_ms=6000)
-        bridge = _UpdateBridge(target)
+        bridge = _UpdateBridge(target, owner=self)
         self._update_bridge = bridge
         # 完成后放行下一次检查（无论成败）
         bridge.done.connect(lambda *_: setattr(self, "_update_checking", False))
@@ -2605,20 +3076,12 @@ class AppShell:
 
     # ------------------------------------------------------------ 生小肥鱼 / 多窗
     def spawn_pet(self) -> None:
-        """按 feature flag 决定是 spawn 新进程还是进程内建第二个 PetInstance。
+        """生小肥鱼：统一走进程内新窗，不再拉起独立桌宠进程。
 
-        flag ``experimental_single_process_spawn`` 默认关 = 走 ``launch_new_pet``
-        独立进程路径（行为与现状逐位一致）。开 = 进程内创建新窗（批5.2 spike）。
+        4.4b：多进程多宠退役层删除后，多宠的唯一形态是进程内多窗/多 sprite。
+        ``--slot`` / ``DSH_PET_SPAWN_OFFSET_INDEX`` 兼容解析保留（T5），
+        落点错峰仍按 spawn 序号计算。
         """
-        if not self._single_process_spawn:
-            try:
-                self._spawned_pet_count += 1
-                launch_new_pet(self._spawned_pet_count)
-            except OSError as exc:
-                self._spawned_pet_count = max(0, self._spawned_pet_count - 1)
-                logging.exception('生小肥鱼失败')
-                _show_startup_error('生小肥鱼失败', str(exc))
-            return
         try:
             self._spawned_pet_count += 1
             self.spawn_in_process_window(self._spawned_pet_count)
@@ -2632,45 +3095,36 @@ class AppShell:
 
         批 I：按用户要求去掉确认框与结果框——操作本身不删数据、子肥鱼可
         随时重新生成，无需确认；子肥鱼消失本身就是反馈，结果写日志。
+        4.4a：跨进程文件级清理（``child_pet_cleanup``：runtime 标记 + taskkill）
+        停用——退役层删除后不存在跨进程子宠，进程内链式关闭即全部。
+        关闭走 QTimer.singleShot(0) 逐只链式执行（每只之间让出事件循环），
+        每窗的重资源回收（writer 关闭/agent shutdown）挪到后台 reaper 线程
+        （批 G，_on_window_exit_requested 的 defer_heavy_teardown 路径），
+         UI 线程只留关窗/摘标记等毫秒级必做步骤。
         """
-        from .child_pet_cleanup import clear_spawned_pets as cleanup_slots
-
         if self._clear_spawned_pending:
             # 链式关闭进行中：重复点击直接忽略（同一任务会清干净，保持幂等）。
             return
-        # 单进程模式前置：进程内「非主窗」小肥鱼（PID=主进程）会被文件级清理的
-        # pid==os.getpid() 自我保护跳过而永远清不掉，先按进程内子窗登记表枚举。
-        # 关闭走 QTimer.singleShot(0) 逐只链式执行（每只之间让出事件循环），且
-        # 每窗的重资源回收（writer 关闭/agent shutdown/碰撞会话停止，各有界
-        # 阻塞秒级）挪到后台 reaper 线程（批 G，_on_window_exit_requested 的
-        # defer_heavy_teardown 路径），UI 线程只留关窗/摘标记等毫秒级必做步骤。
-        # 全部关完再走文件级清理杀多进程子进程（同样在后台线程跑，taskkill
-        # 不再冻 UI）。两条路径都幂等，清完不留 runtime 标记残留。
         refs = [weakref.ref(inst) for inst in self._instances
                 if inst is not self.instance]
-        # 进行中标记两条路径统一前置：链式与纯文件级清理都覆盖（批 G 起文件级
-        # 清理改后台线程，执行期间重复点击同样忽略）。
-        self._clear_spawned_pending = True
         if not refs:
-            self._finish_clear_spawned_pets(cleanup_slots)
             return
-        QTimer.singleShot(
-            0, lambda: self._clear_spawned_chain(refs, 0, cleanup_slots))
+        self._clear_spawned_pending = True
+        QTimer.singleShot(0, lambda: self._clear_spawned_chain(refs, 0))
 
-    def _clear_spawned_chain(self, refs, index: int, cleanup_slots) -> None:
+    def _clear_spawned_chain(self, refs, index: int) -> None:
         """逐只异步关闭进程内子窗（每只之间让出事件循环，UI 不冻结）。
 
-        窗口已销毁（弱引用失效）或已被关闭（不在登记表）则跳过；链尾执行
-        文件级收尾（杀残余多进程子进程）并弹结果框。异常只记录不中断，
-        保证进行中标记一定复位。
+        窗口已销毁（弱引用失效）或已被关闭（不在登记表）则跳过；链尾复位
+        进行中标记。异常只记录不中断，保证标记一定复位。
         """
         if index >= len(refs):
-            self._finish_clear_spawned_pets(cleanup_slots)
+            self._clear_spawned_pending = False
             return
         inst = refs[index]()
         if inst is not None and inst in self._instances:
             try:
-                # 批 G：链式路径重资源回收后台化（writer/agent/碰撞的有界 join
+                # 批 G：链式路径重资源回收后台化（writer/agent 的有界 join
                 # 移出 UI 线程），每窗 UI 线程单步阻塞压到毫秒级。
                 self._on_window_exit_requested(inst, defer_heavy_teardown=True)
             except Exception:
@@ -2678,71 +3132,26 @@ class AppShell:
                     "清除子肥鱼：关闭进程内小肥鱼失败 (slot=%s)",
                     getattr(inst, "slot_id", None))
         QTimer.singleShot(
-            0, lambda: self._clear_spawned_chain(refs, index + 1, cleanup_slots))
-
-    def _finish_clear_spawned_pets(self, cleanup_slots) -> None:
-        """链式关闭收口：文件级退出残余子进程，并复位进行中标记。
-
-        批 G：文件级清理（逐 pid taskkill）移到后台线程——在 UI 线程同步执行
-        会冻结主桌宠（实机复现）；完成经 QTimer.singleShot 回 UI 线程复位标记。
-        批 I：按用户要求去掉结果弹窗——子肥鱼消失本身就是反馈，结果写日志。
-        """
-        config_dir = self.config.dir
-
-        def sweep() -> None:
-            try:
-                result = cleanup_slots(config_dir)
-            except Exception:
-                logging.exception("退出子肥鱼：文件级清理失败")
-                result = {"killed_pids": [], "failed_pids": []}
-            logging.info(
-                "退出子肥鱼：已退出 %d 只，未能退出 %d 只",
-                len(result.get("killed_pids", [])),
-                len(result.get("failed_pids", [])))
-            # 带 context 的 singleShot：从后台线程安全投递回 UI 线程。
-            QTimer.singleShot(0, self.app, self._clear_spawned_sweep_done)
-
-        threading.Thread(
-            target=sweep, daemon=True, name="pet-clear-spawned-sweep").start()
-
-    def _clear_spawned_sweep_done(self) -> None:
-        """文件级清理完成回调（UI 线程）：复位进行中标记。"""
-        self._clear_spawned_pending = False
+            0, lambda: self._clear_spawned_chain(refs, index + 1))
 
     def spawn_in_process_window(self, offset_index: int = 1) -> PetInstance:
-        """批5.2 spike：进程内创建第二个 PetInstance（不共享库/Config/SessionStore）。
+        """进程内创建第二个 PetInstance（不共享库/Config/SessionStore）。
 
-        - 新 slot 身份：经 slot_manager 抢占下一个空闲 slot（单进程内 slot 语义
-          从「进程互斥」变「窗身份分配」，文件锁释放语义不变）；
+        - 新 slot 身份：4.4a 起走 **D6 无锁分配器**（``overlay_spawn_state.
+          allocate_slot``，与 overlay 拓扑同一套口径），不再抢 slot-N.lock
+          ——多进程多宠退役层的文件锁不再被任何路径使用；
         - 独立 Config(instance_id=slot-N)，显式传 instance_id（不再依赖进程级
           DSH_PET_INSTANCE），独立 MovieLibrary / PetWindow / SessionStore 目录；
-        - 碰撞仍走 QLocal 回环：新窗 attach 到**本窗自持**的 collision_ipc（每窗一个，
-          P1-1），runtime_id 由自身 instance_id 派生，同进程多 session 经
-          `_local_election_names` 收敛成「一协调者 + N 客户端」。
+        - 碰撞不再经 QLocal 回环：多宠碰撞归 overlay 拓扑的 sprite 世界；
+          legacy 的多窗是渲染面（捕获模式收窄），窗间不做跨进程冲量交换。
         """
         config_dir = self.config.dir
-        # 单进程内 slot 语义 = 窗身份分配：不能再用跨进程文件锁做同进程竞争
-        #（同一进程可再次锁住已持有的 slot-N 锁，导致两窗撞同一 slot）。先
-        # 收集本进程已占用的 slot_id，再逐位申请未被占用且未被它进程持有的。
-        used = {inst.slot_id for inst in self._instances}
-        slot_id = None
-        slot_handle = None
-        candidate = 0
-        # P2-1：slot 扫描加上限（max_scan_slots=128）。超限/持续失败抛
-        # SlotManagerError，由 spawn_pet 的 except 捕获走 _show_startup_error，
-        # 不许无限循环（持续 IO 失败 / 128 个槽全部被占时）。
-        while candidate < 128:
-            if candidate not in used:
-                try:
-                    slot_id, slot_handle = slot_manager_mod.acquire_pet_slot(
-                        config_dir, preferred_slot=candidate)
-                    break
-                except slot_manager_mod.SlotLockError:
-                    pass
-            candidate += 1
-        else:
-            raise slot_manager_mod.SlotManagerError(
-                "进程内生小肥鱼：前 128 个槽位均被占用或无法获取锁")
+        from . import overlay_spawn_state as overlay_spawn_state_mod
+
+        # 进程内 slot 语义 = 窗身份分配：已占用 = 目录内既有 config-slot-N.json
+        # 身份 ∪ 本进程活跃窗身份；分配单调增长，永不与保留身份相撞。
+        used = {inst.slot_id for inst in self._instances if inst.slot_id is not None}
+        slot_id = overlay_spawn_state_mod.allocate_slot(config_dir, active_slots=used)
         instance_id = slot_manager_mod.slot_to_instance_id(slot_id)
         # 新 slot 落种：走共享落种函数。无存档 slot 按主设置落种；存在但未在该
         # 子肥鱼设置界面自定义过的 slot 按主设置刷新；已自定义（user_customized）
@@ -2755,12 +3164,10 @@ class AppShell:
         character_id = str(new_config.get('character', catalog.DEFAULT_CHARACTER))
         inst = PetInstance(
             self, new_config, enable_chat=self.enable_chat,
-            slot_handle=slot_handle, slot_id=slot_id, spawn_offset=offset_index,
+            slot_id=slot_id, spawn_offset=offset_index,
         )
         # 批5.3：P1-6 移除——进程内多窗不再停用任何窗的共享解码；新窗与主窗
         # 共用同一进程级 DecodeFanoutHub（同素材首窗发布、同速窗进食）。
-        # 新窗自持碰撞会话需先 start，新窗 attach 才走 QLocal 收敛。
-        inst.collision_ipc.start()
         # build_tray=False：非主窗不再新建/替换进程级托盘，改由 _refresh_tray_menu 聚合。
         inst._build_window(character_id, build_tray=False)
         self._instances.append(inst)
@@ -2852,24 +3259,7 @@ class AppShell:
                  lambda: self._close_instance_session_writer(instance)))
         else:
             self._close_instance_session_writer(instance)
-        if instance.slot_handle is not None:
-            try:
-                slot_manager_mod._unlock_file(instance.slot_handle)
-            except Exception:
-                pass
-            instance.slot_handle = None
-        # 批5.2 P1-1：停本窗自持的碰撞会话（只影响本窗）。批5.3 起 broker_facade
-        # 指向进程级 DecodeFanoutHub，其 shutdown() 为 no-op——保留调用仅为
-        # 形态对齐，不会误停共享 hub。
-        # 批 G：defer 模式下碰撞会话的 stop（QThread.wait 最多 3s+1s）挪到
-        # reaper 线程；stop 内部对 worker 的调用是 queued 语义，线程安全。
-        if defer_heavy_teardown:
-            heavy_jobs.append(("停止碰撞会话", instance.collision_ipc.stop))
-        else:
-            try:
-                instance.collision_ipc.stop()
-            except Exception:
-                logging.exception("退出这只：停止碰撞会话失败")
+        # 4.4a：本窗不再持有 slot 文件锁与碰撞 IPC 会话（退役层停用）。
         try:
             instance.broker_facade.shutdown()
         except Exception:
@@ -3035,7 +3425,11 @@ class AppShell:
         # Phase 1：即使总开关关闭，用户主动打开面板也需要服务对象（懒创建）。
         self._ensure_todo_service()
         if self.todo_panel is None:
-            dialog = TodoPanelDialog(self, parent=self.win)
+            # parent 必须是 QWidget：overlay 拓扑下 self.win 是 sprite 壳（QObject），
+            # 直接当 parent 会在 QDialog 构造期 TypeError。
+            parent = self.win
+            dialog = TodoPanelDialog(
+                self, parent=parent if isinstance(parent, QWidget) else None)
             dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
             dialog.finished.connect(self._todo_panel_finished)
             self.todo_panel = dialog
@@ -3106,16 +3500,35 @@ class AppShell:
         ]
         position_stack(self._toast_windows)
 
+    def _tray_placeholder_icon(self) -> QIcon:
+        """首帧还没解码时的托盘占位图标：复用既有矢量图标语言，不用新素材。
+
+        刻意不把桌宠窗口传进去取主题色——_build_tray 的调用方可能是非 QWidget
+        的替身窗口（测试），而托盘观感本来就该跟窗口 QSS 无关。
+        """
+        return vector_menu_icon(QWidget(), "pet", 64)
+
     def _build_tray(self, win: PetWindow, tray: QSystemTrayIcon | None = None) -> QSystemTrayIcon:
         # 批5.2：可复用已有托盘（_refresh_tray_menu 传 self.tray），避免多窗各自
         # 建托盘图标；新建时绑定双击切换，复用时不重复连接（activated 只接一次）。
         if tray is None:
-            tray = QSystemTrayIcon(QIcon(win.icon_pixmap()))
+            icon = QIcon(win.icon_pixmap())
+            pending = icon.isNull()
+            if pending:
+                # 首帧还没解码时 icon_pixmap() 是空图：直接拿去建托盘会得到一个
+                # 没有图标的条目（用户反馈「托盘图标消失了」，且此后永不刷新）。
+                # 先用占位图标顶上，首帧就绪后再换角色头像。
+                icon = self._tray_placeholder_icon()
+            tray = QSystemTrayIcon(icon)
             tray.activated.connect(
                 lambda reason: self._toggle_primary_pet_visible()
                 if reason == QSystemTrayIcon.ActivationReason.DoubleClick
                 else None
             )
+            if pending:
+                ready = getattr(win, "frame_ready", None)
+                if ready is not None:
+                    ready.connect(lambda: tray.setIcon(QIcon(win.icon_pixmap())))
 
         def toggle_visible() -> None:
             if win.isVisible():
@@ -3366,18 +3779,28 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
     # 确定配置根目录
     config_dir = _default_base() / APP_DIR_NAME
 
-    # 执行槽位竞争取得排他锁
-    slot_handle = None
-    slot_id = None
+    # D4（PHASE4_DESIGN §4）overlay 拓扑单实例进程门：**先于** slot 竞争。
+    # overlay 双开 = 两个进程各自恢复全部 sprite、位置回写互踩，第二实例必须在
+    # 产生任何配置目录副作用（抢 slot-1、落种 config-slot-N.json）之前退场。
+    # legacy 拓扑（PET_RENDER_TOPOLOGY 未设）下 acquire 返回 None，下面逐行不变。
+    overlay_gate = overlay_gate_mod.acquire_overlay_instance_gate(config_dir)
+    if overlay_gate is not None and not overlay_gate.acquired:
+        # 双击桌面宠物场景：不弹窗、不阻塞，只留痕 + 退出。退出码对齐
+        # pet/__main__.py 的 settings.lock 惯例（「已有实例，本次退出」= 0），
+        # 免得外壳把"第二实例"当启动失败报错。
+        logging.warning(
+            "overlay 拓扑已有实例在运行（门 %s，持有者 pid=%s）：本次启动退出",
+            overlay_gate.path, overlay_gate.holder_pid(),
+        )
+        return overlay_gate_mod.DUPLICATE_EXIT_CODE
+
+    # 4.4a 停用多进程多宠退役层的**槽位文件锁**：main() 不再抢 slot-N.lock
+    #（原语义 = 跨进程竞争「我是第几只」，退役层删除后不复存在）。`--slot`
+    # 兼容解析保留（T5）：旧快捷方式/自启项仍按它选择 config-slot-N.json
+    # 身份；缺省或 D4 门保证的单实例即主身份（slot 0）。
+    slot_id = preferred_slot if preferred_slot is not None else 0
 
     try:
-        try:
-            slot_id, slot_handle = slot_manager_mod.acquire_pet_slot(config_dir, preferred_slot=preferred_slot)
-        except Exception as exc:
-            logging.exception("获取桌宠槽位锁失败")
-            _show_startup_error("dsh-pet-standalone", str(exc))
-            return 1
-
         instance_id = slot_manager_mod.slot_to_instance_id(slot_id)
         os.environ["DSH_PET_INSTANCE"] = instance_id
 
@@ -3400,8 +3823,8 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
         if stale_removed:
             logging.info("已清理 %d 个指向不存在路径的开机自启项", stale_removed)
 
-        controller = AppShell(app, config, enable_chat=enable_chat, slot_handle=slot_handle, slot_id=slot_id,
-                              spawn_offset=_read_spawn_offset_env())
+        controller = AppShell(app, config, enable_chat=enable_chat, slot_id=slot_id,
+                              spawn_offset=_read_spawn_offset_env(), overlay_gate=overlay_gate)
         try:
             controller.start()
         except Exception as exc:
@@ -3412,12 +3835,14 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
         logging.info("进入事件循环")
         return app.exec()
     finally:
-        if slot_handle is not None:
+        # D4：正常退出（app.exec() 返回前 aboutToQuit 已跑完，各窗位置已落盘）
+        # 才释放 overlay 进程门——比 _on_about_to_quit 内更晚，避免"本地还在收尾、
+        # 第二实例已能起来"的位置回写竞态。会话结束路径另见 _on_session_end。
+        if overlay_gate is not None:
             try:
-                slot_manager_mod._unlock_file(slot_handle)
+                overlay_gate.release()
             except Exception:
-                pass
-            slot_handle = None
+                logging.exception("释放 overlay 进程门失败")
 
 
 if __name__ == '__main__':

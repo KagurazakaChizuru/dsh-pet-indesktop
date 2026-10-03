@@ -272,7 +272,7 @@ def test_non_collision_cancel_does_not_arm():
 
 def test_stop_physics_backstop_ends_egg(tmp_path):
     """落地停稳兜底：window._stop_physics 无条件调用 throw_egg.end()。"""
-    from tests.test_collision_window import FakeCollisionSession, FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     from pet.config import Config
     from pet.window import PetWindow
@@ -280,8 +280,7 @@ def test_stop_physics_backstop_ends_egg(tmp_path):
     app = _qapp()
     cfg = Config(str(tmp_path / "cfg.json"))
     cfg.set("collision_enabled", False)
-    session = FakeCollisionSession("pet_egg_stop")
-    win = PetWindow(FakeLibrary(), cfg, collision_session=session)
+    win = PetWindow(FakeLibrary(), cfg)
     win.resize(100, 100)
     win.show()
     app.processEvents()

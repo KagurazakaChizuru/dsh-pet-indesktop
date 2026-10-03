@@ -26,9 +26,9 @@ def _no_real_process_actions(monkeypatch):
     ``listener_pids``（只读反查）不打桩——真有监听进程时它返回真实 PID 是
     无害的，而打桩会让「真实套接字能被反查到」这条用例失去意义。
     """
-    monkeypatch.setattr(hl, "process_command_line", lambda pid: None)
-    monkeypatch.setattr(hl, "_pid_image_path", lambda pid: None)
-    monkeypatch.setattr(hl, "_terminate_process_tree", lambda pid: None)
+    monkeypatch.setattr(hl, "process_command_line", lambda pid, proc=None: None)
+    monkeypatch.setattr(hl, "_pid_image_path", lambda pid, proc=None: None)
+    monkeypatch.setattr(hl, "_terminate_process_tree", lambda pid, proc=None: True)
 
 
 # ------------------------------------------------------------ 表解析（真实字节）
@@ -189,8 +189,9 @@ def test_stop_harness_terminates_and_confirms_port_released(monkeypatch):
     def fake_is_running(port):
         return state["listening"]
 
-    def fake_terminate(pid):
+    def fake_terminate(pid, proc=None):
         state["listening"] = False
+        return True
 
     monkeypatch.setattr(hl, "is_running", fake_is_running)
     monkeypatch.setattr(hl, "listener_pids", lambda port: [13320])
@@ -210,7 +211,7 @@ def test_stop_harness_reports_error_when_port_survives(monkeypatch):
         hl, "process_command_line", lambda pid: "node .../dsh/lib/bin.js web --port 3080"
     )
     monkeypatch.setattr(hl, "_pid_image_path", lambda pid: "node.exe")
-    monkeypatch.setattr(hl, "_terminate_process_tree", lambda pid: None)
+    monkeypatch.setattr(hl, "_terminate_process_tree", lambda pid, proc=None: True)
     status, info = hl.stop_harness()
     assert status == "error"
     assert "仍在监听" in info

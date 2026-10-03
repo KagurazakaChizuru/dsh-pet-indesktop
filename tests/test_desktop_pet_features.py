@@ -604,36 +604,6 @@ def test_icon_composition_ignores_low_alpha_noise_and_fills_canvas():
     assert max(bbox[2] - bbox[0], bbox[3] - bbox[1]) >= 248
 
 
-def test_new_pet_command_relaunches_current_frozen_executable(monkeypatch):
-    from pet import instance_launcher
-
-    monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", "/Applications/dsh-pet.app/Contents/MacOS/dsh-pet")
-    assert instance_launcher.new_pet_command() == [sys.executable]
-
-
-def test_launch_new_pet_uses_detached_process(monkeypatch):
-    from pet import instance_launcher
-
-    captured = {}
-
-    def fake_popen(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        return object()
-
-    monkeypatch.setattr(instance_launcher, "new_pet_command", lambda: ["pet-program"])
-    monkeypatch.setattr(instance_launcher.subprocess, "Popen", fake_popen)
-    instance_launcher.launch_new_pet()
-
-    assert captured["command"] == ["pet-program"]
-    assert captured["kwargs"]["env"]["DSH_PET_SPAWN_OFFSET_INDEX"] == "1"
-    if sys.platform == "win32":
-        assert captured["kwargs"]["creationflags"]
-    else:
-        assert captured["kwargs"]["start_new_session"] is True
-
-
 def test_pet_app_assigns_distinct_offsets_to_spawned_pets(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 
@@ -643,7 +613,8 @@ def test_pet_app_assigns_distinct_offsets_to_spawned_pets(tmp_path, monkeypatch)
 
     app = QApplication.instance() or QApplication([])
     offsets = []
-    monkeypatch.setattr(app_mod, "launch_new_pet", lambda index: offsets.append(index))
+    monkeypatch.setattr(AppShell, "spawn_in_process_window",
+                        lambda self, index=1: offsets.append(index))
     owner = AppShell(app, Config(tmp_path))
     owner.spawn_pet()
     owner.spawn_pet()
@@ -1410,7 +1381,7 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert isinstance(dialog.sidebar, QListWidget)
     assert isinstance(dialog.pages, QStackedWidget)
     # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别"]
+    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_pages
     assert dialog.pages.count() == len(expected_pages)
     assert dialog.search_edit.placeholderText() == "搜索设置…"
@@ -2859,6 +2830,7 @@ def test_macos_dock_icon_policy_tracks_the_saved_visibility_setting():
 
 def test_pet_app_binds_about_to_quit_once_to_current_window(tmp_path, monkeypatch):
     """aboutToQuit 只绑定一次，且触发时保存「当前」有效窗口位置（非已销毁的旧窗口）。"""
+    monkeypatch.setenv("PET_RENDER_TOPOLOGY", "legacy")  # PetWindow 路径测试
     from PySide6.QtWidgets import QApplication
 
     import pet.app as app_mod

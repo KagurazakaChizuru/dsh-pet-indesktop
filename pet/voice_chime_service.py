@@ -678,13 +678,21 @@ class VoiceChimeService:
         设置窗口打开等场景下 window.show_bubble 会被抑制（_bubble_suppressed），
         报时属用户主动关注事件，此时直接经桌宠气泡位（_speech_bubble）展示，
         避免“只听声不见字”。
+
+        飞行期是唯一的例外：这是**瞬时**状态（鱼被撞飞几秒），此时连直写也
+        禁掉（鱼飞行过程中不弹气泡），也不排队、不改道系统通知——一次性播报
+        丢弃即可，落地后正常。判据统一走 ``window_alerts`` 的门禁助手（惰性
+        import：本模块顶层不 import Qt，见文件头）。
         """
         if not self._cfg.get("show_bubble", True):
             return
+        from . import window_alerts
         app = self._app
         win = getattr(app, "win", None)
         if win is not None and win.isVisible():
-            suppressed = bool(getattr(win, "_bubble_suppressed", False))
+            if window_alerts.sprite_in_flight(win):
+                return
+            suppressed = window_alerts.bubble_blocked(win)
             if not suppressed:
                 try:
                     win.show_bubble(text, duration_ms=self.BUBBLE_DURATION_MS)

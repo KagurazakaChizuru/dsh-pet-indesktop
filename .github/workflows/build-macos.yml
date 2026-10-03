@@ -43,7 +43,13 @@ jobs:
       - name: Pytest (main suite)
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest -q --ignore=tests/test_webm_reader_lifecycle.py --ignore=tests/test_webm_clip_lifecycle.py --ignore=tests/test_webm_first_frame_lock.py --ignore=tests/test_low_priority_warm_interaction_yield.py
+        run: python -m pytest -q --ignore=tests/test_webm_reader_lifecycle.py --ignore=tests/test_webm_clip_lifecycle.py --ignore=tests/test_webm_first_frame_lock.py --ignore=tests/test_low_priority_warm_interaction_yield.py --ignore=tests/test_overlay_spawn.py --ignore=tests/test_overlay_lifecycle_gaps.py --ignore=tests/test_sprite_visibility.py --deselect tests/test_frameseq_clip.py::test_retained_frame_is_not_reused_as_frame_zero
+        # 三文件同进程在 macOS 确定性段错误（见 pr-test.yml 同款注释）：拆独立进程照跑
+      - name: Pytest (overlay/visibility trio, split processes)
+        run: |
+          python -m pytest -q tests/test_overlay_spawn.py
+          python -m pytest -q tests/test_overlay_lifecycle_gaps.py
+          python -m pytest -q tests/test_sprite_visibility.py
 
       - name: Pytest (webm lifecycle family, isolated + one retry)
         env:
@@ -54,6 +60,14 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q tests/test_low_priority_warm_interaction_yield.py || python -m pytest -q tests/test_low_priority_warm_interaction_yield.py
+
+      # frameseq 原生崩溃隔离位：肇事者系 test_frameseq_clip.py 单条用例
+      # （verbose 复现钉死；watchdog 族系位置误判已排除，回归主套件）。
+      # 详见 pr-test.yml 同名单元注释，按族先例隔离 + 一次重跑。
+      - name: Pytest (frameseq native-crash isolates, isolated + one retry)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests/test_frameseq_prefetch_watchdog.py tests/test_frameseq_clip.py::test_retained_frame_is_not_reused_as_frame_zero || python -m pytest -q tests/test_frameseq_prefetch_watchdog.py tests/test_frameseq_clip.py::test_retained_frame_is_not_reused_as_frame_zero
 
       # 构建入口与本地完全一致：scripts/build_macos.sh（PyInstaller 打包 +
       # 中文编码自检 + ad-hoc 签名都在脚本内完成），CI 不内联

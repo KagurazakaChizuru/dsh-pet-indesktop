@@ -14,11 +14,14 @@ from __future__ import annotations
 import contextlib
 import datetime
 import json
+import logging
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+from .config import atomic_replace_with_retry
 
 
 # 合法参数范围与默认值常量定义（依据实施手册 §2 与 §3）
@@ -56,6 +59,44 @@ def _clamp(val: Any, default: float, minimum: float, maximum: float) -> float:
 
 def _clamp_int(val: Any, default: int, minimum: int, maximum: int) -> int:
     return round(_clamp(val, default, minimum, maximum))
+
+
+def _state_str(value: Any) -> str:
+    """状态文本字段：只接受 str（None/数字等一律判非法）。"""
+    if not isinstance(value, str):
+        raise TypeError(f"非字符串状态字段: {value!r}")
+    return value
+
+
+def _state_int(value: Any) -> int:
+    """状态整数字段：bool 判非法（True 静默变 1 属错误类型穿透），其余交给 int()。"""
+    if isinstance(value, bool):
+        raise TypeError("bool 不是合法整数状态字段")
+    return int(value)
+
+
+def _state_float(value: Any) -> float:
+    """状态数值字段：bool 判非法（同 _state_int），其余交给 float()。"""
+    if isinstance(value, bool):
+        raise TypeError("bool 不是合法数值状态字段")
+    return float(value)
+
+
+#: 状态文件逐字段类型契约（缺陷 17）：键 → 转换器。
+#:
+#: 背景：加载只判 ``isinstance(raw, dict)`` 时，「合法 JSON + 错字段类型」
+#: （典型 ``{"count": null}``）会整体穿透进内存状态，随后在 allow/consume_budget
+#: 的裸 ``int()``/``float()`` 处以 TypeError 打断调用链（额度门直接抛异常，
+#: 而不是按契约返回 False）。这里逐字段试转换，任一字段失败即整份状态回退
+#: 默认——「半个文件可信」比整个不可信更危险。
+_STATE_FIELDS: dict[str, Callable[[Any], Any]] = {
+    "date": _state_str,
+    "count": _state_int,
+    "last_trigger": _state_float,
+    "last_request": _state_float,
+    "consecutive_failures": _state_int,
+    "paused_until_date": _state_str,
+}
 
 
 def effective_proactive_config(raw: dict | None) -> dict[str, Any]:
@@ -223,18 +264,17 @@ class ProactiveLimiter:
                 fh.close()
 
     def _load_state(self) -> dict[str, Any]:
-        """读取状态，跨天自动重置，损坏自动回退。"""
+        """读取状态，跨天自动重置，损坏/字段类型非法一律回退默认状态。"""
         current_today = self._today_fn()
-        state = self._default_state()
+        raw_state: Any = None
 
         if self.state_path.is_file():
             try:
-                raw = json.loads(self.state_path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    state.update(raw)
-            except (OSError, ValueError, TypeError):
-                # 文件损坏或不可读，使用默认状态
-                pass
+                raw_state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                raw_state = None  # 文件损坏或不可读，使用默认状态
+
+        state = self._coerce_state(raw_state)
 
         # 规则 1：跨天重置 count 与熔断状态
         if state.get("date") != current_today:
@@ -245,16 +285,49 @@ class ProactiveLimiter:
 
         return state
 
-    def _save_state(self, state: dict[str, Any]) -> None:
-        """原子写入状态文件（tmp 名带 PID，避免多实例并发写互相抢临时文件）。"""
+    def _coerce_state(self, raw: Any) -> dict[str, Any]:
+        """把盘上原始对象逐字段转换成合法状态（缺陷 17）。
+
+        非 dict、或任一字段转换失败 → 整份回退默认状态（``_default_state``）；
+        缺键保留默认值；未知键原样保留（旧行为是全量 dict.update，保留可避免
+        丢未来新增字段）。
+        """
+        if not isinstance(raw, dict):
+            return self._default_state()
+        state = self._default_state()
+        for key, convert in _STATE_FIELDS.items():
+            if key not in raw:
+                continue
+            try:
+                state[key] = convert(raw[key])
+            except (TypeError, ValueError):
+                return self._default_state()
+        for key, value in raw.items():
+            if key not in state:
+                state[key] = value
+        return state
+
+    def _save_state(self, state: dict[str, Any]) -> bool:
+        """原子写入状态文件，返回是否写成功（tmp 名带 PID，避免多实例抢临时文件）。
+
+        写盘失败**不再静默吞**：记 warning 并返回 False，调用方据此外报/降级
+        （consume_budget 在持久化失败时 fail-closed，见缺陷 17）。替换走
+        ``config.atomic_replace_with_retry``（骑过 Windows 读句柄造成的瞬时共享
+        冲突，与 Config.save 同一路径）；任何出口都清掉 .tmp，失败残留会污染
+        配置目录。
+        """
+        tmp = self.state_path.with_suffix(f".{os.getpid()}.tmp")
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.state_path.with_suffix(f".{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-            # 在 Windows/POSIX 上安全原子替换
-            os.replace(tmp, self.state_path)
-        except OSError:
-            pass
+            try:
+                tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+                atomic_replace_with_retry(tmp, self.state_path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            logging.warning('主动识屏状态写入失败: %s (%s)', self.state_path, exc)
+            return False
+        return True
 
     def allow(self) -> tuple[bool, str]:
         """判定当前是否允许发起主动识屏请求（跨进程加锁，判定期间状态不被并发改写）。
@@ -319,6 +392,10 @@ class ProactiveLimiter:
 
         预算（count）按真实请求次数计费——一次触发里的多次重试各自占用额度，
         不再只记一次。返回 False 表示当日预算已耗尽，调用方应停止重试。
+
+        持久化失败同样返回 False（fail-closed，缺陷 17）：额度记不上账还放行
+        = 当日上限形同虚设（重启后计数回退），调用方（``vision.consume_budget``
+        钩子）按既有的「预算不可用」分支抛 VisionError 停止本次请求。
         """
         with self._locked():
             state = self._load_state()
@@ -328,8 +405,7 @@ class ProactiveLimiter:
                 return False
             state["count"] = int(state.get("count", 0)) + 1
             state["last_request"] = now
-            self._save_state(state)
-            return True
+            return self._save_state(state)
 
     def record_success(self) -> None:
         """记录一次成功的主动关怀（更新 last_trigger, last_request，清空失败计数）。

@@ -176,17 +176,14 @@ def _close_qt_top_level_widgets():
     try:
         from pet import webm_clip as _webm_clip_mod
         _webm_clip_mod._reset_session_ending_for_tests()
+        # 首帧**跨库共享表**持有 QImage 强引用（同进程多库共用的首帧）：不逐用例
+        # 清空会让上一个用例的首帧常驻到预算耗尽（内存噪声 + 命中计数被前序用例
+        # 污染，用例断言随之不再自洽）。
+        _webm_clip_mod.reset_first_frame_share()
     except Exception:
         pass
-    # collision IPC：stop 仍存活的 CollisionIpcSession（finally 语义）。
-    # 会话若在测试里未 stop，其 QThread 被 GC 时仍在跑 → 后续无关测试的
-    # processEvents 处 native abort（QThread: Destroyed while thread is still
-    # running，崩溃点漂移、Linux exit 139 根因）。
-    try:
-        from pet.collision_ipc import _stop_live_sessions_for_tests
-        _stop_live_sessions_for_tests()
-    except Exception:
-        pass
+    # collision IPC：4.4b 随多进程多宠退役层删除——collision_ipc 会话不再存在，
+    # 对应的 `_stop_live_sessions_for_tests` 收口一并移除。
     try:
         from pet.agent_link import AgentLinkManager, BaseAgentMonitor
         AgentLinkManager._shutdown_live_for_tests()
@@ -211,6 +208,15 @@ def _close_qt_top_level_widgets():
     try:
         from pet.library import MovieLibrary
         MovieLibrary._shutdown_live_for_tests()
+    except Exception:
+        pass
+    # OverlayShell：壳的 tick 驱动器/自言自语计时/监视器/配图加载线程/素材库
+    # 全部要逐测试收口——否则它们漂过整个套件活到进程退出，撞上 Qt 对象树
+    # 拆除就是原生段错误（macOS CI 3/3 同点复现 + Windows 本地 2/12 退出崩；
+    # 崩点随套件进度漂移，与本防线的既有记录同族）。
+    try:
+        from pet.overlay_shell import OverlayShell
+        OverlayShell._shutdown_live_for_tests()
     except Exception:
         pass
     # dsh_state：QTimer 只停了不算完——在途在线探测线程（daemon + 阻塞 socket）

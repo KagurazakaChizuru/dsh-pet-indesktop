@@ -200,3 +200,31 @@ def test_app_create_library_prewarm_derivation(tmp_path, monkeypatch):
     app = app_mod.AppShell(object(), cfg)
     app.instance._create_library("shenshen")
     assert captured["prewarm_policy"] == "full"
+
+
+def test_warm_allowed_reflects_switch_and_hidden_pause(tmp_path, monkeypatch):
+    """库级预热闸门（只读判定）：总开关与隐藏暂停两个来源都要反映出来。
+
+    行为层的两条直提路径（预测预热 / 起飞落地预热）据此决定是否提交，
+    "设置页关闭后停止后台动画预热"与"隐藏期不预热"两个承诺都落在这一处。
+    """
+    lib = _make_lib(tmp_path, monkeypatch)
+    try:
+        assert lib.warm_allowed() is True
+
+        lib.pause_warm()                       # 隐藏 / 锁屏挂起
+        assert lib.warm_allowed() is False
+
+        lib.resume_warm()                      # 恢复显示
+        assert lib.warm_allowed() is True
+
+        lib.set_prewarm_enabled(False, visible=True)   # 设置页关闭预热（内含 pause_warm）
+        assert lib.warm_allowed() is False
+
+        lib.resume_warm()                      # 总开关优先：显示恢复也不放行
+        assert lib.warm_allowed() is False
+
+        lib.set_prewarm_enabled(True, visible=True)    # 可见时重开 → 补跑并放行
+        assert lib.warm_allowed() is True
+    finally:
+        lib.shutdown()

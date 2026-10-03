@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """批5.2a：单进程多窗的进程级共享子系统（agent_link / proactive / 全屏 watcher）。
 
-feature flag ``experimental_single_process_spawn`` 关（现状）时本模块不被实例化
-——每窗各自创建子系统，行为与 a2a3fc5 逐位一致（回退保险）。flag 开（多窗）时
-``AppShell`` 持有一个共享实例，把呈现/探测事件**扇出**到全部窗，同时只运行一份
-监视器/探测线程（省 (N-1) 份重复的后台轮询）。
+4.4b：多进程多宠退役层删除后本模块**常开化**（T6）——``AppShell`` 恒持有一个
+共享实例，把呈现/探测事件**扇出**到全部窗，同时只运行一份监视器/探测线程
+（省 (N-1) 份重复的后台轮询）。历史上由 ``experimental_single_process_spawn``
+feature flag 门控（flag 关 = 每窗各自创建）；该键已随退役层删除。
 
 设计要点（对应 BATCH5_SINGLE_PROCESS_DESIGN §4.7 / §4.8 / §8）：
 - **agent_link**：AppShell 持有一个共享 ``AgentLinkManager``，经 ``MultiWindowProxy``
@@ -29,6 +29,7 @@ from PySide6.QtCore import QObject, Signal
 from . import platform_win
 from . import vision as vision_mod
 from .agent_link import AgentLinkManager
+from .overlay_settings_command import is_overlay_topology
 from .proactive import ProactiveScreenWatcher
 
 log = logging.getLogger("dsh-pet-standalone")
@@ -40,11 +41,31 @@ log = logging.getLogger("dsh-pet-standalone")
 _LIVE_SHARED_SUBSYSTEMS: "weakref.WeakSet[SharedSubsystems]" = weakref.WeakSet()
 
 
+def presentation_targets(shell) -> list:
+    """共享子系统的呈现扇出目标集合（T1 的 ``instances[].win`` 位置 + D0 另一半）。
+
+    legacy 拓扑 = 各窗 ``instances[].win``（PetWindow），逐行不变；overlay
+    拓扑下 ``instances[].win`` **恒为 None**（单合成窗里没有 PetWindow），
+    共享 manager 的扇出集合因此为空 = 联动/主动识屏静默缺失。sprite 世界的
+    等价物是 ``OverlayShell``：它提供 PetWindow 的呈现面（气泡/提醒/联动
+    动作/聚合状态），落点就是主 sprite 的头顶气泡与行为控制器。
+
+    ``_overlay_shell`` 在 ``AppShell.start()`` 才构造（晚于 SharedSubsystems
+    的 ``__init__``），故本函数必须在每次扇出时动态读取，绝不缓存。
+    兼容无该属性的替身 shell（测试 ``_ProxyShell``）。
+    """
+    overlay_shell = getattr(shell, "_overlay_shell", None)
+    if overlay_shell is not None:
+        return [overlay_shell]
+    return [inst.win for inst in shell.instances if inst.win is not None]
+
+
 class MultiWindowProxy:
     """单进程多窗的「窗集合替身」：把单窗接口扇出到全部窗。
 
     生命周期：作为共享 ``AgentLinkManager`` / ``ProactiveScreenWatcher`` 的
-    ``win`` 实参。只读 ``shell._instances``（含各窗 ``win``），不持有窗对象
+    ``win`` 实参。只读 ``shell`` 的呈现目标集合（``presentation_targets``：
+    legacy = ``instances[].win``，overlay = sprite 世界的壳），不持有窗对象
     引用；任一窗退出/重建后自动忽略它（逐窗探活读取）。
 
     呈现类方法只扇出到**可见**窗（隐藏窗不跳舞/不弹泡，与多进程各窗独立显隐
@@ -57,7 +78,8 @@ class MultiWindowProxy:
         self.cfg = shell.config
 
     def _windows(self) -> list:
-        return [inst.win for inst in self._shell.instances if inst.win is not None]
+        # overlay 拓扑 = sprite 世界的壳（presentation_targets 的注释）
+        return presentation_targets(self._shell)
 
     def _visible_windows(self) -> list:
         return [w for w in self._windows() if getattr(w, "isVisible", lambda: True)()]
@@ -252,6 +274,20 @@ class MultiWindowProxy:
         shared = getattr(self._shell, "_shared", None)
         return getattr(shared, "agent_link", None) if shared is not None else None
 
+    @property
+    def hidden_bubble_redirect(self):
+        """隐藏期气泡改道面（``window_alerts.redirect_hidden_bubble`` 读它）。
+
+        **仅 overlay 拓扑转发**：sprite 世界的壳（OverlayShell）提供该面，
+        agent_link 的联动气泡在隐藏期才能落到灵动岛反馈面（4.3 后半）。
+        legacy 拓扑返回 None——共享 proxy 此前不转发该属性，转发就是 legacy
+        行为变化（PetWindow 的注入面由各窗自持），不在本刀范围。
+        """
+        overlay_shell = getattr(self._shell, "_overlay_shell", None)
+        if overlay_shell is None:
+            return None
+        return getattr(overlay_shell, "hidden_bubble_redirect", None)
+
 
 class SharedAgentLinkManager(AgentLinkManager):
     """进程级共享的 ``AgentLinkManager``：呈现扇出 + 生命周期按「任窗仍存活」处理。
@@ -334,6 +370,10 @@ class SharedFullscreenWatcher(QObject):
     可见性；通过 Qt 信号（queued→GUI 线程）扇出到全部注册窗。任一窗的
     ``_on_fullscreen_changed`` / ``_on_cursor_visibility_changed`` 照常处理。
     仅当「任一窗需要」时才真正探测（``_any_wants`` 自省），否则线程空转。
+
+    线程由 ``SharedSubsystems.start()`` 起，**overlay 拓扑不起**（sprite 世界的
+    壳自持 ``FullscreenCursorWatcher``，且不暴露本类自省所需的面 → 本线程只会
+    空转）；legacy 拓扑下各窗 ``_watch_required`` 自省决定是否真探测。
     """
 
     fullscreen_changed = Signal(bool)
@@ -359,7 +399,14 @@ class SharedFullscreenWatcher(QObject):
         self._stop.set()
 
     def _windows(self) -> list:
-        return [inst.win for inst in self._shell.instances if inst.win is not None]
+        # overlay 拓扑下返回 sprite 世界的壳（presentation_targets 的注释）；
+        # 该壳**刻意不暴露** ``auto_hide_fullscreen`` / ``_watch_required`` /
+        # ``_cursor_hidden_passthrough_enabled``——overlay 壳自持一个
+        # ``FullscreenCursorWatcher``（4.1b），共享 watcher 若同时探测就是
+        # 双倍轮询（硬指标③回退）。三个 getattr 缺省为假 → ``_any_wants()``
+        # 恒 False → 探测线程保持 1s 空转，与 overlay 壳构造前（instances
+        # 为空）逐位等价。
+        return presentation_targets(self._shell)
 
     def _any_wants(self) -> bool:
         # 任一窗需要全屏自动隐藏或光标穿透（_watch_required 已含 Windows 平台判定）
@@ -440,7 +487,14 @@ class SharedSubsystems:
         _LIVE_SHARED_SUBSYSTEMS.add(self)
 
     def start(self) -> None:
-        self.fs.start()
+        # overlay 拓扑不启共享全屏 watcher：sprite 世界的壳自持
+        # ``FullscreenCursorWatcher``（4.1b），且刻意不暴露 ``_watch_required``
+        # / ``_cursor_hidden_passthrough_enabled`` / ``auto_hide_fullscreen``
+        # → 本线程的 ``_any_wants()`` 恒 False，只会 1s 一醒地空转到进程退出；
+        # 广播目标 ``instances[].win`` 在 overlay 下也恒为 None（扇出无接收方）。
+        # legacy 拓扑逐位不变（各窗 ``_watch_required`` 自省决定是否真探测）。
+        if not is_overlay_topology():
+            self.fs.start()
 
     def stop_all(self) -> None:
         """进程级收口：停共享定时器/探测线程 + 释放 Qt 生命周期引用。

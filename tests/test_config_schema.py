@@ -72,7 +72,6 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "dynamic_island",
         "edge_probe_enabled",
         "experimental_shared_decode",
-        "experimental_single_process_spawn",
         "facing",
         "ffmpeg_recycle_minutes",
         "first_frame_cache_max_mb",

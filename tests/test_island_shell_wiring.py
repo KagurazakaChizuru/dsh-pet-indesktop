@@ -13,7 +13,6 @@ from PySide6.QtWidgets import QApplication
 
 from pet.app import AppShell
 from pet.chat.service import ChatService
-from pet.collision_ipc import _stop_live_sessions_for_tests
 from pet.config import Config
 
 
@@ -48,7 +47,7 @@ def _teardown_shell(shell) -> None:
             island.hide()
             island.deleteLater()
         ChatService.unregister_global_finished(shell._on_global_chat_finished)
-        _stop_live_sessions_for_tests()
+        # 4.4b：collision_ipc 会话已随退役层删除，无需再收口
         QApplication.processEvents()
 
 
@@ -162,4 +161,246 @@ def test_quiet_balance_refresh_paths(tmp_path, monkeypatch):
     finally:
         shell._balance_busy = False
         _teardown_shell(shell)
+        app.processEvents()
+
+
+def test_toggle_pet_from_island_routes_to_overlay_shell():
+    """GPT 审查阻断：overlay 拓扑 instances[].win 恒为 None，岛单击显隐
+    必须路由到 OverlayShell._toggle_pet_visible（否则岛永远调不动桌宠）。"""
+    shell = AppShell.__new__(AppShell)
+    calls: list = []
+
+    class _OverlayShell:
+        def _toggle_pet_visible(self):
+            calls.append(1)
+
+    shell._overlay_shell = _OverlayShell()
+    shell._instances = []  # overlay 拓扑：win 全 None，旧路径必静默失效
+    shell.island = None
+    AppShell._toggle_pet_from_island(shell)
+    assert calls == [1]
+
+
+def test_aggregate_pet_visible_reads_overlay_window():
+    """聚合可见态在 overlay 拓扑读唯一合成窗（不再恒 False）。"""
+    import types
+
+    shell = AppShell.__new__(AppShell)
+    overlay = types.SimpleNamespace(
+        overlay=types.SimpleNamespace(isVisible=lambda: True))
+    shell._overlay_shell = overlay
+    shell._instances = []
+    assert AppShell._aggregate_pet_visible(shell) is True
+    overlay.overlay = types.SimpleNamespace(isVisible=lambda: False)
+    assert AppShell._aggregate_pet_visible(shell) is False
+
+
+# ---------------------------------------------------------------- overlay 岛墙开关（G1）
+class _IslandOverlayHost:
+    """overlay 拓扑最小宿主：真实 attach_island + 真实 SpriteCollisionWorld。
+
+    ``AppShell._sync_dynamic_island`` 的 overlay 分支只碰四个面：``attach_island``、
+    ``overlay``（桥的原点来源）、``icon_pixmap``（岛头像 provider 兜底）、``driver``
+    （tick 档位的 kinetic 去路，可为 None = 未起 tick）。这里给足这四个面，
+    ``attach_island`` 直接用 ``OverlayShell`` 的真实实现（不是记录入参的假件），
+    碰撞世界也是真实对象——墙成员的注册/注销走真实产品路径。
+    """
+
+    def __init__(self):
+        from pet.overlay_shell import OverlayShell
+        from pet.overlay_window import OverlayWindow
+        from pet.sprite_collision import SpriteCollisionWorld
+
+        self.overlay = OverlayWindow()
+        self.collision = SpriteCollisionWorld()
+        self._sound = None
+        self.driver = None
+        self.island_bridge = None
+        self.attach_island = OverlayShell.attach_island.__get__(self)
+
+    def icon_pixmap(self, _size):
+        return None
+
+
+def _make_overlay_shell(tmp_path, **island_cfg):
+    """overlay 拓扑 AppShell 桩（真实岛 + 真实世界 + 真实 attach_island）。"""
+    cfg = Config(base=tmp_path)
+    cfg.set("dynamic_island", {
+        "enabled": True, "x": 400, "y": 300,
+        **island_cfg,
+    })
+    shell = AppShell.__new__(AppShell)
+    shell.config = cfg
+    shell.island = None
+    shell.island_collision = None
+    shell.instance = None
+    shell._instances = []
+    host = _IslandOverlayHost()
+    shell._overlay_shell = host
+    return shell, host
+
+
+def _teardown_overlay_shell(shell, host) -> None:
+    bridge = getattr(host, "island_bridge", None)
+    if bridge is not None:
+        bridge.close()
+        host.island_bridge = None
+    island = getattr(shell, "island", None)
+    if island is not None and hasattr(island, "_finish_animations"):
+        island._finish_animations()
+    host.overlay.close()
+    _teardown_shell(shell)
+
+
+def test_overlay_island_wall_follows_collision_switch(tmp_path):
+    """G1：岛显示时关掉「岛碰撞」不得挂墙，开/关来回切必须撤墙且不留残留。"""
+    from pet import collision as collision_mod
+
+    app = _qapp()
+    shell, host = _make_overlay_shell(tmp_path, collision_enabled=False)
+    try:
+        shell._sync_dynamic_island()
+        island = shell.island
+        assert island is not None and island.isVisible()  # 岛本体不受该开关影响
+        assert host.island_bridge is None  # 关着：不建桥
+        assert collision_mod.ISLAND_MEMBER_ID not in host.collision._static_members
+        assert host.collision._listeners == []
+        # 关着时岛 hide/show 不得凭空注册（没有桥可复活墙）
+        island.hide()
+        island.show()
+        assert collision_mod.ISLAND_MEMBER_ID not in host.collision._static_members
+
+        # 开：真实桥把真实岛几何注册进真实世界
+        cfg = dict(shell.config.get("dynamic_island"))
+        cfg["collision_enabled"] = True
+        shell.config.set("dynamic_island", cfg)
+        shell._sync_dynamic_island()
+        bridge = host.island_bridge
+        assert bridge is not None
+        assert island.on_geometry_changed == bridge.sync_geometry  # 几何回调归桥
+        g = island.geometry()
+        origin = host.overlay.geometry().topLeft()
+        assert host.collision._static_members.get(collision_mod.ISLAND_MEMBER_ID) == (
+            g.x() - origin.x(), g.y() - origin.y(), g.width(), g.height())
+        assert len(host.collision._listeners) == 1  # 重挂不叠 listener
+
+        # 再关：撤墙 + 桥摘净（切开关不留残留）
+        cfg["collision_enabled"] = False
+        shell.config.set("dynamic_island", cfg)
+        shell._sync_dynamic_island()
+        assert collision_mod.ISLAND_MEMBER_ID not in host.collision._static_members
+        assert host.island_bridge is None
+        assert host.collision._listeners == []
+        assert island.on_geometry_changed is None
+        island.bump(1.0, 0.0, -1.0)  # 岛自身反馈面照常可用
+    finally:
+        _teardown_overlay_shell(shell, host)
+        app.processEvents()
+
+
+def test_overlay_island_wall_defaults_on_without_key(tmp_path):
+    """老配置缺 ``dynamic_island.collision_enabled`` 键 → 按旧契约默认挂墙。"""
+    from pet import collision as collision_mod
+
+    app = _qapp()
+    shell, host = _make_overlay_shell(tmp_path)
+    try:
+        # 绕过 Config 清洗，模拟历史配置文件里没有这个键
+        shell.config.data["dynamic_island"] = {"enabled": True, "x": 400, "y": 300}
+        shell._sync_dynamic_island()
+        assert host.island_bridge is not None
+        assert collision_mod.ISLAND_MEMBER_ID in host.collision._static_members
+    finally:
+        _teardown_overlay_shell(shell, host)
+        app.processEvents()
+
+
+def test_overlay_island_wall_withdrawn_on_island_hide(tmp_path):
+    """开着开关时：岛 hide 撤墙 / show 复墙（桥既有语义，本修复不得破坏）。"""
+    from pet import collision as collision_mod
+
+    app = _qapp()
+    shell, host = _make_overlay_shell(tmp_path, collision_enabled=True)
+    try:
+        shell._sync_dynamic_island()
+        island = shell.island
+        assert collision_mod.ISLAND_MEMBER_ID in host.collision._static_members
+        island.hide()
+        assert collision_mod.ISLAND_MEMBER_ID not in host.collision._static_members
+        island.show()
+        assert collision_mod.ISLAND_MEMBER_ID in host.collision._static_members
+    finally:
+        _teardown_overlay_shell(shell, host)
+        app.processEvents()
+
+
+# ---------------------------------------------------------------- 岛拖拽唤醒 tick（M-1 kinetic）
+class _Clock:
+    """可注入假钟（tick 档位判定用；不 sleep 赌时序）。"""
+
+    def __init__(self, now=1000.0):
+        self.now = float(now)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += float(seconds)
+        return self.now
+
+
+def _drag_event(kind, global_pos, buttons=None):
+    """合成鼠标事件（只在本用例内局部 import Qt）。"""
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+
+    if buttons is None:
+        buttons = Qt.MouseButton.LeftButton
+    return QMouseEvent(kind, QPointF(global_pos), QPointF(global_pos),
+                       Qt.MouseButton.LeftButton, buttons,
+                       Qt.KeyboardModifier.NoModifier)
+
+
+def test_overlay_island_drag_wakes_tick_tier(tmp_path):
+    """岛拖拽必须把 tick 档位同步唤回活跃档（M-1 kinetic）。
+
+    桌宠静止时 tick 会降到 T2（250ms 心跳，基本不跑仿真）；岛拖拽是几何回调
+    驱动的用户输入，不经过 overlay 的鼠标事件（岛是独立顶层窗），没有这条
+    kinetic 通道就没人告诉 tick「有活动」——快速甩岛过鱼可能整个手势期间一次
+    碰撞结算都没发生（用户反馈「拖岛撞鱼没反馈」的档位侧成因）。
+    """
+    from PySide6.QtCore import QEvent, QPoint
+
+    from pet.tick_driver import TickDriver
+    from pet.tick_governor import TIER_ACTIVE, TIER_IDLE_STILL
+
+    app = _qapp()
+    shell, host = _make_overlay_shell(tmp_path)
+    clock = _Clock()
+    driver = TickDriver(clock=clock)
+    host.driver = driver
+    try:
+        shell._sync_dynamic_island()
+        island = shell.island
+        assert host.island_bridge is not None, "岛桥未接线（本用例前提）"
+        host.overlay.show()  # 可见：静默后降到 T2（不可见会降到 T3）
+        driver.attach(host.overlay)
+
+        clock.advance(1.0)
+        driver.on_tick(1 / 60)  # 静默计时起算
+        clock.advance(1.0)
+        driver.on_tick(1 / 60)  # 连续静默 > DOWNGRADE_HOLD_MS → T2
+        assert driver.applied_tier == TIER_IDLE_STILL, "基线：静止桌宠应已降档"
+
+        press = island.pos() + QPoint(60, 20)
+        island.mousePressEvent(_drag_event(QEvent.Type.MouseButtonPress, press))
+        island.mouseMoveEvent(_drag_event(
+            QEvent.Type.MouseMove, press + QPoint(30, 0)))
+        assert island._dragging, "拖拽未起手"
+
+        assert driver.applied_tier == TIER_ACTIVE, \
+            "岛拖拽未唤醒 tick 档位（甩岛过鱼不结算）"
+    finally:
+        driver.stop()
+        _teardown_overlay_shell(shell, host)
         app.processEvents()

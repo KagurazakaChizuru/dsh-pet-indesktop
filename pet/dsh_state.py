@@ -19,7 +19,8 @@ glob ``dsh*.jsonl``，兼容旧版单文件 ``dsh.jsonl``）。桥接插件订�
 - **DSH 异常不拖垮桌宠**：任何 DSH/bridge 异常只记日志，绝不抛到桌宠主线程。
 - 预留多 session 聚合 / subagent / 通知冷却 / 动画映射等扩展点（第一版不实现）。
 
-对外仅通过 ``state_changed`` 信号暴露状态变化；app.py 只负责订阅。
+对外仅通过 ``state_changed`` / ``user_message`` 信号暴露结果；app.py 负责订阅，
+并按功能门（``agent_link.dsh``）决定起停（见 ``AppShell._sync_dsh_state_tracker``）。
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from .agent_link import DirGlobTailer
 log = logging.getLogger("dsh-pet-standalone")
 
 # 存活 tracker 登记（弱引用）：供测试/退出路径统一收口在线探测线程。
-# 与 collision_ipc._live_sessions / agent_link 的 _shutdown_live_for_tests
+# 与 agent_link 的 _shutdown_live_for_tests
 # 同一防线：QTimer 停了还不够——在途 socket 探测线程必须作废其结果，
 # 否则 teardown 里 QObject 销毁后 worker 仍跨线程 emit（macOS 全量 segfault 族）。
 _LIVE_TRACKERS: "weakref.WeakSet[DshStateTracker]" = weakref.WeakSet()
@@ -130,7 +131,9 @@ def map_event_to_state(record: dict) -> Optional[DshState]:
 class DshStateTracker(QObject):
     """DSH 统一状态跟踪器：桥接事件 → 统一状态（edge-trigger + offline 恢复）。
 
-    - 独立于 agent_link 的多 Agent 联动（默认关闭的那套动画联动），始终轻量运行；
+    - 生命周期由 app 侧按功能门掌握：``agent_link.dsh`` 开启时
+      ``AppShell._sync_dsh_state_tracker`` 才 ``start()``（关掉即 ``stop()``）。
+      本类不知道 Config 形状，只收 ``config_dir``；
     - 复用 agent_link.ByteOffsetTailer 读桥接文件、harness_launcher.is_running 探测在线；
     - 任何桥接/DSH 异常只记日志，绝不影响桌宠主循环。
     """

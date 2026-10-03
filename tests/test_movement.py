@@ -136,7 +136,7 @@ def _make_win(tmp_path, monkeypatch, width=1920, vx=0, screen=True):
     只替换窗口自身的几何取数（屏幕、身体框、虚拟位置）——朝向判定与移动计划
     仍走产品代码，`_play_roll`/`_try_move` 都是真实事件路径。
     """
-    from tests.test_collision_window import FakeLibrary
+    from tests.pet_window_fakes import FakeLibrary
 
     cfg = Config(base=tmp_path)
     cfg.set("collision_enabled", False)

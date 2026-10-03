@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -239,6 +240,40 @@ class TestByteOffsetTailer:
         assert len(lines) == 1
         assert json.loads(lines[0])["event"] == "fresh"
 
+    def test_stats_file_once_per_read(self, tmp_path, monkeypatch):
+        """``read_new_lines`` 每拍每文件只 stat 一次（is_file 与 stat 合并）。"""
+        path = tmp_path / "dsh.jsonl"
+        path.write_text('{"event":"one"}\n', encoding="utf-8")
+        tailer = ByteOffsetTailer(path)
+        assert tailer.read_new_lines() == []       # backfill 防护
+
+        stats: list[str] = []
+        real_stat = Path.stat
+
+        def counting_stat(self, *args, **kwargs):
+            stats.append(str(self))
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", counting_stat)
+        path.write_text('{"event":"one"}\n{"event":"two"}\n', encoding="utf-8")
+
+        assert [json.loads(x)["event"] for x in tailer.read_new_lines()] == ["two"]
+        assert stats.count(str(path)) == 1, f"每拍每文件只允许一次 stat，实际 {stats}"
+
+    def test_missing_file_is_silent(self, tmp_path):
+        """文件不存在（未创建/已删除）：单次 stat 失败即按空读返回，不抛。"""
+        tailer = ByteOffsetTailer(tmp_path / "nope.jsonl")
+        tailer._initial_backfill_done = True
+        assert tailer.read_new_lines() == []
+
+    def test_directory_path_is_not_read(self, tmp_path):
+        """同名目录不是普通文件：按「文件不存在」处理（不尝试打开、不抛）。"""
+        target = tmp_path / "dsh.jsonl"
+        target.mkdir()
+        tailer = ByteOffsetTailer(target)
+        tailer._initial_backfill_done = True
+        assert tailer.read_new_lines() == []
+
 
 
 
@@ -253,6 +288,11 @@ class TestDirGlobTailer:
         assert [json.loads(x)["event"] for x in tailer.read_new_lines()] == ["one"]
         second = tmp_path / "dsh-session-2.jsonl"
         second.write_text('{"event":"new-session"}\n', encoding="utf-8")
+        # Windows 目录时间戳惰性更新（本机 _probe_dir_mtime.py 实测 25/50 次不变），
+        # 「建文件 → 目录 mtime 变」不是确定前提；显式推新目录时间戳，确定性制造
+        # 目录变化信号（与 test_directory_change_within_interval_is_discovered 同款）。
+        stat = tmp_path.stat()
+        os.utime(tmp_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
         # Directory change bypasses the long periodic interval; startup
         # backfill still skips content written before this file was discovered.
         assert tailer.read_new_lines() == []
@@ -280,6 +320,202 @@ class TestDirGlobTailer:
         tailer.reset()
         tailer._initial_backfill_done = True
         assert json.loads(tailer.read_new_lines()[0])["event"] == "before-reset"
+
+    def test_scan_interval_skips_repeated_glob_and_stats(self, tmp_path, monkeypatch):
+        """scan_interval 内重复读：不再枚举目录、每个 tail 文件只 stat 一次。
+
+        实机 py-spy：GUI 侧 15.6% 时间耗在这条轮询的 stat 上（本机 stat 病态
+        昂贵）。``scan_interval`` 此前只存不用——每拍全量枚举（最多 64 文件）
+        + 每文件 ``is_file()`` 紧接 ``stat()`` 两次调用。
+        """
+        path = tmp_path / "dsh.jsonl"
+        path.write_text('{"event":"boot"}\n', encoding="utf-8")
+        tailer = DirGlobTailer(tmp_path, scan_interval=60)
+        assert tailer.read_new_lines() == []      # 首次：扫描 + backfill 防护
+
+        scans: list[str] = []
+        real_scandir = os.scandir
+
+        def counting_scandir(target):
+            scans.append(str(target))
+            return real_scandir(target)
+
+        stats: list[str] = []
+        real_stat = Path.stat
+
+        def counting_stat(self, *args, **kwargs):
+            stats.append(str(self))
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(os, "scandir", counting_scandir)
+        monkeypatch.setattr(Path, "stat", counting_stat)
+
+        for _ in range(3):
+            assert tailer.read_new_lines() == []
+
+        assert scans == [], f"scan_interval 内目录未变不得重复枚举，实际 {scans}"
+        assert stats.count(str(path)) == 3, (
+            f"每个 tail 文件每拍只允许一次 stat（is_file+stat 已合并），实际 {stats.count(str(path))}"
+        )
+
+    def test_directory_change_within_interval_is_discovered(self, tmp_path):
+        """扫描间隔未到但目录变了（新文件）：当拍即发现，不吃延迟。
+
+        产品契约是「目录 mtime_ns 变了 → 当拍全量扫，不等 scan_interval」。本机
+        实测（``_probe_dir_mtime.py``）：Windows 的目录时间戳**惰性**更新，
+        「建文件 → 读目录 mtime → 再建文件」两步之间 mtime 有 25/50 次没变——
+        原用例把「当拍即发现」压在这条 OS 时序上，在负载高的机器上会随机变红。
+        这里显式把目录时间戳推到新值，确定性地制造契约前提（断言本身不放宽：
+        夹在 scan_interval=60 中间，只有真·当拍扫才能读到新文件）。
+        """
+        first = tmp_path / "dsh-1.jsonl"
+        first.write_text('{"event":"old"}\n', encoding="utf-8")
+        tailer = DirGlobTailer(tmp_path, scan_interval=60)
+        tailer.read_new_lines()
+        tailer._initial_backfill_done = True      # 关掉新文件回填，直接读内容
+
+        second = tmp_path / "dsh-2.jsonl"
+        second.write_text('{"event":"fresh"}\n', encoding="utf-8")
+        stat = tmp_path.stat()
+        os.utime(tmp_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+        assert tailer._directory_changed() is True
+        assert [json.loads(x)["event"] for x in tailer.read_new_lines()] == ["fresh"]
+
+    def test_scan_interval_elapsed_rescans_without_directory_change(self, tmp_path):
+        """间隔到点必须兜底全量扫描（目录 mtime 分辨率粗的 FS 上仍能发现新文件）。"""
+        tailer = DirGlobTailer(tmp_path, scan_interval=0.0)
+        (tmp_path / "dsh-1.jsonl").write_text("{}\n", encoding="utf-8")
+        tailer.read_new_lines()
+        second = tmp_path / "dsh-2.jsonl"
+        second.write_text('{"event":"late"}\n', encoding="utf-8")
+        tailer._initial_backfill_done = True
+
+        assert [json.loads(x)["event"] for x in tailer.read_new_lines()] == ["late"]
+
+    def test_scan_keeps_active_file_when_stale_names_fill_the_budget(self, tmp_path):
+        """候选集按 **mtime 倒序** 取前 max_files：活会话不得被陈旧文件挤出。
+
+        实机（2026-09-27）：%APPDATA%/dsh-pet-bridge 积了 172 个 09-09 起的陈旧
+        ``dsh-*.jsonl``，旧实现按文件名字典序取前 64 名——活会话文件
+        ``dsh-<大 pid>.jsonl`` 排在 64 名外，每拍白刷 64 个死文件，活的反而读不到。
+        本用例的陈旧文件名（零填充小 pid）名字序全部靠前，只有 mtime 序能把活文件
+        拉进集合。
+        """
+        now = time.time()
+        tailer = DirGlobTailer(tmp_path, scan_interval=0.0, max_files=64)
+        stale = []
+        for i in range(68):
+            path = tmp_path / f"dsh-{i:08d}.jsonl"
+            path.write_text("{}\n", encoding="utf-8")
+            # 2 小时前起、每个错开 1s：都属于「未超龄」的活跃区间（< 24h）
+            stamp = now - 2 * 3600 + i
+            os.utime(path, (stamp, stamp))
+            stale.append(path)
+        live = tmp_path / "dsh-99999999.jsonl"
+        live.write_text('{"event":"live"}\n', encoding="utf-8")
+        os.utime(live, (now, now))
+
+        tailer.read_new_lines()
+
+        assert str(live) in tailer._tailers, "最新写入的活会话文件必须在扫描集合内"
+        assert len(tailer._tailers) == 64
+        assert str(stale[67]) in tailer._tailers, "次新文件保留"
+        assert str(stale[0]) not in tailer._tailers, "最旧的 5 个被挤出预算"
+        assert str(stale[4]) not in tailer._tailers
+
+    def test_scan_drops_only_stale_files_of_dead_writers(self, tmp_path):
+        """超龄（>24h）且写者 pid 已死 → 逐出并清理；其余一律保守保留。
+
+        保守面（都不许被清）：写者仍活着的超龄文件、无 pid 线索的旧版
+        ``dsh.jsonl``、未超龄的死写者文件、判定不了存活性的 pid。
+        """
+        old = time.time() - 3 * 24 * 3600
+        # 2**32-8 超出任何平台的 pid 上限（Linux pid_max ≤ 2**22、Windows pid 按 4 递增），
+        # 保证「写者已死」这一前提是确定的——不赌子进程 pid 复用。
+        dead_pid, alive_but_idle_pid, fresh_pid = 4294967288, 4294967280, 4294967272
+        assert agent_link._bridge_writer_alive(dead_pid) is False, "前提：探活必须判定为已死"
+
+        dead = tmp_path / f"dsh-{dead_pid}.jsonl"
+        dead.write_text("{}\n", encoding="utf-8")
+        os.utime(dead, (old, old))
+
+        idle_writer = tmp_path / f"dsh-{os.getpid()}.jsonl"   # 写者=本进程：活着
+        idle_writer.write_text("{}\n", encoding="utf-8")
+        os.utime(idle_writer, (old, old))
+
+        legacy = tmp_path / "dsh.jsonl"                        # 旧版单实例名：无 pid 线索
+        legacy.write_text("{}\n", encoding="utf-8")
+        os.utime(legacy, (old, old))
+
+        fresh_dead = tmp_path / f"dsh-{fresh_pid}.jsonl"       # 死写者但刚写过
+        fresh_dead.write_text("{}\n", encoding="utf-8")
+
+        tailer = DirGlobTailer(tmp_path, scan_interval=0.0)
+        tailer.read_new_lines()
+
+        assert str(dead) not in tailer._tailers
+        assert not dead.exists(), "陈旧死写者的桥文件应被清理"
+        assert str(idle_writer) in tailer._tailers, "写者还活着：哪怕 24h 无写入也不许清"
+        assert str(legacy) in tailer._tailers, "无 pid 线索的旧版文件保守保留"
+        assert str(fresh_dead) in tailer._tailers, "未超龄的死写者文件保守保留"
+
+    def test_bridge_writer_alive_treats_out_of_range_pid_as_dead(self, monkeypatch):
+        """超出 pid_t 表示范围的 pid：posix ``os.kill`` 抛 OverflowError，判定为已死。
+
+        复现 CI（ubuntu/macos）：``_bridge_writer_alive(2**32-8)`` 返回 None
+        而非 False——OverflowError 非 OSError，穿透 ``pid_alive`` 的捕获后被
+        上层兜底成「判定失败」。本用例在 Windows 上也能钉死这条分支。
+        """
+        def raise_overflow(pid):
+            raise OverflowError("pid is out of range")
+
+        monkeypatch.setattr("pet.slot_manager.pid_alive", raise_overflow)
+        assert agent_link._bridge_writer_alive(4294967288) is False
+
+    def test_scan_keeps_stale_file_when_liveness_cannot_be_decided(self, tmp_path, monkeypatch):
+        """探活判定失败（返回 None）时按保守处理：不清理、仍参与轮询。"""
+        old = time.time() - 3 * 24 * 3600
+        path = tmp_path / "dsh-424242.jsonl"
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (old, old))
+        monkeypatch.setattr(agent_link, "_bridge_writer_alive", lambda pid: None)
+
+        tailer = DirGlobTailer(tmp_path, scan_interval=0.0)
+        tailer.read_new_lines()
+
+        assert str(path) in tailer._tailers
+        assert path.exists()
+
+    def test_scan_cleans_stale_dead_writers_within_per_scan_budget(self, tmp_path):
+        """单拍体检/清理有上限（8 个），但每拍都有进展，几拍内清空。
+
+        上限存在的理由：升级后首拍面对上百个历史死文件时不砸盘，也不为全部
+        历史文件每拍各做一次进程探活（一次判定 = 3 次系统调用）。
+        """
+        old = time.time() - 3 * 24 * 3600
+        stale = []
+        for i in range(20):
+            path = tmp_path / f"dsh-{500000 + i:08d}.jsonl"   # pid 远超平台上限 = 已死
+            path.write_text("{}\n", encoding="utf-8")
+            os.utime(path, (old + i, old + i))
+            stale.append(path)
+        fresh = tmp_path / "dsh-60000000.jsonl"
+        fresh.write_text('{"event":"live"}\n', encoding="utf-8")
+
+        tailer = DirGlobTailer(tmp_path, scan_interval=0.0)
+        tailer.read_new_lines()
+        remaining = [p for p in stale if p.exists()]
+        assert len(remaining) == 20 - agent_link._BRIDGE_STALE_CLEANUP_LIMIT, (
+            f"单拍清理不得超过 {agent_link._BRIDGE_STALE_CLEANUP_LIMIT} 个，"
+            f"实际剩 {len(remaining)}"
+        )
+        assert str(fresh) in tailer._tailers, "活会话文件任何一拍都不得被挤掉"
+
+        for _ in range(3):                     # 每拍 8 个 → 3 拍内清空
+            tailer.read_new_lines()
+        assert [p for p in stale if p.exists()] == []
+        assert str(fresh) in tailer._tailers
 
 
 class TestEventStateNormalization:
@@ -3651,6 +3887,39 @@ class TestSessionNameTruthfulness:
         mgr._dialogue = lambda key, fallback, **kw: (captured.update(kw), fallback)[1]
         mgr._show_model_access_alert("session-abcdef12", 1)
         assert "sessionName" not in captured, "模型访问失败提醒无会话元数据时不得注入 sessionName"
+
+    def test_session_meta_cache_is_bounded(self, tmp_path):
+        """缺陷 23：会话元数据缓存必须有界（FIFO 淘汰最老条目）。
+
+        key 是外部会话 ID，常驻数周按会话数单调增长（此前没有任何删除路径）；
+        同项目其它缓存都有界（webm_clip 首帧共享表 20000 / sound_winmm 池 8）。
+        """
+        mgr = self._make(tmp_path)
+        limit = type(mgr)._SESSION_CACHE_MAX
+        for i in range(limit + 8):
+            mgr._on_session_meta(
+                "dsh", {"sessionId": f"s-{i:04d}", "sessionName": f"会话{i}"})
+
+        cache = mgr._session_meta_cache
+        assert len(cache) == limit, "元数据缓存必须封顶"
+        assert "s-0000" not in cache and "s-0007" not in cache, "最老条目必须被淘汰"
+        newest = f"s-{limit + 7:04d}"
+        assert newest in cache, "近期条目必须保留"
+        # 读路径行为不变：命中的元数据照常解析
+        assert mgr.get_session_display_name(newest) == f"会话{limit + 7}"
+        assert mgr._session_name_or_empty(newest) == f"会话{limit + 7}"
+
+    def test_exploration_names_cache_is_bounded(self, tmp_path):
+        """缺陷 23：探索会话显示名缓存同一 FIFO 口径（同样只增不减）。"""
+        mgr = self._make(tmp_path)
+        limit = type(mgr)._SESSION_CACHE_MAX
+        for i in range(limit + 8):
+            mgr._exploration_name({}, f"k-{i:04d}")
+
+        names = mgr._exploration_names
+        assert len(names) == limit, "探索显示名缓存必须封顶"
+        assert "k-0000" not in names, "最老条目必须被淘汰"
+        assert names[f"k-{limit + 7:04d}"] == "DSH", "近期条目必须保留且值不变"
 
 
 class TestInstallFinishedGuard:

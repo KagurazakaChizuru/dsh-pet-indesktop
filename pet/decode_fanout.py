@@ -372,9 +372,9 @@ class _Source:
 class DecodeFanoutHub:
     """进程级同角色共享解码链编排器（AppShell 持有）。
 
-    ``enabled`` 门控：由 ``experimental_shared_decode``（默认开）且
-    ``experimental_single_process_spawn``（多窗）双门快照决定。门关 = 每窗
-    独立解码（批5.2 形态），``shareable_start`` 恒返回 ``'local'``。
+    ``enabled`` 门控：由 ``experimental_shared_decode``（默认开）单门决定
+    （4.4b：多窗常开化后 `experimental_single_process_spawn` 键已删）。门关 =
+    每窗独立解码，``shareable_start`` 恒返回 ``'local'``。
 
     线程模型：``shareable_start``/``shareable_end``/``_report_desired_throttle``
     全在 GUI 线程（单进程单 GUI 线程）；``_SourceSink.on_frame`` 在源窗 reader

@@ -373,9 +373,9 @@ class TestDestroyedFallback:
 class TestCloseEventStopsMonitors:
     def test_window_close_stops_agent_monitors(self, tmp_path, app):
         """窗口 closeEvent 会停掉全部 Agent 监视器 worker。"""
-        from tests.test_collision_window import _make_pet_window
+        from tests.pet_window_fakes import make_pet_window
 
-        win, _ = _make_pet_window(tmp_path, "b9-close")
+        win = make_pet_window(tmp_path, "b9-close")
         # Phase 1：默认 Agent 联动全关，窗口不会自动创建管理器；测试显式装配。
         mgr = win._ensure_agent_link_manager()
         mon = mgr.monitors["dsh"]

@@ -67,8 +67,13 @@ def test_concurrent_send_keeps_both_workers_in_set_and_cancels_old():
     # 清理退出：shutdown 会置 cancel 并 wait(1500)，worker 收到 cancel 退出后 emit finished
     ok = service.shutdown()
     assert ok is True
-    # 由于 finished 槽函数挂在 Qt.QueuedConnection 上，需 processEvents 驱动槽函数执行 discard
-    app.processEvents()
+    # 由于 finished 槽函数挂在 Qt.QueuedConnection 上，需 processEvents 驱动槽函数执行
+    # discard；单次 processEvents 可能抢在事件投邮之前（满载 macOS CI 实测一红），
+    # 宽预算轮询驱动事件循环直到集合排空（与同文件 test_worker_finished 同款）。
+    deadline = time.time() + 5.0
+    while len(service._workers) != 0 and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
     assert len(service._workers) == 0
 
 

@@ -316,8 +316,8 @@ class WindowFeatureGateMixin:
            短路，reader 自此不会被复活；
         3. ``shutdown_music_lyric()``：歌词的 1s 轮询会在 GUI 线程起
            ``asyncio.run`` + WinRT SMTC 调用，关机窗口期内同样不该再有生产者；
-        4. ``detach_collision_session()`` 关闭本窗 IPC 端点（避免关机期 socket
-           半关闭告警），与 closeEvent 的收尾保持一致。
+        4. ``detach_decode_sessions()`` 收尾本窗共享解码 broker 会话（发布/订阅
+           钩子摘除），与 closeEvent 的收尾保持一致。
 
         不调 ``close()``：会话结束时进程随即退出，closeEvent 的写盘/销毁链既非
         必需又会拖长清理窗口。每步独立兜异常（半销毁窗口不得阻断其余收口）。
@@ -342,11 +342,11 @@ class WindowFeatureGateMixin:
         except Exception:
             logging.getLogger(__name__).debug("会话结束时停止歌词轮询失败", exc_info=True)
         try:
-            detach = getattr(self, "detach_collision_session", None)
+            detach = getattr(self, "detach_decode_sessions", None)
             if callable(detach):
                 detach()
         except Exception:
-            logging.getLogger(__name__).debug("会话结束时断开碰撞会话失败", exc_info=True)
+            logging.getLogger(__name__).debug("会话结束时收尾解码会话失败", exc_info=True)
 
     def _effects_skip_turn_facing(self) -> bool:
         return self._effects_probe_active()

@@ -716,7 +716,21 @@ def play_click_sound(path: Path | str, volume: float = 1.0) -> bool:
 # 无状态的纯 helper 与解析 API（不触碰池状态，保持模块级）。
 # ---------------------------------------------------------------------------
 
+_SOUND_CACHE_DIR: Path | None = None
+
+
 def _sound_cache_dir() -> Path:
+    """音效缓存目录（进程内只解析一次）。
+
+    ``QStandardPaths.writableLocation`` + ``mkdir`` 每次调用实测 0.25ms
+    （``.scratch/windows-parity-20260926-a/fix-20260928-C1/bench-before.json``），
+    而本函数在碰撞事件链上每个合格事件都会被 ``_cache_path`` 调一次（实机密集
+    碰撞每秒最多 12.5 次）。QStandardPaths 的结果在进程内稳定（首个调用发生在
+    ``QApplication`` 命名之后），故缓存；测试用 ``_reset_caches_for_tests()`` 复位。
+    """
+    global _SOUND_CACHE_DIR
+    if _SOUND_CACHE_DIR is not None:
+        return _SOUND_CACHE_DIR
     try:
         from PySide6.QtCore import QStandardPaths
         base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
@@ -725,6 +739,7 @@ def _sound_cache_dir() -> Path:
     root = Path(base) if base else Path(tempfile.gettempdir()) / "dsh-pet"
     result = root / "sounds_cache"
     result.mkdir(parents=True, exist_ok=True)
+    _SOUND_CACHE_DIR = result
     return result
 
 
@@ -738,8 +753,16 @@ def _cache_path(source: Path) -> Path:
     # (path, mtime, size) memo 只算一次——用户自定义音效包可能含大文件，
     # 不能每次点击都整读一遍（实审 P2-5）。读不到内容时退回 stat 键，
     # 绝不让缓存键计算炸掉播放路径。
+    #
+    # 键里的路径用 absolute() 而不是 resolve()：resolve 在 Windows 上是
+    # GetFinalPathName 系统调用（实测 0.12ms/次，一次 _cache_path 付两次），
+    # 而它只用于 memo 索引——摘要取的是内容哈希、落盘名只用 stem，换写法/相对
+    # 路径引用同一文件最多多算一次内容哈希，输出逐位不变。碰撞事件链上每个合格
+    # 事件要付 2 次 _cache_path（press+release），实机密集碰撞每秒最多 12.5 次。
+    # 用 pathlib 的 absolute()：纯路径拼装、不碰文件系统，也不需要本模块的 os
+    # 名字（既有用例把 ``click_sound.os`` 替成只带 name 的替身来伪造平台）。
     stat = source.stat()
-    memo_key = (str(source.resolve()), stat.st_mtime_ns, stat.st_size)
+    memo_key = (str(source.absolute()), stat.st_mtime_ns, stat.st_size)
     digest = _DIGEST_MEMO.get(memo_key)
     if digest is None:
         try:
@@ -814,7 +837,7 @@ def resolve_builtin_sound(sound_id: str) -> Path | None:
     if s_id.startswith("builtin:"):
         s_id = s_id[len("builtin:"):]
 
-    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    root = _sounds_root()
     sounds_dir = root / "assets" / "sounds"
 
     # Agent 音效别名或直接文件名
@@ -837,17 +860,40 @@ def resolve_builtin_sound(sound_id: str) -> Path | None:
 
 _duck_candidates_cache: dict[str, tuple[Path, ...]] = {}
 
+#: 音源根目录缓存：键 = sys._MEIPASS 的当前值（None = 源码运行）
+_SOUNDS_ROOT_MEMO: dict[object, Path] = {}
+
+
+def _sounds_root() -> Path:
+    """内置音源根目录（``sys._MEIPASS`` 或源码树根），每个 _MEIPASS 只 resolve 一次。
+
+    ``Path(__file__).resolve().parents[1]`` 在 Windows 上是一次 GetFinalPathName
+    系统调用（实测 0.22ms），而它此前是 ``getattr(sys, "_MEIPASS", <表达式>)``
+    的**缺省实参**——即使打包运行（``_MEIPASS`` 存在）也会被求值，于是碰撞事件
+    链上每个合格事件都白付一次（bench-before.json：``resolve_click_sound_candidates``
+    0.27ms/次）。包路径在进程内不变，故缓存。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    cached = _SOUNDS_ROOT_MEMO.get(meipass)
+    if cached is None:
+        cached = Path(meipass) if meipass else Path(__file__).resolve().parents[1]
+        _SOUNDS_ROOT_MEMO[meipass] = cached
+    return cached
+
 
 def _reset_caches_for_tests() -> None:
     """仅测试用：清空模块级解析缓存（生产进程内缓存随包静态，无需失效）。"""
     _duck_candidates_cache.clear()
+    _SOUNDS_ROOT_MEMO.clear()
+    global _SOUND_CACHE_DIR
+    _SOUND_CACHE_DIR = None
 
 
 def _duck_candidates(duck_dir: Path) -> list[Path]:
     """内置小鸭包候选列表（带进程级缓存）。
 
     包内素材是打包资源，运行期不会变；但点击（window 每次按下/确认点击）与
-    碰撞命中（collision_client/island_collision 每次真撞）都会走到这里，
+    碰撞命中（sprite 世界 / 岛墙每次真撞）都会走到这里，
     不缓存就是 GUI 线程上每次命中一次目录扫描——碰撞瞬时尖峰来源之一。
     返回副本，调用方的改动不污染缓存。
     """
@@ -872,7 +918,7 @@ def resolve_click_sound_candidates(pack: dict | None, data_dir: Path | None = No
     pack_id = str(pack.get("id") or "default").strip()
     path_str = str(pack.get("path") or "").strip()
 
-    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    root = _sounds_root()
     sounds_dir = root / "assets" / "sounds"
 
     if kind == "builtin":

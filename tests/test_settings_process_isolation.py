@@ -575,3 +575,150 @@ def test_settings_standalone_module_does_not_import_heavy_modules():
             continue
         assert "voice_chime_service" not in stripped, f"settings_standalone.py:{lineno} 顶层 import 回潮"
         assert "pet.app" not in stripped, f"settings_standalone.py:{lineno} 顶层 import 回潮"
+
+
+# ------------------------------------------------- 7. D12「退出子肥鱼」指令分流
+
+def _clear_dialog(config):
+    """standalone 设置页（无 parent、无 PetWindow 回调面）= 独立设置进程形态。"""
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    _qapp()
+    return ModernSettingsDialog(config, include_ai=False, standalone=True)
+
+
+def test_clear_spawned_pets_writes_overlay_command(tmp_path, monkeypatch):
+    """overlay 拓扑：写指令文件（主进程消费），不再走 taskkill 回退。"""
+    from pet import overlay_settings_command as cmd
+
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, cmd.TOPOLOGY_OVERLAY)
+    config = Config(base=tmp_path)
+    dialog = _clear_dialog(config)
+    try:
+        dialog._on_clear_spawned_pets()
+        command = cmd.read_command(config.dir)
+        assert command is not None, "overlay 拓扑必须写下指令文件"
+        assert command["command"] == cmd.CMD_EXIT_SPAWNED_PETS
+        assert command["target"] is None                # 主身份 = 全部子肥鱼
+    finally:
+        dialog.deleteLater()
+        cmd.command_path(config.dir).unlink(missing_ok=True)
+
+
+def test_clear_spawned_pets_child_config_targets_its_slot(tmp_path, monkeypatch):
+    """子肥鱼的设置页（--instance slot-N）写下 target=slot-N：只退那一只。"""
+    from pet import overlay_settings_command as cmd
+
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, cmd.TOPOLOGY_OVERLAY)
+    config = Config(base=tmp_path, instance_id="slot-2")
+    dialog = _clear_dialog(config)
+    try:
+        dialog._on_clear_spawned_pets()
+        assert cmd.read_command(config.dir)["target"] == 2
+    finally:
+        dialog.deleteLater()
+        cmd.command_path(config.dir).unlink(missing_ok=True)
+
+
+def test_clear_spawned_pets_legacy_also_uses_command_channel(tmp_path, monkeypatch):
+    """4.4a：legacy 拓扑同样走 D12 指令通道（不再 taskkill 子进程）。"""
+    from pet import overlay_settings_command as cmd
+
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    config = Config(base=tmp_path)
+    dialog = _clear_dialog(config)
+    try:
+        dialog._on_clear_spawned_pets()
+        command = cmd.read_command(config.dir)
+        assert command is not None, "legacy 拓扑也必须写下指令文件"
+        assert command["command"] == cmd.CMD_EXIT_SPAWNED_PETS
+        assert command["target"] is None
+    finally:
+        dialog.deleteLater()
+        cmd.command_path(config.dir).unlink(missing_ok=True)
+
+
+def test_clear_spawned_pets_legacy_child_config_targets_its_slot(tmp_path, monkeypatch):
+    """4.4a：legacy 子肥鱼设置页写 target=slot-N（只退那一只，不再静默早退）。"""
+    from pet import overlay_settings_command as cmd
+
+    monkeypatch.delenv(cmd.ENV_TOPOLOGY, raising=False)
+    config = Config(base=tmp_path, instance_id="slot-1")
+    dialog = _clear_dialog(config)
+    try:
+        dialog._on_clear_spawned_pets()
+        assert cmd.read_command(config.dir)["target"] == 1
+    finally:
+        dialog.deleteLater()
+        cmd.command_path(config.dir).unlink(missing_ok=True)
+
+
+def test_clear_spawned_pets_parent_callback_still_wins(tmp_path, monkeypatch):
+    """进程内设置页（有 PetWindow 回调）优先走回调，指令通道不碰。"""
+    from types import SimpleNamespace
+
+    from pet import overlay_settings_command as cmd
+
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, cmd.TOPOLOGY_OVERLAY)
+    config = Config(base=tmp_path)
+    dialog = _clear_dialog(config)
+    calls = []
+    monkeypatch.setattr(dialog, "parentWidget",
+                        lambda: SimpleNamespace(on_clear_spawned_pets=lambda: calls.append(1)))
+    try:
+        dialog._on_clear_spawned_pets()
+        assert calls == [1]
+        assert not cmd.command_path(config.dir).exists()
+    finally:
+        dialog.deleteLater()
+
+
+def test_clear_spawned_pets_write_failure_is_not_fatal(tmp_path, monkeypatch, caplog):
+    """指令写失败（只读盘/占位文件）：留日志、不抛、不误回退杀进程。"""
+    import logging
+
+    from pet import overlay_settings_command as cmd
+
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, cmd.TOPOLOGY_OVERLAY)
+    config = Config(base=tmp_path)
+    dialog = _clear_dialog(config)
+    monkeypatch.setattr(cmd, "write_command", lambda *a, **k: False)
+    try:
+        dialog._on_clear_spawned_pets()          # 不抛
+    finally:
+        dialog.deleteLater()
+
+
+def test_clear_spawned_pets_chain_consumed_by_overlay_shell(tmp_path, monkeypatch):
+    """全链：设置页写指令 → OverlayShell 消费 → 子肥鱼真的退出（无真进程）。"""
+    import tests.test_overlay_window_capabilities as cap
+    import tests.test_sprite_menu_facade as fac
+    from pet import overlay_settings_command as cmd
+    from pet.overlay_shell import OverlayShell
+    from pet.pet_sprite import PetSprite
+
+    monkeypatch.setenv(cmd.ENV_TOPOLOGY, cmd.TOPOLOGY_OVERLAY)
+    from pet.config import Config as RealConfig
+
+    config = RealConfig(base=tmp_path)
+    instance = cap.CapInstance(config)
+    screen = cap.FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040))
+    shell = OverlayShell(
+        QApplication.instance() or QApplication([]), instance, screen=screen,
+        sprite_factory=lambda lib, pos, scale: PetSprite(lib, pos=pos, scale=scale))
+    shell.lib = fac.RichLibrary()
+    shell.sprite.library = shell.lib
+    shell._create_main_library = lambda: fac.RichLibrary()
+    dialog = _clear_dialog(config)
+    try:
+        shell.spawn_pet()
+        assert len(shell._spawned) == 1
+        dialog._on_clear_spawned_pets()              # 设置进程侧：只写文件
+        assert len(shell._spawned) == 1
+        shell._consume_settings_command()            # 主进程侧：消费
+        assert shell._spawned == []
+        assert not cmd.command_path(config.dir).exists()
+    finally:
+        dialog.deleteLater()
+        shell._teardown_settings_command_watch()
+        shell._delete_runtime_marker()

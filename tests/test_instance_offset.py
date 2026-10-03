@@ -43,7 +43,11 @@ def test_second_instance_avoids_live_overlap(app, tmp_path):
 
 
 def test_runtime_marker_written_and_stale_cleaned(app, tmp_path):
-    """实例启动后写入 runtime 标记；死进程的标记被顺手清理。"""
+    """实例启动后写入 runtime 标记；死进程的标记被顺手清理。
+
+    4.4b：进程内多窗常开化 → 标记恒用版本化名
+    ``pet-runtime-v2-<pid>-slot-<N>.json``；读取侧仍认旧名（回滚兼容）。
+    """
     cfg = Config(base=tmp_path)
     cfg.save()
     stale = cfg.dir / 'runtime-99999999.json'  # 超出 Windows pid 上限，必死
@@ -51,7 +55,7 @@ def test_runtime_marker_written_and_stale_cleaned(app, tmp_path):
                      encoding='utf-8')
     win = PetWindow(FakeLibrary(), cfg)
     try:
-        own = cfg.dir / f'runtime-{os.getpid()}.json'
+        own = cfg.dir / f'pet-runtime-v2-{os.getpid()}-slot-0.json'
         assert own.exists()
         assert not stale.exists()
     finally:

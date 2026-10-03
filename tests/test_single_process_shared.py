@@ -2,13 +2,12 @@
 """批5.2a：子系统上移 + 托盘聚合（单进程多窗共享）的机器可验测试。
 
 覆盖 DISPATCH_batch52a 验收 ①：
-- agent_link 上移：flag 开时单 manager 扇出——两窗各收到呈现事件（全体跳舞）；
-- 托盘聚合：flag 开时单托盘 + 每窗子菜单存在，动作路由正确（显示/隐藏、切换角色、退出这只）；
-- 灵动岛单击 toggle **全部**窗（按聚合可见态同步 set_pet_visible）；
-- flag 关逐位一致：共享子系统不实例化（每窗各自 manager，既有 spawn 测试族全绿）。
+- agent_link 上移：单 manager 扇出——两窗各收到呈现事件（全体跳舞）；
+- 托盘聚合：单托盘 + 每窗子菜单存在，动作路由正确（显示/隐藏、切换角色、退出这只）；
+- 灵动岛单击 toggle **全部**窗（按聚合可见态同步 set_pet_visible）。
 
-flag 关的逐位一致由既有 tests/test_single_process_spawn.py 族保证（本批不弱化、
-只在 __init__ 注入 None → 每窗各自建）。
+4.4b：多窗常开化——共享子系统恒建（`experimental_single_process_spawn`
+键已删），故不再有「flag 关不实例化」的对照片区。
 """
 from __future__ import annotations
 
@@ -51,7 +50,6 @@ class _RecordWin:
         self.activities = 0
         self.link_provider = None
         self.cfg = None
-        self._single_process_spawn = True
         self._bubble_busy_until = 0.0
         # 非空 dict（代理以 `if c:` 判真）
         self.cats = {"idle": "idle", "acts": ["写代码"], "moves": [], "turns": []}
@@ -125,14 +123,12 @@ class _FakeIsland:
         pass
 
 
-def _make_flag_on_shell(tmp_path):
+def _make_shared_shell(tmp_path):
     config = Config(tmp_path)
-    config.set("experimental_single_process_spawn", True)
     config.save()
-    slot_id, slot_handle = slot_manager_mod.acquire_pet_slot(config.dir, preferred_slot=0)
-    shell = AppShell(QApplication.instance(), config, enable_chat=True,
-                     slot_handle=slot_handle, slot_id=slot_id)
-    return shell, config, slot_handle
+    # 4.4a：不再抢 slot 文件锁（多进程多宠退役层停用）；身份直接给主槽。
+    shell = AppShell(QApplication.instance(), config, enable_chat=True, slot_id=0)
+    return shell, config, None
 
 
 def _make_primary_record_win(shell, config):
@@ -147,7 +143,6 @@ def _make_second_record_win(shell, tmp_path, monkeypatch):
     def fake_build_window(self, character_id, lib=None, build_tray=True):
         win = _RecordWin()
         win.cfg = self.config
-        win._single_process_spawn = self.shell._single_process_spawn
         self.win = win
         return win
 
@@ -157,18 +152,14 @@ def _make_second_record_win(shell, tmp_path, monkeypatch):
     return second
 
 
-def _stop_sessions(*insts):
-    for inst in insts:
-        try:
-            inst.collision_ipc.stop()
-        except Exception:
-            pass
+def _stop_sessions(*_insts):
+    """4.4a：碰撞 IPC 会话随多进程多宠退役层停用——保留调用点占位（无操作）。"""
 
 
-def test_flag_on_agent_link_single_manager_fans_out(tmp_path, app, monkeypatch):
+def test_shared_agent_link_single_manager_fans_out(tmp_path, app, monkeypatch):
     """§③.1 / 验收①：flag 开时同一份 AgentLinkManager 服务两窗；
     联动气泡只发首个可见窗（多窗不重复弹），联动动画仍扇出到各可见窗。"""
-    shell, config, primary_handle = _make_flag_on_shell(tmp_path)
+    shell, config, primary_handle = _make_shared_shell(tmp_path)
     try:
         primary_win = _make_primary_record_win(shell, config)
         second = _make_second_record_win(shell, tmp_path, monkeypatch)
@@ -201,23 +192,11 @@ def test_flag_on_agent_link_single_manager_fans_out(tmp_path, app, monkeypatch):
         _stop_sessions(*getattr(shell, "instances", []))
         if getattr(shell, "_shared", None) is not None:
             shell._shared.stop_all()
-        slot_manager_mod._unlock_file(primary_handle)
 
 
-def test_flag_off_shared_subsystems_none(tmp_path, app):
-    """验收④：flag 关不实例化共享子系统（每窗各自建，逐位一致）。"""
-    config = Config(tmp_path)
-    config.set("experimental_single_process_spawn", False)
-    config.save()
-    shell = AppShell(QApplication.instance(), config, enable_chat=True)
-    assert shell._single_process_spawn is False
-    assert shell._shared is None
-    assert shell.instance.win is None
-
-
-def test_flag_on_tray_per_window_submenu_exists_and_routes(tmp_path, app, monkeypatch):
+def test_shared_tray_per_window_submenu_exists_and_routes(tmp_path, app, monkeypatch):
     """§③.3 / 验收②：单托盘 + 每窗子菜单存在，动作路由正确。"""
-    shell, config, primary_handle = _make_flag_on_shell(tmp_path)
+    shell, config, primary_handle = _make_shared_shell(tmp_path)
     try:
         primary_win = _make_primary_record_win(shell, config)
         second = _make_second_record_win(shell, tmp_path, monkeypatch)
@@ -264,12 +243,11 @@ def test_flag_on_tray_per_window_submenu_exists_and_routes(tmp_path, app, monkey
         _stop_sessions(*getattr(shell, "instances", []))
         if getattr(shell, "_shared", None) is not None:
             shell._shared.stop_all()
-        slot_manager_mod._unlock_file(primary_handle)
 
 
-def test_flag_on_island_toggle_all_windows(tmp_path, app, monkeypatch):
+def test_shared_island_toggle_all_windows(tmp_path, app, monkeypatch):
     """§③.4 / 验收③：灵动岛单击 toggle 全部窗，并按聚合可见态同步 set_pet_visible。"""
-    shell, config, primary_handle = _make_flag_on_shell(tmp_path)
+    shell, config, primary_handle = _make_shared_shell(tmp_path)
     try:
         primary_win = _make_primary_record_win(shell, config)
         second = _make_second_record_win(shell, tmp_path, monkeypatch)
@@ -302,13 +280,12 @@ def test_flag_on_island_toggle_all_windows(tmp_path, app, monkeypatch):
         _stop_sessions(*getattr(shell, "instances", []))
         if getattr(shell, "_shared", None) is not None:
             shell._shared.stop_all()
-        slot_manager_mod._unlock_file(primary_handle)
 
 
-def test_flag_on_shared_proactive_broadcasts_bubble(tmp_path, app, monkeypatch):
+def test_shared_shared_proactive_broadcasts_bubble(tmp_path, app, monkeypatch):
     """§③.2：共享 proactive watcher 单一实例（限流器全局）；
     气泡只发首个可见窗（多窗不重复弹，与 proxy.show_alert 同策）。"""
-    shell, config, primary_handle = _make_flag_on_shell(tmp_path)
+    shell, config, primary_handle = _make_shared_shell(tmp_path)
     try:
         primary_win = _make_primary_record_win(shell, config)
         second = _make_second_record_win(shell, tmp_path, monkeypatch)
@@ -327,12 +304,11 @@ def test_flag_on_shared_proactive_broadcasts_bubble(tmp_path, app, monkeypatch):
         _stop_sessions(*getattr(shell, "instances", []))
         if getattr(shell, "_shared", None) is not None:
             shell._shared.stop_all()
-        slot_manager_mod._unlock_file(primary_handle)
 
 
-def test_flag_on_hidden_notify_text_non_primary(tmp_path, app, monkeypatch):
+def test_shared_hidden_notify_text_non_primary(tmp_path, app, monkeypatch):
     """§③.4：隐藏提示文案对非主窗改为指引托盘子菜单（P2-5 消除误导）。"""
-    shell, config, primary_handle = _make_flag_on_shell(tmp_path)
+    shell, config, primary_handle = _make_shared_shell(tmp_path)
     try:
         primary_win = _make_primary_record_win(shell, config)
         second = _make_second_record_win(shell, tmp_path, monkeypatch)
@@ -361,7 +337,6 @@ def test_flag_on_hidden_notify_text_non_primary(tmp_path, app, monkeypatch):
         _stop_sessions(*getattr(shell, "instances", []))
         if getattr(shell, "_shared", None) is not None:
             shell._shared.stop_all()
-        slot_manager_mod._unlock_file(primary_handle)
 
 
 # ---------------------------------------------------------------- P1 复审回归
@@ -371,7 +346,7 @@ def test_new_window_receives_link_provider_after_real_build(tmp_path, app, monke
     `self.win = win` 执行，扇出遍历不到新窗，provider 永远缺位。"""
     from tests.test_predictive_prewarm import FakeLibrary
 
-    shell, config, handle = _make_flag_on_shell(tmp_path)
+    shell, config, handle = _make_shared_shell(tmp_path)
     config.set("click_sound_enabled", False)
     config.set("collision_sound_enabled", False)
     win = None
@@ -383,7 +358,6 @@ def test_new_window_receives_link_provider_after_real_build(tmp_path, app, monke
         if win is not None:
             win.close()
             win.deleteLater()
-        slot_manager_mod._unlock_file(handle)
         app.processEvents()
 
 
@@ -392,7 +366,7 @@ def test_shared_fullscreen_broadcast_respects_per_window_config(tmp_path, app):
     关掉该功能的窗不得被无关广播隐藏。"""
     from tests.test_predictive_prewarm import FakeLibrary
 
-    shell, config, handle = _make_flag_on_shell(tmp_path)
+    shell, config, handle = _make_shared_shell(tmp_path)
     config.set("click_sound_enabled", False)
     config.set("collision_sound_enabled", False)
     win1 = win2 = None
@@ -422,9 +396,6 @@ def test_shared_fullscreen_broadcast_respects_per_window_config(tmp_path, app):
                 w.close()
                 w.deleteLater()
         _stop_sessions(shell.instance, sec)
-        slot_manager_mod._unlock_file(handle)
-        if sec.slot_handle is not None:
-            slot_manager_mod._unlock_file(sec.slot_handle)
         app.processEvents()
 
 
@@ -738,7 +709,7 @@ def test_shared_watcher_tick_survives_idle_windows(tmp_path, app, monkeypatch):
         watcher.stop_all()
 
 
-def test_flag_on_production_watcher_reads_proxy_sentinel(tmp_path, app, monkeypatch):
+def test_shared_production_watcher_reads_proxy_sentinel(tmp_path, app, monkeypatch):
     """端到端（真实装配）：flag 开时 AppShell 注入的共享 watcher，其 ``win``
     就是 ``MultiWindowProxy``——G1 读的正是这个对象，这里直接对生产装配面取值。
 
@@ -747,7 +718,7 @@ def test_flag_on_production_watcher_reads_proxy_sentinel(tmp_path, app, monkeypa
     ``win`` 是 ``shared.proxy``。修复前这条路径读到的 ``_physics_mode`` 是
     ``False``，G1 恒真拦截——用户看到的「右键开关无效」也源于此（同一实例）。
     """
-    shell, config, primary_handle = _make_flag_on_shell(tmp_path)
+    shell, config, primary_handle = _make_shared_shell(tmp_path)
     try:
         assert shell._shared is not None, "flag 开必须实例化共享子系统"
         proxy = shell._shared.proxy
@@ -784,4 +755,3 @@ def test_flag_on_production_watcher_reads_proxy_sentinel(tmp_path, app, monkeypa
         _stop_sessions(*getattr(shell, "instances", []))
         if getattr(shell, "_shared", None) is not None:
             shell._shared.stop_all()
-        slot_manager_mod._unlock_file(primary_handle)

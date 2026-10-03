@@ -199,10 +199,16 @@ def test_launch_harness_no_browser_when_autostart(monkeypatch):
     assert threads == [], "open_browser=False 不应启动等待开浏览器的线程"
 
 
-def test_harness_autostart_hook_gates(monkeypatch):
-    """AppShell._maybe_autostart_harness：配置关/无 Chat 不触发；已有实例不重复拉起。"""
+def test_harness_autostart_hook_gates(tmp_path, monkeypatch):
+    """AppShell._maybe_autostart_harness：三个门（enable_chat / harness_autostart /
+    agent_link.dsh）任一不成立都不触发；已有实例不重复拉起。
+
+    真 Config + 真门方法（``AppShell.__new__`` 绕开重型 __init__）：门本身就是
+    被测对象，用替身替掉它等于什么都没测（本批 K1 就是在这里加第三条门）。
+    """
     from pet import app as app_mod
     from pet import harness_launcher as hl
+    from pet.config import Config
 
     spawned = []
     monkeypatch.setattr(
@@ -210,17 +216,23 @@ def test_harness_autostart_hook_gates(monkeypatch):
         lambda target=None, daemon=None, name=None: SimpleNamespace(start=lambda: spawned.append(target)),
     )
 
-    def _make(enable_chat, flag):
-        return SimpleNamespace(
-            enable_chat=enable_chat,
-            config=SimpleNamespace(get=lambda k, d=None: flag if k == "harness_autostart" else d),
-        )
+    def _make(enable_chat, flag, dsh_link):
+        cfg = Config(base=tmp_path)
+        cfg.set("harness_autostart", flag)
+        agent_cfg = dict(cfg.get("agent_link") or {})
+        agent_cfg["dsh"] = dsh_link
+        cfg.set("agent_link", agent_cfg)
+        shell = app_mod.AppShell.__new__(app_mod.AppShell)  # 绕开重型 __init__
+        shell._enable_chat = enable_chat
+        shell.config = cfg
+        return shell
 
-    app_mod.AppShell._maybe_autostart_harness(_make(True, False))
-    app_mod.AppShell._maybe_autostart_harness(_make(False, True))
+    app_mod.AppShell._maybe_autostart_harness(_make(True, False, dsh_link=True))
+    app_mod.AppShell._maybe_autostart_harness(_make(False, True, dsh_link=True))
+    app_mod.AppShell._maybe_autostart_harness(_make(True, True, dsh_link=False))
     assert spawned == []
 
-    app_mod.AppShell._maybe_autostart_harness(_make(True, True))
+    app_mod.AppShell._maybe_autostart_harness(_make(True, True, dsh_link=True))
     assert len(spawned) == 1
 
     launched = []

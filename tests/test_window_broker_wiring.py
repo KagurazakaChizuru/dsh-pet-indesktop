@@ -196,13 +196,13 @@ def test_register_local_role_does_not_record_identity(app, tmp_path):
     app.processEvents()
 
 
-def test_detach_collision_session_tears_down_broker_first(app, tmp_path):
-    """detach（运行期关碰撞路径）先按身份收尾 broker 会话再 unbind。"""
+def test_detach_decode_sessions_tears_down_broker_first(app, tmp_path):
+    """收尾（closeEvent/会话结束路径）先按身份收尾 broker 会话再 unbind。"""
     win = _make_window(tmp_path)
     facade = FakeBrokerFacade()
     win._broker_facade = facade
     win._broker_register(win.idle, win.movie)
-    win.detach_collision_session()
+    win.detach_decode_sessions()
     assert facade.ended == [(win.idle, False)]
     assert facade.unbind_calls == 1
     assert win._broker_registered is None

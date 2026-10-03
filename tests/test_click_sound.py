@@ -628,3 +628,82 @@ def test_cache_path_falls_back_to_stat_key_when_unreadable(tmp_path, monkeypatch
     path = click_sound._cache_path(src)  # 不抛错
     assert path.suffix == ".wav"
     click_sound._DIGEST_MEMO.clear()
+
+
+# ---------------------------------------------------------------------------
+# 碰撞音效每次发声的路径解析成本（C1）
+#
+# 实机取证（.scratch/windows-parity-20260926-a/fix-20260928-C1/bench-before.json）：
+# `_sound_cache_dir()` 0.25ms（QStandardPaths + mkdir 每次发声都跑一次）、
+# `Path(__file__).resolve()` 0.22ms（音源根目录每次发声都重新 resolve）。
+# 两项都在 tick 里的碰撞事件链上（每秒最多 12.5 次）。
+# ---------------------------------------------------------------------------
+
+def test_sound_cache_dir_resolved_once_per_process(monkeypatch):
+    """缓存目录只向 QStandardPaths 解析一次；测试复位后可重新解析。"""
+    from PySide6.QtCore import QStandardPaths
+
+    from pet import click_sound
+
+    click_sound._reset_caches_for_tests()
+    calls = []
+    real = QStandardPaths.writableLocation
+
+    def counting(location):
+        calls.append(location)
+        return real(location)
+
+    monkeypatch.setattr(QStandardPaths, "writableLocation", staticmethod(counting))
+    first = click_sound._sound_cache_dir()
+    assert click_sound._sound_cache_dir() == first
+    assert len(calls) == 1, "同一进程内缓存目录稳定，不得每次发声都重新解析并 mkdir"
+
+    click_sound._reset_caches_for_tests()
+    assert click_sound._sound_cache_dir() == first
+    assert len(calls) == 2, "测试复位后允许重新解析"
+
+
+def test_cache_path_does_not_resolve_source_path(monkeypatch, tmp_path):
+    """缓存键不得每次发声都做 resolve()（Windows 上每源两次 GetFinalPathName）。"""
+    from pathlib import Path as _Path
+
+    from pet import click_sound
+
+    src = tmp_path / "ding.mp3"
+    src.write_bytes(b"fake-mp3-content")
+    click_sound._DIGEST_MEMO.clear()
+    counts = []
+    real_resolve = _Path.resolve
+
+    def counting(self, *args, **kwargs):
+        counts.append(str(self))
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "resolve", counting)
+    first = click_sound._cache_path(src)
+    assert first == click_sound._cache_path(src)
+    assert counts == [], "缓存键只需要 stat + abspath，不得走 resolve 系统调用"
+    click_sound._DIGEST_MEMO.clear()
+
+
+def test_sounds_root_resolved_once_per_meipass(monkeypatch):
+    """音源根目录不得每次发声都重新 resolve（Windows 上是一次 GetFinalPathName）。"""
+    from pathlib import Path as _Path
+
+    from pet import click_sound
+
+    click_sound._reset_caches_for_tests()
+    counts = []
+    real_resolve = _Path.resolve
+
+    def counting(self, *args, **kwargs):
+        counts.append(str(self))
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "resolve", counting)
+    pack = {"kind": "builtin", "id": "duck"}
+    click_sound.resolve_click_sound_candidates(pack)
+    before = len(counts)
+    assert before >= 1, "首次解析仍需 resolve 一次"
+    click_sound.resolve_click_sound_candidates(pack)
+    assert len(counts) == before, "第二次解析不得再 resolve 音源根目录"

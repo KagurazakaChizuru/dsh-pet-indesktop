@@ -107,17 +107,63 @@ def test_channel_exception_is_swallowed():
     assert host.shown == ["今天也要好好吃饭。"]
 
 
-def test_speak_setting_defaults_on_and_persists(tmp_path):
-    """新键默认开启（与 config.py 默认值一致），且能落盘回读。"""
+def test_missing_speak_key_at_runtime_reads_as_off():
+    """运行时读取的缺省同样为关：老配置 / 配置损坏时不该突然出声（只出气泡）。
+
+    config.py 的默认值与运行时读取各自独立读缺省，两处口径必须都是关。
+    """
+    host = _Host(texts=["今天也要好好吃饭。"])
+    host.on_self_talk_speak = _record(host)
+    del host.cfg["self_talk_speak_enabled"]
+
+    assert window_alerts.self_talk_speak_enabled(host) is False
+    assert window_alerts.show_click_self_talk(host, "click-1") is True
+    assert host.shown == ["今天也要好好吃饭。"]
+    assert host.spoken == []
+
+
+def test_speak_setting_defaults_off_and_persists(tmp_path):
+    """朗读是「额外出声」：默认关闭（与 config.py 默认值一致），打开后能落盘回读。"""
     from pet.config import Config
 
     config = Config(base=tmp_path)
-    assert config.get("self_talk_speak_enabled") is True
+    assert config.get("self_talk_speak_enabled") is False
 
-    config.set("self_talk_speak_enabled", False)
+    config.set("self_talk_speak_enabled", True)
     config.save()
 
-    assert Config(base=tmp_path).get("self_talk_speak_enabled") is False
+    assert Config(base=tmp_path).get("self_talk_speak_enabled") is True
+
+
+def test_missing_speak_key_normalizes_to_off(tmp_path):
+    """配置文件里没写过这个键（老配置文件）→ 规范化后取关闭，不是沿用旧的开启。"""
+    import json
+
+    from pet.config import Config
+
+    root = tmp_path / "appdata"
+    cfg_dir = root / "dsh-pet-standalone"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.json").write_text(json.dumps({"version": 4}), encoding="utf-8")
+
+    assert Config(root).data["self_talk_speak_enabled"] is False
+
+
+def test_stored_speak_choice_survives_default_flip(tmp_path):
+    """默认值变更只动缺省与规范化：用户已存过的值（开、关都算）一律原样保留。"""
+    import json
+
+    from pet.config import Config
+
+    for stored in (True, False):
+        root = tmp_path / f"appdata-{stored}"
+        cfg_dir = root / "dsh-pet-standalone"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "config.json").write_text(
+            json.dumps({"version": 4, "self_talk_speak_enabled": stored}),
+            encoding="utf-8",
+        )
+        assert Config(root).data["self_talk_speak_enabled"] is stored
 
 
 # --------------------------------------------------------------- 点击侧与周期气泡解耦
@@ -237,3 +283,5 @@ def test_click_speech_alone_asks_for_the_audio_channel():
     assert wanted(self_talk_speak_enabled=True, click_show_self_talk=True, self_talk_enabled=False) is True
     assert wanted(self_talk_speak_enabled=True, click_show_self_talk=False, self_talk_enabled=True) is False
     assert wanted(self_talk_speak_enabled=False, click_show_self_talk=True, self_talk_enabled=True) is False
+    # 键缺失（老配置）→ 缺省为关，不因"读不到"就白建音频通道
+    assert wanted(click_show_self_talk=True, self_talk_enabled=True) is False

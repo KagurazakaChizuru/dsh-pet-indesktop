@@ -17,7 +17,6 @@ from PySide6.QtWidgets import QApplication
 from pet import collision
 from pet import physics as physics_mod
 from pet import window_placement
-from pet.collision_ipc import _KNOWN_FLAGS_MASK
 from pet.config import Config
 from pet.dynamic_island import DynamicIsland
 from pet.island_collision import IslandCollisionBody
@@ -69,7 +68,9 @@ def test_static_wall_low_speed_contact_stays_dead():
 
 
 def test_static_flag_in_known_mask():
-    assert _KNOWN_FLAGS_MASK & collision.FLAG_STATIC == collision.FLAG_STATIC
+    # 4.4b：协议层已删，直接断言 FLAG_STATIC 是合法旗标位（岛屿墙口径）
+    assert collision.FLAG_STATIC & collision.FLAG_VISIBLE == 0
+    assert collision.FLAG_STATIC > 0
 
 
 # ------------------------------------------------------------ 同步硬墙（屏幕边界式位置钳制）

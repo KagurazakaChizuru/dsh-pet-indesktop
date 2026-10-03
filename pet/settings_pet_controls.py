@@ -60,6 +60,103 @@ from .settings_widgets import (
 )
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 
+
+#: 「直播捕获兼容」基础文案（描述能力本身）；legacy 拓扑逐字用它。
+STREAM_CAPTURE_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口。"
+#: overlay 拓扑：该键无任何消费者（不建 PetWindow，壳上也无运行期入口），
+#: 重启同样不生效——如实说明不支持（配合置灰控件）。
+STREAM_CAPTURE_OVERLAY_HINT = (
+    STREAM_CAPTURE_HINT + "当前单窗口渲染模式暂不支持直播捕获兼容。"
+)
+
+#: 「省电模式」（idle_low_fps_enabled）文案，按拓扑分流：
+#: overlay 下该键唯一作用是关掉后台动画预热（``app.py`` 建库与
+#: ``_sync_animation_prewarm``）；可见帧率由素材 clip 自持定时器按素材 fps
+#: 驱动，与开关无关；legacy 的 PetWindow 仍按半帧率呈现。
+IDLE_LOW_FPS_OVERLAY_HINT = (
+    "开启后停止后台动画预热（降低待机占用，首次切换动画可能略慢）。"
+    "动画帧率不受影响：闲置时的系统降载自动进行，与本开关无关。"
+)
+IDLE_LOW_FPS_LEGACY_HINT = (
+    "一段时间不操作桌宠时，动画按半帧率呈现（24fps 素材 → 12fps 效果）"
+    "并停止后台动画预热，任何交互立即恢复全帧率。"
+)
+
+#: overlay 单合成窗下物理上只能整窗生效的窗口级键（一窗多宠）：一套窗旗标
+#: （置顶 / 鼠标穿透 / 光标隐藏穿透 / 全屏隐藏）、一个窗口透明度、一份锁位与
+#: 拖拽修饰钳制。
+OVERLAY_WINDOW_SCOPE_IDS = (
+    "on_top",
+    "mouse_through",
+    "pet_opacity",
+    "lock_position",
+    "shift_drag",
+    "cursor_hidden_passthrough",
+    "auto_hide_fullscreen",
+)
+
+#: 子宠设置页对这些键的补充说明。
+ALL_PETS_SCOPE_NOTE = "（对所有桌宠生效）"
+
+
+def _is_overlay_topology() -> bool:
+    """拓扑判定（懒 import：设置进程禁止导入重量级模块，见模块 docstring）。"""
+    from . import overlay_settings_command
+
+    return overlay_settings_command.is_overlay_topology()
+
+
+def stream_capture_hint() -> str:
+    """「直播捕获兼容」说明文案（按渲染拓扑分流，T4 / PHASE4_DESIGN.md:80-82）。
+
+    捕获依赖 PetWindow 的窗旗标（``window_screen.py`` 的
+    set_stream_capture_mode），overlay 拓扑不构造 PetWindow，壳上也没有运行期
+    入口——该键在 overlay 下**无任何消费者，重启同样不生效**，故如实说明不支持
+    并在 ``build_pet_controls`` 里置灰控件。legacy 拓扑文案逐字不变（运行期即时
+    生效）。
+
+    文案落在本模块（控件本体也在这里）而不是 ``modern_settings_dialog``：
+    后者的行数预算只随实测校准，能不加行就不加。
+    """
+    if _is_overlay_topology():
+        return STREAM_CAPTURE_OVERLAY_HINT
+    return STREAM_CAPTURE_HINT
+
+
+def idle_low_fps_hint() -> str:
+    """「省电模式」说明文案（按渲染拓扑分流，同 ``stream_capture_hint``）。"""
+    if _is_overlay_topology():
+        return IDLE_LOW_FPS_OVERLAY_HINT
+    return IDLE_LOW_FPS_LEGACY_HINT
+
+
+def _apply_window_scope_rows(host) -> None:
+    """overlay 一窗多宠：子宠设置页给窗口级键补「对所有桌宠生效」。
+
+    子宠页写的是自己的 ``config-slot-N.json``，但这些键在单合成窗里作用于整窗
+    ——不提示的话用户会以为改的只是那一只。主宠页不加（它本来就是全局视角），
+    legacy 不加（每宠独立窗口，键确实只作用于自己）。
+
+    行分散在多个模块构建（互动域的「鼠标穿透」在 ``settings_interaction``），
+    故在所有行就位后按 objectName 统一补，与 ``_apply_dialogue_scope_rows`` 同
+    一形态；行尚未构建时静默跳过。
+    """
+    if not getattr(getattr(host, "config", None), "instance_id", None):
+        return
+    if not _is_overlay_topology():
+        return
+    for setting_id in OVERLAY_WINDOW_SCOPE_IDS:
+        row = host.findChild(SettingRow, f"settingRow_{setting_id}")
+        if row is None or ALL_PETS_SCOPE_NOTE in row.hint_label.text():
+            continue
+        row.hint_label.setText(row.hint_label.text() + ALL_PETS_SCOPE_NOTE)
+        control = getattr(row, "control", None)
+        if control is not None:
+            # SettingRow 构造期把 hint 写进 accessibleDescription；改文案后同步，
+            # 否则读屏仍播旧说明。
+            control.setAccessibleDescription(row.hint_label.text())
+
+
 def build_pet_controls(host) -> None:
     from .modern_settings_dialog import dialogue_params_hint
     host.scale_combo = ModernSelect(host, width=132)
@@ -203,7 +300,7 @@ def build_pet_controls(host) -> None:
     host.click_self_talk_check = ToggleSwitch(host)
     host.click_self_talk_check.setChecked(bool(host.config.get("click_show_self_talk", False)))
     host.click_self_talk_speak_check = ToggleSwitch(host)
-    host.click_self_talk_speak_check.setChecked(bool(host.config.get("self_talk_speak_enabled", True)))
+    host.click_self_talk_speak_check.setChecked(bool(host.config.get("self_talk_speak_enabled", False)))
     host.self_talk_voice_precache_check = ToggleSwitch(host)
     host.self_talk_voice_precache_check.setChecked(
         bool(host.config.get("self_talk_voice_precache_enabled", False))
@@ -268,6 +365,11 @@ def build_pet_controls(host) -> None:
         host.auto_hide_fullscreen_check.setChecked(bool(host.config.get("auto_hide_fullscreen", True)))
         host.stream_capture_check = ToggleSwitch(host)
         host.stream_capture_check.setChecked(bool(host.config.get("stream_capture_mode", False)))
+        if _is_overlay_topology():
+            # overlay 无消费者（不建 PetWindow，壳上无 set_stream_capture_mode）：
+            # 置灰 + 如实说明，避免用户以为勾上就能被 OBS 枚举。
+            host.stream_capture_check.setEnabled(False)
+            host.stream_capture_check.setToolTip(STREAM_CAPTURE_OVERLAY_HINT)
 
     host.speed_select = ModernSelect(host, width=112)
     current_speed = float(host.config.get("playback_speed", 1.0))

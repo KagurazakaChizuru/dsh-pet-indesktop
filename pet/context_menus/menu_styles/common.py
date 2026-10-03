@@ -2,11 +2,25 @@
 """Shared style tokens and submenu inheritance without layout assumptions."""
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QMenu, QProxyStyle, QStyle
 
-SYSTEM_FONT_STACK = '"SF Pro Text", ".AppleSystemUIFont", "PingFang SC"'
+# 右键菜单样式表的 font-family 在 Windows 上必须是**单族**，而且该族要覆盖菜单里的中文。
+# 2026-09-28 真 Qt(Windows 6.11) 分步实测：QFontDatabase 的族枚举本身只要 ~16MB，但只要
+# 用一个「请求族覆盖不了待测文本」或「多族列表」的 QFont 去测量中文条目，Qt 就会为缺失
+# 字形做回退搜索而枚举整个字体库，把 C:\Windows\Fonts 的 528 个字体文件（~831MB）映射进
+# 进程——菜单弹出一次后 msyh.ttc 37.6MB、StaticCache.dat 19.2MB、simhei/arial 等常驻，
+# RSS +70~150MB 不回。旧 macOS 三族栈、把它换成 Windows 三族栈、单族但不存在，三种写法
+# 实测都触发，所以 Windows 直接给一个覆盖中文的系统 UI 单族。
+if sys.platform == "win32":
+    SYSTEM_FONT_STACK = '"Microsoft YaHei UI"'
+elif sys.platform == "darwin":
+    SYSTEM_FONT_STACK = '"SF Pro Text", ".AppleSystemUIFont", "PingFang SC"'
+else:
+    SYSTEM_FONT_STACK = '"Noto Sans CJK SC", "WenQuanYi Micro Hei", "sans-serif"'
 
 
 class ResponsiveMenuStyle(QProxyStyle):

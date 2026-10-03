@@ -59,6 +59,17 @@ DEFAULT_POOL_SIZE = 4          # 与 ClickSoundPool._PLAYER_POOL_SIZE 同规模
 MAX_FORMATS = 4                # 同时保持的 (声道, 采样率) 组数上限
 REAP_INTERVAL_MS = 250         # 兜底回收节拍
 
+#: 解析缓存（``read_pcm16``）：键 = (绝对化路径, mtime_ns, size)
+_PARSE_CACHE_LIMIT = 8
+#: 单条解析缓存的最大 PCM 体积（超过就不钉在内存里：点击/碰撞音都远小于此）
+_PARSE_CACHE_MAX_CLIP_BYTES = 512 * 1024
+_parse_cache: dict[tuple[str, int, int], WavClip] = {}
+
+#: 缩放缓存（``WinmmSoundPool.play_clip``）：键 = (clip, 音量)
+_SCALED_CACHE_LIMIT = 8
+#: 单条缩放缓存的最大 PCM 体积（超过就每次现算，不钉内存）
+_SCALED_CACHE_MAX_CLIP_BYTES = 512 * 1024
+
 
 class WinmmError(RuntimeError):
     """winmm 调用失败（返回码非 MMSYSERR_NOERROR）。"""
@@ -189,7 +200,28 @@ def read_pcm16(path: str | Path) -> WavClip | None:
     """读 wav 并归一化为 PCM16；不可读/压缩/浮点等读不了的一律返回 None。
 
     返回 ``WavClip.converted=True`` 表示需要先落成标准 wav 缓存（调用方决定）。
+
+    解析结果按 (绝对化路径, mtime_ns, size) 缓存：密集碰撞（实机 5 次/秒）每次都
+    重读重解析同一个音源，实测 45.7KB 的碰撞音读盘+解析 0.11~0.22ms/次，是
+    GUI 线程的纯税（``.scratch/windows-parity-20260926-a/fix-20260928-C1/
+    bench-before.json``）。读不出来的结果不进缓存：转码/写入中途的失败必须下次
+    还能重试。
     """
+    key = _parse_cache_key(path)
+    if key is not None:
+        cached = _parse_cache.get(key)
+        if cached is not None:
+            return cached
+    clip = _parse_wav(path)
+    if key is not None and clip is not None and len(clip.data) <= _PARSE_CACHE_MAX_CLIP_BYTES:
+        if len(_parse_cache) >= _PARSE_CACHE_LIMIT:
+            _parse_cache.clear()
+        _parse_cache[key] = clip
+    return clip
+
+
+def _parse_wav(path: str | Path) -> WavClip | None:
+    """真正读盘并归一化（``read_pcm16`` 的未缓存路径）。"""
     try:
         with wave.open(str(path), "rb") as source:
             channels = int(source.getnchannels())
@@ -210,6 +242,15 @@ def read_pcm16(path: str | Path) -> WavClip | None:
     if data is None:
         return None
     return WavClip(data, channels, rate, converted=True)
+
+
+def _parse_cache_key(path: str | Path) -> tuple[str, int, int] | None:
+    """解析缓存键；文件 stat 不到（不存在/非法路径）时返回 None = 不进缓存。"""
+    try:
+        stat = os.stat(path)
+        return (os.path.abspath(os.fspath(path)), int(stat.st_mtime_ns), int(stat.st_size))
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def write_pcm16_wav(clip: WavClip, dest: str | Path) -> bool:
@@ -404,6 +445,7 @@ class WinmmSoundPool:
         self._formats: dict[tuple[int, int], _FormatPool] = {}
         self._volume = 1.0
         self._timer: Any = None
+        self._scaled_cache: dict[Any, bytes] = {}
         _LIVE_POOLS.add(self)
 
     # ---------------- 可用性 ----------------
@@ -453,12 +495,38 @@ class WinmmSoundPool:
         if handle is None:
             return False
         try:
-            api.write(handle, scale_pcm16(clip.data, volume))
+            api.write(handle, self._scaled(clip, volume))
         except Exception:
             log.warning("winmm 播放失败，回退 Qt 路径（channels=%s rate=%s）", clip.channels, clip.sample_rate, exc_info=True)
             return False
         self._start_reaper()
         return True
+
+    def _scaled(self, clip: WavClip, volume: float) -> bytes:
+        """按音量缩放 PCM16，结果按 (clip, 音量) 缓存。
+
+        ``scale_pcm16`` 在 0<音量<1 时是逐样本的 Python 循环：45.7KB 的 48k 立体声
+        碰撞音实测 3.19ms/次（``bench-before.json``），而密集碰撞（实机 5 次/秒）
+        反复播的就是同一段 PCM、同一音量。缓存只是省掉重复计算，写进设备的字节与
+        现算逐位相同；音量变化（含 0/1 的短路档）各自成键，不会串味。
+        """
+        value = clamp_volume(volume)
+        if value <= 0.0 or value >= 1.0:
+            return scale_pcm16(clip.data, value)      # 两个短路档本就极廉价，不进缓存
+        if len(clip.data) > _SCALED_CACHE_MAX_CLIP_BYTES:
+            return scale_pcm16(clip.data, value)      # 大素材不钉进内存
+        key = (clip, value)
+        try:
+            hash(key)
+        except TypeError:
+            return scale_pcm16(clip.data, value)      # 不可哈希的替身 clip：不缓存
+        cached = self._scaled_cache.get(key)
+        if cached is None:
+            cached = scale_pcm16(clip.data, value)
+            if len(self._scaled_cache) >= _SCALED_CACHE_LIMIT:
+                self._scaled_cache.clear()
+            self._scaled_cache[key] = cached
+        return cached
 
     def warm(self, paths: Iterable[str | Path]) -> int:
         """预热：为给定 wav 的格式各开满一个小池子（只开设备，不发声）。
@@ -662,6 +730,7 @@ class WinmmSoundPool:
     def clear(self) -> None:
         """释放全部设备与在途 buffer（GUI 线程调用；生产路径只在退出/测试隔离用）。"""
         self._stop_reaper()
+        self._scaled_cache.clear()
         api = self._api
         if api is not None:
             for pool in self._formats.values():
@@ -701,7 +770,12 @@ def reset_default_api_for_tests() -> None:
 
 
 def _clear_live_pools_for_tests() -> None:
-    """收口所有仍存活的池（conftest 每测后调用，不改变产品语义）。"""
+    """收口所有仍存活的池，并清空中立解析缓存（conftest 每测后调用，不改变产品语义）。
+
+    解析缓存是模块级中立缓存（不含设备状态），跨用例留着会让"同一路径换内容"
+    的用例读到上一测的解析结果；mtime/size 键本就防这种串味，这里是显式隔离。
+    """
+    _parse_cache.clear()
     for pool in list(_LIVE_POOLS):
         try:
             pool.clear()

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 import time
 
 from PySide6.QtCore import (
@@ -59,6 +60,17 @@ _SQUISH_STIFFNESS = 150.0
 _SQUISH_DAMPING = 8.5
 _SQUISH_MIN = 0.85
 _SQUISH_MAX = 1.12
+# 受击速度上限：单次最强撞击（bump 的 strength 封顶 3.0）注入 -3.45 / ±39，
+# 就是这两个上界的来源。连撞叠加不得越过它——越过只是把弹簧顶在形变钳位
+# （_SQUISH_MIN）与 ±_TILT_MAX_DEG 倾斜钳位上反复过冲：形状不再变化（像素零
+# 变化），_animating() 却长期为真，半透明顶层窗每 16ms 空转整窗重绘（实测连撞
+# 60 次 _squish_v 累到 -207、同向连打 _tilt_v 累到 109，均无界）。
+_SQUISH_V_MAX = 3.5
+_TILT_V_MAX = 40.0
+# bump 动效的动画时间上限（s）：从最后一次撞击起算，到点强制收尾归零。连撞把
+# 弹簧顶在钳位上时"阈值判据"可能长期为真，上限是收敛的硬保证（按动画时间累计，
+# 不是墙钟——停表期间的墙钟不计入）。
+_BUMP_ANIM_MAX_S = 0.9
 _ANIM_TICK_MS = 16  # ~60fps，仅动画活跃时运行，静止零开销
 
 _DOCK_EDGES = ("none", "top", "bottom", "left", "right")
@@ -143,6 +155,24 @@ def _cfg_dict(config) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _native_reassert_topmost(window) -> bool:
+    """Windows：把窗口原生重插到 topmost 带最上（不激活/不移动/不改大小）。
+
+    非 Windows 一律返回 ``False``，调用方回退 Qt ``raise_()``——macOS 的
+    NSWindow level 与 Windows 的 topmost 带不是一回事，"重申后是否真的最上"
+    在 macOS 上**未验证**（Linux 同理）。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        from .platform_win import _set_windows_topmost
+
+        return bool(_set_windows_topmost(int(window.winId()), True))
+    except Exception:
+        logger.debug("灵动岛原生置顶重申失败", exc_info=True)
+        return False
+
+
 class DynamicIsland(QWidget):
     """胶囊形态的独立灵动岛窗口。"""
 
@@ -203,6 +233,8 @@ class DynamicIsland(QWidget):
         self._scale_v = 0.0
         self._breathe_until = 0.0
         self._hover_scale_target = 1.0
+        # bump 动效剩余动画时间（s）：每次撞击重置（见 _BUMP_ANIM_MAX_S）
+        self._bump_anim_left = 0.0
         # 图标位图状态（icon="auto"/"img:<路径>" 时用；emoji 模式不碰）
         self._icon_provider = None  # 头像取图回调，AppShell 注入
         self._icon_pixmap_cache: QPixmap | None = None
@@ -242,6 +274,17 @@ class DynamicIsland(QWidget):
         self._tier_tick_timer.setSingleShot(True)
         self._tier_tick_timer.timeout.connect(self._on_balance_tier_tick)
         self._schedule_next_balance_tier_refresh()
+
+        # 置顶保活接线（见 reassert_topmost）：本进程窗口被激活 = 某个 topmost
+        # 窗（聊天窗/设置窗/岛气泡/托盘菜单 popup）刚插到岛上面，这是零轮询里
+        # 最精确的时机信号；Qt < 6.5 无 focusWindowChanged 时由
+        # applicationStateChanged(Active) 覆盖"本进程回到前台"那一半。
+        app = QApplication.instance()
+        if app is not None:
+            focus_changed = getattr(app, "focusWindowChanged", None)
+            if focus_changed is not None:
+                focus_changed.connect(self._on_own_window_focused)
+            app.applicationStateChanged.connect(self._on_application_state_changed)
 
         self._apply_position()
 
@@ -285,6 +328,50 @@ class DynamicIsland(QWidget):
         return QColor(_ACCENT_PRESETS.get(key, _ACCENT_PRESETS[_DEFAULT_ACCENT]))
 
     # ------------------------------------------------------------ 对外
+    def reassert_topmost(self) -> bool:
+        """把岛重新插到 topmost 带最上（置顶保活入口）。
+
+        为什么需要：岛带 ``WindowStaysOnTopHint``（Windows = ``WS_EX_TOPMOST``）
+        但 ``WindowDoesNotAcceptFocus``（= ``WS_EX_NOACTIVATE``）**从不被激活**，
+        而 Windows 的 topmost 带内先后由"谁最近被激活/显示"决定——任何被激活的
+        topmost 窗（本进程聊天窗/设置窗/岛对话气泡，或第三方置顶工具）都会盖在
+        岛上面；Windows 又不提供"你被盖住了"的通知，岛不主动重申就永远回不来
+        （Qt 也只在 flags 变化时写一次 ``WS_EX_TOPMOST``，``show()`` 对已可见的
+        窗口是 no-op，所以"设置里保存一次"并不会把它顶回去）。
+
+        触发点全部事件驱动或复用既有通道，不新增定时器/线程：
+        ``showEvent``、本进程窗口被激活（前台/焦点信号）、单击岛、
+        既有信息刷新心跳（``_refresh``：30s 心跳 + 余额/配置刷新各一次）。
+        隐藏态直接返回 False——可见与否由用户决定，隐藏即静默。
+        """
+        if not self.isVisible():
+            return False
+        if _native_reassert_topmost(self):
+            return True
+        # 非 Windows（macOS / Linux **未验证**）：Qt 层 raise_() 兜底
+        self.raise_()
+        return True
+
+    def _on_own_window_focused(self, window) -> None:
+        """本进程有窗口被激活 → 把岛顶回去（``focusWindowChanged``）。
+
+        只接本进程侧的信号：``focusWindowChanged`` 只报告本进程的窗口，
+        焦点落到别的应用时它带 ``None``（Qt 语义：焦点移出本应用）——那种情况
+        属于"外部应用抢到前台"，不重申（见 ``_on_application_state_changed``）。
+        """
+        if window is None:
+            return
+        self.reassert_topmost()
+
+    def _on_application_state_changed(self, state) -> None:
+        """本进程成为前台（Active）才重申；失去前台不动作。
+
+        外部应用抢到前台（开始菜单、全屏游戏、第三方置顶工具）时重申会让岛
+        反过来盖住系统级置顶面，与 legacy「全屏应用会暂时盖住桌宠」同口径。
+        """
+        if state == Qt.ApplicationState.ApplicationActive:
+            self.reassert_topmost()
+
     def set_icon_provider(self, fn) -> None:
         """注入"鱼本体头像"取图回调（AppShell 提供：取首个桌宠窗的当前帧图标）。
 
@@ -357,10 +444,15 @@ class DynamicIsland(QWidget):
         strength = max(0.2, min(float(strength), 3.0))
         # 史莱姆受击：表面压扁（弹簧回摆出果冻抖动）+ 轻微定向踢动/倾斜。
         # 踢动速度钳制：窗口只有 44px 高，多鱼同撞叠加时位移超窗会被裁掉
-        self._squish_v -= 1.15 * strength
+        squish_v = self._squish_v - 1.15 * strength
+        self._squish_v = max(-_SQUISH_V_MAX, min(_SQUISH_V_MAX, squish_v))
         self._kick_vx = max(-150.0, min(150.0, self._kick_vx + float(dir_x) * 110.0 * strength))
         self._kick_vy = max(-150.0, min(150.0, self._kick_vy + float(dir_y) * 110.0 * strength))
-        self._tilt_v += 13.0 * strength * (1 if dir_x >= 0 else -1)
+        tilt_v = self._tilt_v + 13.0 * strength * (1 if dir_x >= 0 else -1)
+        self._tilt_v = max(-_TILT_V_MAX, min(_TILT_V_MAX, tilt_v))
+        # 单次撞击动效的动画时间上限从这一击重新起算（连撞 = 每击各有一段动画，
+        # 但最后一击之后最多再跑 _BUMP_ANIM_MAX_S）
+        self._bump_anim_left = _BUMP_ANIM_MAX_S
         self._ensure_anim_timer()
 
     def refresh_from_config(self) -> None:
@@ -431,6 +523,10 @@ class DynamicIsland(QWidget):
 
     def _refresh(self) -> None:
         """内容变化后立即重算尺寸、夹回屏幕并重绘。"""
+        # 复用既有刷新通道重申置顶（30s 信息心跳 + 余额/配置刷新各一次）：系统
+        # 事件（explorer 重启/DPI 变更/休眠唤醒，QTBUG-30359）或别的 topmost 窗
+        # 抢走带顶后，最迟一个周期内自行回到最上——不为此新增定时器
+        self.reassert_topmost()
         if self._mode == "docked" and not self._hover_peek:
             self.update()
             return
@@ -577,22 +673,54 @@ class DynamicIsland(QWidget):
             self._anim_timer.start()
 
     def _animating(self) -> bool:
+        if self._geo_to is not None:
+            return True
+        if self._mode == "expanded":
+            # 展开卡片态：paintEvent 把 kick/呼吸平移、tilt/scale 整窗变换全丢
+            # （贴边底板被位移或 >1 缩放硬切的实机修复，见 paintEvent），
+            # ``_squished_capsule_rect`` 又冻结 squish——上面这些通道收敛到任何
+            # 值都不改变一个像素，不能当"动画活跃"判据。否则每次 bump（岛被宠
+            # 撞）/余额弹跳都在半透明顶层窗上白跑 ~1s 的 60fps 重绘（实机每帧
+            # 一次窗口合成）。几何动画（_geo_to，展开/收起滑移）照常驱动重绘。
+            return False
+        # 阈值 = 感知量级（44px 高胶囊）：|squish-1| 0.01 → 0.44px 形变、
+        # |squish_v| 0.06 → 0.2px 振速、|tilt_v| 3.0 → 0.27°（约 0.6px 边缘位移）。
+        # 低于它仍是"动画"的话，每次撞击都要把半透明顶层窗多画几十帧不可见的
+        # 尾巴（实测单次撞击的静音耗时 0.88s → 0.61s，见同目录探针记录）。
         return (
-            self._geo_to is not None
-            or abs(self._kick_x) > 0.3 or abs(self._kick_y) > 0.3
+            abs(self._kick_x) > 0.3 or abs(self._kick_y) > 0.3
             or abs(self._kick_vx) > 5.0 or abs(self._kick_vy) > 5.0
-            or abs(self._squish - 1.0) > 0.004 or abs(self._squish_v) > 0.02
+            or abs(self._squish - 1.0) > 0.01 or abs(self._squish_v) > 0.06
             or abs(self._scale - self._hover_scale_target) > 0.001
             or abs(self._scale_v) > 0.005
             or abs(self._tilt) > 0.05
-            or abs(self._tilt_v) > 1.0
+            or abs(self._tilt_v) > 3.0
             or time.monotonic() < self._breathe_until
         )
+
+    def _settle_bump_animation(self) -> None:
+        """把 bump 动效通道（踢动/形变/倾斜）连同速度一起归零。
+
+        只碰 bump 自己驱动的通道：``_scale``/``_scale_v`` 归事件弹跳
+        （``_bounce``）与悬停放大，不在撞击动效的收尾范围内（否则会硬切悬停
+        放大 / 事件弹跳的中间帧）。
+        """
+        self._kick_x = self._kick_y = 0.0
+        self._kick_vx = self._kick_vy = 0.0
+        self._squish, self._squish_v = 1.0, 0.0
+        self._tilt, self._tilt_v = 0.0, 0.0
 
     def _on_anim_tick(self) -> None:
         now = time.monotonic()
         dt = now - (self._anim_last or now)
         self._anim_last = now
+
+        # bump 动效的动画时间上限（按动画时间累计，停表期间的墙钟不计入）：
+        # 连撞把弹簧顶在钳位上时阈值判据可能长期为真，到点强制收尾归零。
+        if self._bump_anim_left > 0.0:
+            self._bump_anim_left = max(0.0, self._bump_anim_left - dt)
+            if self._bump_anim_left == 0.0:
+                self._settle_bump_animation()
 
         # 几何滑移（停靠/展开）：定时插值，ease-out
         if self._geo_to is not None and self._geo_from is not None:
@@ -622,6 +750,11 @@ class DynamicIsland(QWidget):
         self._tilt, self._tilt_v = spring_step(
             self._tilt, self._tilt_v, 0.0, dt,
             stiffness=_TILT_STIFFNESS, damping=_TILT_DAMPING)
+        # 倾斜状态钳位：paintEvent 早就把绘制钳到 ±_TILT_MAX_DEG，不钳状态时
+        # 连撞共振能把振幅泵到十几度——弹簧在"画不出来"的幅度里来回，速度随之
+        # 无界（实测同向连打 _tilt_v 109），_animating() 的阈值判据随之失效。
+        # 与 ``_squish`` 的状态钳位同口径（区别只是那里钳在 _on_anim_tick 前段）。
+        self._tilt = max(-_TILT_MAX_DEG, min(_TILT_MAX_DEG, self._tilt))
         self._squish, self._squish_v = spring_step(
             self._squish, self._squish_v, 1.0, dt,
             stiffness=_SQUISH_STIFFNESS, damping=_SQUISH_DAMPING)
@@ -630,11 +763,11 @@ class DynamicIsland(QWidget):
         self._kick_x = max(-5.0, min(5.0, self._kick_x))
         self._kick_y = max(-5.0, min(5.0, self._kick_y))
         if not self._animating():
-            self._kick_x = self._kick_y = 0.0
-            self._kick_vx = self._kick_vy = 0.0
-            self._squish = 1.0
+            # 停表即收尾：连速度一起归零（残留速度会让下一次动画起步时凭空
+            # 抖一下，也是 _animating() 判据失效的温床）
+            self._settle_bump_animation()
             self._scale = 1.0 if self._hover_scale_target == 1.0 else self._hover_scale_target
-            self._tilt = 0.0
+            self._bump_anim_left = 0.0
             self._anim_timer.stop()
         self.update()
 
@@ -652,6 +785,7 @@ class DynamicIsland(QWidget):
         self._tilt = 0.0
         self._tilt_v = 0.0
         self._breathe_until = 0.0
+        self._bump_anim_left = 0.0
         self._hover_scale_target = 1.0
         self._set_free_geometry(self._target_rect())
         self.update()
@@ -1267,6 +1401,9 @@ class DynamicIsland(QWidget):
         self._info_timer.start()
         self._schedule_next_balance_tier_refresh()
         self._refresh()
+        # 原生窗口此刻已就绪；再延迟一拍重申一次 topmost——show 期间 Qt 还在
+        # 收尾窗口排序，它可能覆盖同步那次（口径同 legacy window.py showEvent）
+        QTimer.singleShot(0, self, self.reassert_topmost)
 
     # ------------------------------------------------------------ 悬停
     def enterEvent(self, event) -> None:  # noqa: N802
@@ -1294,6 +1431,9 @@ class DynamicIsland(QWidget):
     # ------------------------------------------------------------ 鼠标
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            # 点岛 = 用户明确要它在前（legacy「点击把窗口带回置顶组最前」口径，
+            # 只改 z 序不抢键盘焦点）
+            self.reassert_topmost()
             self._press_global = event.globalPosition().toPoint()
             self._drag_offset = self._press_global - self.pos()
             self._dragging = False

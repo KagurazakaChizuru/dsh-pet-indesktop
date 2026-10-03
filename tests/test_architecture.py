@@ -2,11 +2,10 @@
 """架构红线断言（结构线纪律的机器化）。
 
 三条红线，红了就是架构倒退，不许靠改测试放行：
-1. 依赖方向：纯逻辑层（collision/physics/collision_codec）不依赖 Qt；
+1. 依赖方向：纯逻辑层（collision/physics）不依赖 Qt；
    decode_fanout 不反向依赖 window/webm_clip（钩子经 movie 属性注入）。
-2. 私有面冻结：PetWindow 私有成员（win._xxx）只许 window.py 自身与
-   collision_client.py（窗口的碰撞客户端，半内部）访问；app.py /
-   agent_link.py / context_menus/ 再出现即为违规（S2 已清零，防回潮）。
+2. 私有面冻结：PetWindow 私有成员（win._xxx）只许 window.py 自身访问；
+   app.py / agent_link.py / context_menus/ 再出现即为违规（S2 已清零，防回潮）。
 3. window.py 行数预算：结构线拆到 4200 量级后只许降不许涨——
    新功能请先按 docs/WINDOW_PY_SPLIT_GUIDE.md 拆对应控制器，
    而不是继续往上帝类里塞。确实该涨时，预算上调必须在 PR 里说明理由。
@@ -112,10 +111,10 @@ PET_DIR = Path(__file__).resolve().parents[1] / "pet"
 # duration 退化值守卫 + 注释，+9）与 A2 飞行加速按用户「播放速率」复合
 # （表达式改写 + getattr 防御测试替身，+2）。净增为守卫与注释，未拆控制器
 # （守卫必须贴着 _try_move 的建计划点才有效），按预算规则校准。实测 4648。
-# 2026-09-23 上调到 4659：合并 origin/main（5a20251，#150→#185 共 51 个提交）后实测。
-# 上游本侧记的是 4648，而本仓库同时保留了自家批次里未被上游采纳的 window.py 增量
-# （show_bubble -> bool 收口、点击台词/多行气泡接线等），两相叠加后实测 4659。
-WINDOW_PY_LINE_BUDGET = 4659
+# 2026-10-04 校准：合并 origin/main（beaa8f5，#215 单合成窗新架构等 139 个提交）后实测。
+# 上游把渲染面搬进 overlay_shell.py 等新模块，本文件相应瘦身；本仓库保留的自家增量
+# （show_bubble -> bool 收口、唱歌循环里的待播联动动作交付等）叠加后为实测值。
+WINDOW_PY_LINE_BUDGET = 4510
 
 # modern_settings_dialog.py 行数预算：按结构线拆分后实测 1857 行（拆分前 4811 行）。
 # 主对话框 ModernSettingsDialog + 对话框装配/配置写回 + 为 pet/ 与 tests/ 保留的
@@ -196,9 +195,10 @@ WINDOW_PY_LINE_BUDGET = 4659
 # SettingRow 改为按构建变体条件收录（净 +3，注释另计）：无 pet.chat 的
 # 打包变体不再展示该死路开关（运行时回退在 pet/dynamic_island.py 的
 # chat_available）。实测 2357；按文件约定只随实测校准，不为达标压行。
-# 2026-09-23 上调到 2360：合并 origin/main（5a20251）后实测——上游的岛/设置页拆分与
-# 本仓库保留的设置行（多行输入框、TTS 后端行等）叠加，净 +3。同样按实测校准。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2360
+# 2026-10-04 校准：合并 origin/main（beaa8f5，139 个提交）后实测——上游的 overlay
+# 拓扑设置面（D12 子肥鱼退出指令/更新页接线/文案如实）与本仓库保留的设置行
+# （多行输入框、TTS 后端行等）叠加，按文件约定只随实测校准，不为达标压行。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2396
 
 
 def _read(name: str) -> str:
@@ -209,13 +209,16 @@ def test_pure_logic_modules_do_not_import_qt():
     # 节日提醒的纯逻辑/纯数据模块同样必须零 Qt（2026-09-16 加入，随功能一起
     # 把"纯逻辑层零 Qt"从约定升级为机器化守卫；festival_service/festival_settings
     # 不在本列——前者属服务层、后者属 UI 层，本就不受此约束）。
+    # 2026-09-23 加入 overlay_settings_command：D12 指令通道的写/读/消费与拓扑门
+    # 必须零 Qt——独立设置进程（pet/__main__.py --settings）禁止导入 pet.app/
+    # overlay_shell，env 读取的唯一实现只能落在两侧都能 import 的轻模块里。
     for name in (
-        "collision.py", "physics.py", "collision_codec.py",
+        "collision.py", "physics.py",
         "festival_calendar.py", "festival_data.py", "festival.py",
         "festival_animations.py",
         "festival_quotes_cn.py", "festival_quotes_west.py",
         "festival_quotes_west_movie.py", "festival_quotes_west_game.py",
-        "festival_quotes_west_song.py",
+        "festival_quotes_west_song.py", "overlay_settings_command.py",
         # 语音报时的纯逻辑层与其 TTS provider（2026-09-22 接口化时加入）：
         # provider 的 IO 只允许在 synth() 里惰性 import，模块顶层不得碰 Qt。
         "voice_chime.py", "voice_chime_quotes.py",
@@ -230,6 +233,87 @@ def test_decode_fanout_does_not_depend_on_window_or_player():
     for banned in ("pet.window", "pet.webm_clip", "from .window", "from .webm_clip",
                    "import window", "import webm_clip"):
         assert banned not in src, f"decode_fanout 反向依赖 {banned}，破坏单向依赖"
+
+
+# 多进程多宠退役层（PHASE4_DESIGN.md §3 T6 清单，4.4a 停用 / 4.4b 删除）。
+# 4.4a 机器化守卫：**overlay 新路径**（单合成窗渲染面）必须零 import 这些
+# 模块——新架构的多宠碰撞/身份/生命周期全部在进程内 sprite 世界自足，
+# 一旦回潮就是"新路径又骑回多进程 IPC/文件锁"的架构倒退。
+# 4.4b 追加守卫：这些模块文件本身必须**不存在**（删除刀不许被静默回退），
+# 且全 pet/ 树（不只新路径）不得再 import 它们。
+RETIRED_MULTIPROCESS_MODULES = (
+    "collision_ipc",
+    "collision_codec",
+    "collision_client",
+    "collision_debug",
+    "instance_launcher",
+    "child_pet_cleanup",
+)
+
+
+def test_retired_multiprocess_layer_files_are_gone():
+    """4.4b 机器化守卫：退役层文件必须不存在（防"删了又被合回来"）。"""
+    present = [name for name in RETIRED_MULTIPROCESS_MODULES
+               if (PET_DIR / f"{name}.py").exists()]
+    assert not present, (
+        "多进程多宠退役层文件回潮（T6 清单已删除）：\n" + "\n".join(present)
+    )
+
+
+def test_pet_tree_has_zero_retired_layer_imports():
+    """4.4b 机器化守卫：整个 pet/ 树（含 legacy 路径）零 import 退役层模块。
+
+    与上一条互补：文件不存在是"删干净"，本条约住"任何模块都不得再 import"
+    （含函数级延迟 import 与 from pet.xxx 绝对写法）。
+    """
+    offenders = []
+    for path in sorted(PET_DIR.rglob("*.py")):
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if not (stripped.startswith("from ") or stripped.startswith("import ")):
+                continue
+            for retired in RETIRED_MULTIPROCESS_MODULES:
+                if re.search(rf"\b{retired}\b", stripped):
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "pet/ 内仍有 import 多进程多宠退役层（架构倒退）：\n"
+        + "\n".join(offenders)
+    )
+
+
+def _overlay_new_path_modules() -> tuple[str, ...]:
+    """新路径模块清单：overlay_* / sprite_* / pet_sprite / tick_* / island_bridge。
+
+    按目录枚举（而不是硬编码文件名）——新路径新增模块自动纳入守卫，
+    不会因为"忘了加名单"漏掉一次回潮。
+    """
+    patterns = ("overlay_*.py", "sprite_*.py", "tick_*.py")
+    names = {"pet_sprite.py", "island_bridge.py"}
+    for pattern in patterns:
+        names.update(p.name for p in PET_DIR.glob(pattern))
+    return tuple(sorted(names))
+
+
+def test_overlay_new_path_has_zero_retired_layer_imports():
+    """4.4a 停用刀：新路径零 import 多进程多宠退役层（T6）。"""
+    offenders = []
+    modules = _overlay_new_path_modules()
+    assert "overlay_shell.py" in modules and "sprite_collision.py" in modules, (
+        "新路径模块枚举失效（目录变动？），守卫清单必须非空"
+    )
+    for name in modules:
+        for lineno, line in enumerate(_read(name).splitlines(), 1):
+            stripped = line.strip()
+            if not (stripped.startswith("from ") or stripped.startswith("import ")):
+                continue  # 只查 import 语句，注释里的历史提及不算回潮
+            for retired in RETIRED_MULTIPROCESS_MODULES:
+                if re.search(rf"\b{retired}\b", stripped):
+                    offenders.append(f"{name}:{lineno}: {stripped}")
+    assert not offenders, (
+        "overlay 新路径 import 了多进程多宠退役层模块（架构倒退）：\n"
+        + "\n".join(offenders)
+    )
 
 
 def test_window_private_surface_frozen():

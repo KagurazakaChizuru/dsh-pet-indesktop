@@ -67,6 +67,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
 from . import autostart as autostart_mod
 from . import catalog
 from .click_sound import warm_click_sound_effects
@@ -96,6 +97,7 @@ from .menu_layout import (
     resolve_menu_layout,
 )
 from .speech_bubble import BUBBLE_STYLE_PRESETS
+from .update_settings import UpdatePage
 
 
 def _chat_feature_available() -> bool:
@@ -253,7 +255,7 @@ class ModernSettingsDialog(QDialog):
     """Settings window matching Modern's sidebar and rounded-card hierarchy."""
 
     def __init__(self, config, parent=None, *, include_ai: bool = True,
-                 standalone: bool = False):
+                 standalone: bool = False, initial_page: str | None = None):
         super().__init__(parent)
         self.config = config
         self.include_ai = bool(include_ai)
@@ -261,6 +263,7 @@ class ModernSettingsDialog(QDialog):
         # 没有桌宠窗口/AppShell 可依附。只影响下面几处显式分支，默认 False 时
         # 全部行为与改动前逐位一致。
         self.standalone = bool(standalone)
+        self.initial_page = str(initial_page or "").strip()
         self.ai_page = None
         self.setProperty("modernStyle", True)
         self.setProperty("menuStyle", "modern")
@@ -314,6 +317,11 @@ class ModernSettingsDialog(QDialog):
         self.sidebar.setIconSize(QSize(18, 18))
         self.sidebar.setSpacing(2)
         sidebar_layout.addWidget(self.sidebar, 1)
+        self.version_footer = QLabel(f"版本 v{__version__}", sidebar_pane)
+        self.version_footer.setObjectName("settingsVersion")
+        self.version_footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.version_footer.setToolTip("当前运行版本")
+        sidebar_layout.addWidget(self.version_footer)
 
         self.pages = QStackedWidget(self)
         body.addWidget(sidebar_pane)
@@ -436,7 +444,7 @@ class ModernSettingsDialog(QDialog):
             SettingRow(
                 "harness_autostart",
                 "随桌宠启动 dsh 服务",
-                "桌宠启动后自动在后台静默拉起 dsh web 服务（只起服务，不开浏览器、不弹窗口；需要使用时点「启动 DeepSeek Harness」秒开页面）。仅主桌宠生效。",
+                "桌宠启动后自动在后台静默拉起 dsh web 服务（只起服务，不开浏览器、不弹窗口；需要使用时点「启动 DeepSeek Harness」秒开页面）。关闭本项即停止已拉起的服务；桌宠退出会断开自拉起页面。仅主桌宠生效。",
                 self.harness_autostart_check,
             ),
         ]
@@ -463,14 +471,13 @@ class ModernSettingsDialog(QDialog):
                         "Windows 光标隐藏后，桌宠自动穿透点击；光标出现立即恢复。适用于游戏，也可能影响自动隐藏光标的视频播放器。",
                         self.cursor_hidden_passthrough_check,
                     ),
-                    SettingRow("stream_capture", "直播捕获兼容", "让 OBS 等工具能够枚举并捕获桌宠窗口。", self.stream_capture_check),
+                    SettingRow("stream_capture", "直播捕获兼容", settings_pet_controls.stream_capture_hint(), self.stream_capture_check),
                 ]
             )
         general_layout.addWidget(SettingsSection("窗口与系统", window_rows, general_content))
-        # 拓扑收口 Phase A：「单进程多开」实验开关从设置页隐藏（多进程为唯一
-        # 多宠拓扑方向；开关控件已从 settings_pet_controls 移除，设置页不再
-        # 写该键；配置键 experimental_single_process_spawn 随 config.save()
-        # 原样回写，存量用户与回滚路径不受影响）。
+        # 拓扑收口：「单进程多开」实验开关已从设置页移除，4.4b 起配置键
+        # `experimental_single_process_spawn` 本身也随多进程多宠退役层删除
+        # （进程内多窗是唯一多宠形态，不再是可切换的实验开关）。
         if self.balance_refresh_spin is not None:
             general_layout.addWidget(
                 SettingsSection(
@@ -575,7 +582,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow(
                         "idle_low_fps",
                         "省电模式",
-                        "一段时间不操作桌宠时，动画按半帧率呈现（24fps 素材 → 12fps 效果）并停止后台动画预热，任何交互立即恢复全帧率。",
+                        settings_pet_controls.idle_low_fps_hint(),
                         self.idle_low_fps_check,
                     ),
                     SettingRow("no_move", "不移动", "暂停桌宠在桌面上的自动移动。", self.no_move_check),
@@ -936,9 +943,17 @@ class ModernSettingsDialog(QDialog):
         from .festival_settings import FestivalSettingsPage
 
         self.festival_page = FestivalSettingsPage(self.config, self)
+
+        # 更新页是命令/状态面板，不写入 Config；它与常规域同级，便于从菜单
+        # 和设置窗口进入同一套检查、下载、校验、安装流程。
+        self.update_page = UpdatePage(
+            self.config, include_chat=self.include_ai, parent=self
+        )
         self._rebuild_domain_navigation()
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.sidebar.setCurrentRow(0)
+        if self.initial_page:
+            self.select_page(self.initial_page)
         self._search_rows = self.findChildren(SettingRow)
         self._search_matches: list[SettingRow] = []
         self._search_index = -1
@@ -981,6 +996,8 @@ class ModernSettingsDialog(QDialog):
         self._apply_selected_theme()
         # 行全部就位后收敛台词编辑可见性：初始层若为某 Agent 专属则隐藏公共事件行
         settings_pet_controls._apply_dialogue_scope_rows(self)
+        # 行全部就位后标注窗口级键的生效范围（overlay 一窗多宠：只有子宠页需要）
+        settings_pet_controls._apply_window_scope_rows(self)
         if self.standalone:
             # 独立进程本地宿主：试听改本地播放、节日试听本地演示、无 parent 时
             # 读 runtime 状态文件避让桌宠。逻辑全在 pet/settings_standalone.py，
@@ -1516,22 +1533,31 @@ class ModernSettingsDialog(QDialog):
         """一键静默退出所有小肥鱼（slot-N）；它们的设置与数据保留。
 
         优先走 PetWindow 上已接线的 ``on_clear_spawned_pets``（= AppShell 路径，
-        含进程内子窗前置于关闭，单进程模式才清得掉）；拿不到回调时回退为
-        直接文件级退出。批 I：无确认框无结果框（操作不删数据可重新生成，
-        子肥鱼消失即反馈）。
+        含进程内子窗前置于关闭）；拿不到回调（独立设置进程：本进程既无桌宠壳也
+        无 sprite 世界）时统一走 **D12 指令通道**：写指令文件，由主进程
+        （OverlayShell / AppShell）经 config 目录 watcher + 轮询消费；按本配置
+        身份回填 target，语义收窄到"这一只"（主身份 = 全部）。
+
+        4.4a：legacy 的跨进程 taskkill 回退（child_pet_cleanup：runtime 标记 +
+        slot 锁 + taskkill）随多进程多宠退役层停用——两个拓扑现在共用同一条
+        指令通道，不再有"按钮静默失效"的拓扑分叉。
+
+        批 I：无确认框无结果框（操作不删数据可重新生成，子肥鱼消失即反馈）。
         """
         callback = getattr(self.parentWidget(), "on_clear_spawned_pets", None)
         if callable(callback):
             callback()
             return
-        if self.config.instance_id:
-            # 双保险：子肥鱼不开放该操作（按钮已禁用；即便被旧接线调到也不执行，
-            # 否则子鱼进程会把主鱼当子鱼杀掉）。
-            return
-        from .child_pet_cleanup import clear_spawned_pets
-
-        result = clear_spawned_pets(self.config.dir)
-        logging.info("退出子肥鱼：已退出 %d 只，未能退出 %d 只", len(result.get("killed_pids", [])), len(result.get("failed_pids", [])))
+        from .overlay_settings_command import (
+            CMD_EXIT_SPAWNED_PETS,
+            slot_from_instance_id,
+            write_command,
+        )
+        target = slot_from_instance_id(self.config.instance_id)
+        if write_command(self.config.dir, CMD_EXIT_SPAWNED_PETS, target=target):
+            logging.info("退出子肥鱼：已写下指令（target=%s，主进程消费）", target)
+        else:
+            logging.warning("退出子肥鱼：写指令文件失败，本次未执行")
 
     def _apply_agent_sound_enabled_now(self, checked: bool) -> None:
         """音效总开关即时生效，不等对话框关闭（合并写回，不动其他 agent_link 键）。"""
@@ -1624,6 +1650,15 @@ class ModernSettingsDialog(QDialog):
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
         return page
+
+    def select_page(self, label: str) -> bool:
+        """按侧栏标题选中页面，供右键菜单/更新通知做深链接。"""
+        target = str(label or "").strip()
+        for index in range(self.sidebar.count()):
+            if self.sidebar.item(index).text() == target:
+                self.sidebar.setCurrentRow(index)
+                return True
+        return False
 
     def _add_page(self, label: str, icon_name: str, page: QWidget) -> None:
         item = QListWidgetItem(vector_widget_icon(self, icon_name, 16), label)
@@ -1929,6 +1964,7 @@ class ModernSettingsDialog(QDialog):
             "自动化与联动": automation,
             "语音": voice,
             "文件识别": file_interpret,
+            "更新": self.update_page,
         }
         for label, icon in SETTINGS_DOMAIN_NAV:
             content = domain_content.get(label)

@@ -3,6 +3,10 @@
 PetWindow retains thin compatibility methods passing itself as host, so
 existing callers, signal connections and test patches (including unbound
 ``PetWindow.show_alert(pet, ...)`` calls) keep working unchanged.
+
+气泡门禁只走 :func:`bubble_blocked`：安装位（设置页抑制位 ``_bubble_suppressed``）
+与飞行位（壳按 sprite 判定的飞行集合）由 host 自己给，本模块不再各处现读
+``_bubble_suppressed``——两套守卫并存就是「飞行期漏气泡」的成因。
 """
 
 from __future__ import annotations
@@ -34,6 +38,37 @@ def alert_survives_suppression(alert_type: str, *, sticky: bool, buttons, priori
     return bool(sticky or buttons) and int(priority) <= 1
 
 
+def bubble_blocked(host, sprite=None) -> bool:
+    """统一气泡门禁：设置页抑制期 **或** 该 sprite 正在飞行。
+
+    host 自带 ``_bubble_blocked``（overlay 壳按 sprite 判定，见
+    ``overlay_shell.OverlayShell._bubble_blocked``）时以它为准；PetWindow 没有
+    sprite 级飞行态，退回既有的 ``_bubble_suppressed`` 契约（行为逐字不变）。
+
+    ``sprite=None`` = host 的默认宠（壳 = 主 sprite）。调用方一律走这个函数，
+    绝不各写一份 ``getattr(host, "_bubble_suppressed")``——那样飞行期就漏出
+    气泡来（B1 的缺口正是这六处各写各的守卫）。
+    """
+    checker = getattr(host, "_bubble_blocked", None)
+    if callable(checker):
+        return bool(checker(sprite))
+    return bool(getattr(host, "_bubble_suppressed", False))
+
+
+def sprite_in_flight(host, sprite=None) -> bool:
+    """该 sprite 是否正在飞行（气泡门禁里的**飞行分量**，不含设置页抑制）。
+
+    只有需要区分两种抑制的调用方才用它：飞行期是瞬时的（鱼飞几秒），上屏
+    推迟到落地即可；设置页抑制期是长时的用户意图，节日提醒/语音报时在这期间
+    仍按既有语义退到气泡位直写展示（见 ``festival_service._bubble``）。
+    无该接口的 host（PetWindow / 测试替身）恒 False。
+    """
+    checker = getattr(host, "_sprite_in_flight", None)
+    if callable(checker):
+        return bool(checker(sprite))
+    return False
+
+
 def set_bubble_suppressed(host, suppressed: bool) -> None:
     """设置窗口打开期间暂停气泡显示；True 时立即隐藏当前气泡。"""
     host._bubble_suppressed = bool(suppressed)
@@ -42,44 +77,60 @@ def set_bubble_suppressed(host, suppressed: bool) -> None:
         if bubble is not None:
             bubble.hide()
     else:
-        current = getattr(host, "_alert_current", None)
-        if current is not None and alert_survives_suppression(
-                current.get("alertType", ""), sticky=bool(current.get("sticky")),
-                buttons=current.get("buttons"), priority=int(current.get("priority", 3))):
-            bubble = getattr(host, "_speech_bubble", None)
-            if current.get("sticky"):
-                if bubble is not None:
-                    bubble.show_text(
-                        current["text"], window_placement.bubble_anchor_rect(host), 0,
-                        pet_scale=host.scale, subtitle=current.get("subtitle", ""),
-                        sticky=True, buttons=current.get("buttons"),
-                    )
-            elif bubble is not None:
-                # 存活但非 sticky 的 current（task_complete/turn/balance 等）：
-                # 抑制期被隐藏且 hidden 链路被抑制守卫截断——不重挂则
-                # _alert_current 永不清除，pump_alerts 永久 early-return，
-                # 后续提醒全部被吞（队列死锁）。按原时长重挂，超时后走正常
-                # hidden → 清除 → 推进闭环。
+        restore_after_suppression(host)
+
+
+def restore_after_suppression(host) -> None:
+    """抑制结束后的恢复：粘滞提醒重挂、限时提醒续时、无 current 则推进队列。
+
+    两份调用方共用同一口径（``set_bubble_suppressed(False)`` 与「飞行落地」）：
+    共同语义都是「刚才不让冒的泡，现在可以冒了」，差别只在抑制位本身（设置页
+    开关 vs. 壳的飞行集合）——绝不把两者合并成一次 ``set_bubble_suppressed``
+    调用，那会顺手把设置页抑制位也清掉（proactive/联动节流读它）。
+
+    入口再判一次门禁：抑制刚解除但另一路仍然挡着（典型 = 鱼还在飞：设置页在
+    飞行中途开关）时不破门，留给那一路自己的结束后恢复。
+    """
+    if bubble_blocked(host):
+        return
+    current = getattr(host, "_alert_current", None)
+    if current is not None and alert_survives_suppression(
+            current.get("alertType", ""), sticky=bool(current.get("sticky")),
+            buttons=current.get("buttons"), priority=int(current.get("priority", 3))):
+        bubble = getattr(host, "_speech_bubble", None)
+        if current.get("sticky"):
+            if bubble is not None:
                 bubble.show_text(
-                    current["text"], window_placement.bubble_anchor_rect(host),
-                    current.get("duration_ms") or 6000,
+                    current["text"], window_placement.bubble_anchor_rect(host), 0,
                     pet_scale=host.scale, subtitle=current.get("subtitle", ""),
+                    sticky=True, buttons=current.get("buttons"),
                 )
-        elif current is None:
-            pump = getattr(host, "_pump_alerts", None)
-            if callable(pump):
-                pump()
-        else:
-            # 抑制期间已被隐藏的普通限时提醒（非 sticky 且不存活）：
-            # 结束它并推进队列，否则后续提醒会被永久吞掉。
-            host._sticky_bubble_active = False
-            host._sticky_text = ""
-            host._sticky_subtitle = ""
-            host._sticky_buttons = None
-            host._alert_current = None
-            pump = getattr(host, "_pump_alerts", None)
-            if callable(pump):
-                pump()
+        elif bubble is not None:
+            # 存活但非 sticky 的 current（task_complete/turn/balance 等）：
+            # 抑制期被隐藏且 hidden 链路被抑制守卫截断——不重挂则
+            # _alert_current 永不清除，pump_alerts 永久 early-return，
+            # 后续提醒全部被吞（队列死锁）。按原时长重挂，超时后走正常
+            # hidden → 清除 → 推进闭环。
+            bubble.show_text(
+                current["text"], window_placement.bubble_anchor_rect(host),
+                current.get("duration_ms") or 6000,
+                pet_scale=host.scale, subtitle=current.get("subtitle", ""),
+            )
+    elif current is None:
+        pump = getattr(host, "_pump_alerts", None)
+        if callable(pump):
+            pump()
+    else:
+        # 抑制期间已被隐藏的普通限时提醒（非 sticky 且不存活）：
+        # 结束它并推进队列，否则后续提醒会被永久吞掉。
+        host._sticky_bubble_active = False
+        host._sticky_text = ""
+        host._sticky_subtitle = ""
+        host._sticky_buttons = None
+        host._alert_current = None
+        pump = getattr(host, "_pump_alerts", None)
+        if callable(pump):
+            pump()
 
 
 def redirect_hidden_bubble(host, text: str, *, subtitle: str = "",
@@ -108,13 +159,17 @@ def show_alert(host, text: str, *, subtitle: str = "", duration_ms: int = 0,
     if not host.isVisible():
         # 桌宠隐藏：非交互提醒（无按钮）改道灵动岛反馈面；交互气泡与
         # 设置页抑制期维持原丢弃行为。
-        if not buttons and not getattr(host, "_bubble_suppressed", False) and redirect_hidden_bubble(
+        if not buttons and not bubble_blocked(host) and redirect_hidden_bubble(
                 host, text, subtitle=subtitle, duration_ms=duration_ms or 3200):
             return
         return
-    if host._bubble_suppressed and not alert_survives_suppression(
+    if bubble_blocked(host) and not alert_survives_suppression(
             alert_type, sticky=sticky, buttons=buttons, priority=priority):
-        return
+        # 设置页抑制（长时用户意图）照旧丢弃；**飞行期不丢**——飞行只有几秒，
+        # 瞬时抑制的语义是"先不上屏"：入队后由 pump_alerts 的守卫挡住，落地
+        # 走 restore_after_suppression 正常弹出（B1：飞行结束后提醒队列恢复）。
+        if getattr(host, "_bubble_suppressed", False):
+            return
     item = {
         "id": alert_id or "",
         "text": str(text),
@@ -206,7 +261,7 @@ def pump_alerts(host) -> None:
         return
     if not host._alert_queue:
         return
-    if not host.isVisible() or host._bubble_suppressed:
+    if not host.isVisible() or bubble_blocked(host):
         return
     item = host._alert_queue.popleft()
     host._alert_current = item
@@ -258,7 +313,10 @@ def on_speech_bubble_hidden(host) -> None:
     sticky 恢复防抖：同一 sticky 内容在 300ms 内不重复 show_text，
     避免「审批被盖→恢复→再盖→再恢复」的卡顿循环。"""
     from .window import time as _window_time  # 兼容 seam：与 HEAD 同读 pet.window.time
-    if not host.isVisible() or host._bubble_suppressed:
+    if not host.isVisible() or bubble_blocked(host):
+        # 飞行期同样在这里截断：气泡是壳在起飞边沿主动收的，不能让它顺着
+        # hidden 链路推进队列（否则飞行中会接着弹下一条）。_alert_current 原样
+        # 留着，落地走 restore_after_suppression 重挂/续时。
         return
     cur = host._alert_current
     if cur is not None:
@@ -328,7 +386,7 @@ def schedule_self_talk(host, *, after_display: bool = False) -> None:
 
 def show_self_talk_text(host, text: str) -> bool:
     from .window import _set_speech_bubble_interactive
-    if getattr(host, "_bubble_suppressed", False):
+    if bubble_blocked(host):
         return False
     duration_ms = int(round(host._self_talk_duration_seconds * 1000))
     anchor = window_placement.bubble_anchor_rect(host)
@@ -384,7 +442,7 @@ def pick_self_talk_choice(texts, images, image_chance):
 
 def show_random_self_talk(host) -> bool:
     from .window import _set_speech_bubble_interactive
-    if getattr(host, "_bubble_suppressed", False):
+    if bubble_blocked(host):
         return False
 
     # 审批等一直挂着的气泡优先，自言自语不覆盖
@@ -429,14 +487,14 @@ def show_random_self_talk(host) -> bool:
 
 
 def self_talk_speak_enabled(host) -> bool:
-    """点击自言自语是否朗读（缺配置或配置损坏时按默认开启，与 config.py 一致）。"""
+    """点击自言自语是否朗读（缺配置或配置损坏时按默认关闭，与 config.py 一致）。"""
     cfg = getattr(host, "cfg", None)
     if cfg is None:
         return False
     try:
-        return bool(cfg.get("self_talk_speak_enabled", True))
+        return bool(cfg.get("self_talk_speak_enabled", False))
     except Exception:
-        return True
+        return False
 
 
 def speak_click_self_talk(host, text: str) -> None:

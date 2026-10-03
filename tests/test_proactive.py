@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -234,6 +235,101 @@ class TestProactiveLimiter:
         ok, reason = limiter.allow()
         assert ok is True
         assert reason == "ok"
+
+    def test_wrong_field_type_state_falls_back_to_default(self, tmp_path):
+        """缺陷 17：合法 JSON + 错字段类型必须整体回退默认状态。
+
+        修前只判 ``isinstance(raw, dict)``：``{"count": null}`` 一路穿透，
+        后续裸 ``int(state.get("count"))`` 抛 TypeError 打断调用链。
+        last_request/last_trigger 故意写成"刚刚请求过"：只有**整体**回退默认
+        状态才会放行，若只丢弃坏字段（半回退）就会被最小请求间隔拦下。
+        """
+        state_file = tmp_path / "state.json"
+        now = 10000.0
+        state_file.write_text(json.dumps({
+            "date": "2026-08-27",
+            "count": None,
+            "last_request": now,
+            "last_trigger": now,
+        }), encoding="utf-8")
+        limiter = ProactiveLimiter(
+            state_file,
+            {"daily_cap": 10, "min_request_interval_seconds": 60, "cooldown_minutes": 5},
+            clock=lambda: now,
+            today=lambda: "2026-08-27",
+        )
+        ok, reason = limiter.allow()
+        assert (ok, reason) == (True, "ok"), "坏字段必须让整份状态回退默认"
+
+    def test_wrong_field_type_uses_default_count_for_cap(self, tmp_path):
+        """缺陷 17：count 为 null 时按默认 0 记（不是穿透 TypeError）。
+
+        对照断言：同一份文件里 last_request=now（会被最小间隔拦），修后整体
+        回退默认才返回 "ok"；修前 int(None) 直接抛 TypeError。
+        """
+        state_file = tmp_path / "state.json"
+        day = "2026-08-27"
+        state_file.write_text(json.dumps({
+            "date": day, "count": None, "consecutive_failures": None,
+        }), encoding="utf-8")
+        limiter = ProactiveLimiter(
+            state_file,
+            {"daily_cap": 1, "min_request_interval_seconds": 60, "cooldown_minutes": 5},
+            clock=lambda: 10000.0,
+            today=lambda: day,
+        )
+        assert limiter.consume_budget() is True, "坏字段回退默认后仍可正常记账"
+        assert json.loads(state_file.read_text(encoding="utf-8"))["count"] == 1
+
+    def test_valid_state_file_still_honoured(self, tmp_path):
+        """回归：字段类型合法的状态文件照常生效（修复不得把好文件一起打回默认）。"""
+        state_file = tmp_path / "state.json"
+        day = "2026-08-27"
+        state_file.write_text(json.dumps({
+            "date": day, "count": 3, "last_request": 10000.0, "last_trigger": 0.0,
+            "consecutive_failures": 1, "paused_until_date": "",
+        }), encoding="utf-8")
+        limiter = ProactiveLimiter(
+            state_file,
+            {"daily_cap": 3, "min_request_interval_seconds": 60, "cooldown_minutes": 5},
+            clock=lambda: 10000.0,
+            today=lambda: day,
+        )
+        ok, reason = limiter.allow()
+        assert (ok, reason) == (False, "daily_cap_reached")
+
+    def test_consume_budget_fails_closed_when_state_unwritable(self, tmp_path, caplog):
+        """缺陷 17：写盘失败时 consume_budget 不得放行（fail-closed）。
+
+        放行 = 额度记不上账还照发请求，重启后计数回退，当日上限形同虚设。
+        写盘失败用真实 OSError 造（状态文件路径被目录占住 → 原子替换必失败），
+        不 mock 替换函数；同时断言失败路径不留 .tmp 且至少留一条 warning。
+        """
+        state_path = tmp_path / "state.json"
+        state_path.mkdir()
+        limiter = ProactiveLimiter(
+            state_path,
+            {"daily_cap": 10},
+            clock=lambda: 10000.0,
+            today=lambda: "2026-08-27",
+        )
+        with caplog.at_level(logging.WARNING):
+            assert limiter.consume_budget() is False, "持久化失败不得放行"
+        assert not list(tmp_path.glob("*.tmp")), "写盘失败不得残留 .tmp"
+        assert "主动识屏状态写入失败" in caplog.text
+
+    def test_rewrite_after_transient_failure_is_ok(self, tmp_path):
+        """回归：写盘恢复正常后 consume_budget 立即恢复放行（失败不是终态）。"""
+        state_path = tmp_path / "state.json"
+        limiter = ProactiveLimiter(
+            state_path,
+            {"daily_cap": 10},
+            clock=lambda: 10000.0,
+            today=lambda: "2026-08-27",
+        )
+        assert limiter.consume_budget() is True
+        assert json.loads(state_path.read_text(encoding="utf-8"))["count"] == 1
+        assert not list(tmp_path.glob("*.tmp"))
 
 
 # ============================================================================

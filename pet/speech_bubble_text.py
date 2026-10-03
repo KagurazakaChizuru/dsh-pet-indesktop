@@ -130,7 +130,12 @@ def breath_bubble_size_for_scale(pet_scale: float, scale: float = 1.0) -> QSize:
 
 def list_self_talk_images(directory: str | Path) -> list[Path]:
     """List common image files directly inside a user-selected directory."""
-    root = Path(str(directory or "")).expanduser()
+    # 空配置 = 未设置配图目录：``Path("")`` 解析成 CWD（是目录），会把进程
+    # 工作目录里的图片当成配图池扫描/加载（测试期 = 仓库根目录，便携包 =
+    # exe 旁边）——空串必须短路为空清单。
+    if not str(directory or "").strip():
+        return []
+    root = Path(str(directory)).expanduser()
     if not root.is_dir():
         return []
     try:

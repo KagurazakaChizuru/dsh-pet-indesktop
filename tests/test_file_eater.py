@@ -186,15 +186,9 @@ def test_petinstance_build_window_wires_file_eater(tmp_path, monkeypatch):
         cfg.set("click_sound_enabled", False)
         cfg.set("collision_sound_enabled", False)
         shell = AppShell(app, cfg, enable_chat=False)
-        try:
-            spy = shell.instance._build_window("shenshen", lib=FakeLibrary(), build_tray=False)
-            assert spy.file_eater_install_calls == 1, "建窗路径必须调用 install_file_eater()（PR73 接线，#76 后丢失）"
-            assert spy.file_interpret_install_calls == 1, "建窗路径必须调用 install_file_interpreter()（拖文件解读接线）"
-        finally:
-            try:
-                shell.instance.collision_ipc.stop()
-            except Exception:
-                pass
+        spy = shell.instance._build_window("shenshen", lib=FakeLibrary(), build_tray=False)
+        assert spy.file_eater_install_calls == 1, "建窗路径必须调用 install_file_eater()（PR73 接线，#76 后丢失）"
+        assert spy.file_interpret_install_calls == 1, "建窗路径必须调用 install_file_interpreter()（拖文件解读接线）"
     finally:
         monkeypatch.setattr(app_mod, "PetWindow", real_petwindow)
 

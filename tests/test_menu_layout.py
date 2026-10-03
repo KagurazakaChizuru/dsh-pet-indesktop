@@ -400,6 +400,47 @@ def test_config_persists_menu_layout_override_without_copying_default(tmp_path):
     assert restored.get("context_menu_layout") == override
 
 
+def test_saved_layout_drops_removed_mouse_through_action(tmp_path):
+    """2026-09-23：右键菜单去掉「鼠标穿透」，旧布局里的残留节点载入时就地清掉。
+
+    渲染层本来就会丢弃未注册 id（只影响当次显示），但菜单编辑器没有「删除菜单项」
+    操作，会把残留节点按「此平台不可用」一直回存下去；入口收敛必须在配置层收口，
+    否则旧布局里会永久留着一条幽灵菜单项。
+    """
+    from pet.config import Config
+
+    config = Config(tmp_path)
+    config.set("context_menu_layout", {
+        "schema_version": 1,
+        "layout_id": "user",
+        "nodes": [
+            {"type": "action", "id": "modern_settings", "visible": True},
+            {
+                "type": "submenu", "id": "pet_controls", "label": "桌宠控制", "visible": True,
+                "children": [
+                    {"type": "action", "id": "no_move", "visible": True},
+                    {"type": "action", "id": "mouse_through", "visible": True},
+                ],
+            },
+            {"type": "action", "id": "quit", "visible": True},
+        ],
+    })
+    config.save()
+
+    nodes = Config(tmp_path).get("context_menu_layout")["nodes"]
+    assert [node["id"] for node in nodes] == ["modern_settings", "pet_controls", "quit"]
+    assert [child["id"] for child in nodes[1]["children"]] == ["no_move"]
+
+
+def test_menu_registry_no_longer_registers_mouse_through():
+    """入口收敛：右键菜单注册表里不再有「鼠标穿透」，开关只留在设置页与托盘菜单。"""
+    from pet.context_menus.registry import MENU_ACTIONS, ACTION_ICONS, ACTION_LABELS
+
+    assert "mouse_through" not in MENU_ACTIONS.ids
+    assert "mouse_through" not in ACTION_LABELS
+    assert "mouse_through" not in ACTION_ICONS
+
+
 def test_unknown_schema_uses_safe_fallback_with_migration_diagnostic():
     result = resolve_menu_layout(
         {
@@ -516,7 +557,6 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     assert [action.text() for action in pet_controls.actions() if not action.isSeparator()] == [
         "拖动物理",
         "不移动",
-        "鼠标穿透",
         "窗口置顶",
         "开机自启",
         "回到右下角",
@@ -830,7 +870,7 @@ def test_settings_sidebar_uses_stable_domains_and_owns_representative_rows(tmp_p
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
     # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别"]
+    expected = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected
 
     def owner(setting_id):
@@ -1204,7 +1244,7 @@ def test_menu_domain_uses_in_page_task_tabs_without_changing_sidebar(tmp_path, m
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
 
-    expected_sidebar = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别"]
+    expected_sidebar = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_sidebar
     tabs = dialog.pages.widget(3).findChild(SettingsTabContainer, "settingsTaskTabs")
     assert tabs is not None
@@ -1574,6 +1614,7 @@ def test_settings_domains_use_semantic_sidebar_icons():
         ("自动化与联动", "automation"),
         ("语音", "sound"),
         ("文件识别", "file"),
+        ("更新", "update"),
     )
 
 
@@ -2577,3 +2618,44 @@ def test_music_align_ready_and_callback_routing(monkeypatch):
     assert shared_mod._align_lyric(pet, "不存在的动作") is False
     ctrl.shutdown()
     app.processEvents()
+
+
+def _stylesheet_font_family(sheet: str) -> str:
+    for line in sheet.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("font-family:"):
+            return stripped[len("font-family:"):].rstrip(";").strip()
+    raise AssertionError("modern 菜单样式表里没有 font-family")
+
+
+def test_system_font_stack_matches_platform():
+    """右键菜单 font-family 必须是**单族**，且该族要覆盖菜单里的中文。
+
+    2026-09-28 真 Qt(Windows 6.11) 分步实测：`QFontDatabase` 的族枚举本身只要 ~16MB，
+    但只要拿一个「请求族覆盖不了待测文本」或「多族列表」的 QFont 去测量中文文本，
+    Qt 就会为缺失字形做回退搜索而枚举整个字体库，把 C:\\Windows\\Fonts 的 528 个字体
+    文件（~831MB）映射进进程——菜单弹出一次后 msyh.ttc 37.6MB、StaticCache.dat 19.2MB、
+    simhei/arial 等常驻，RSS +70~150MB 不回。旧 macOS 栈、新 Windows 三族栈、
+    单族但不存在（或覆盖不了中文）三种写法都会触发，所以这里只允许单族。
+    """
+    import sys
+    from pet.context_menus.menu_styles.common import SYSTEM_FONT_STACK
+    from pet.context_menus.menu_styles.modern import modern_menu_stylesheet
+
+    sheet = modern_menu_stylesheet({"theme": "light"})
+    assert SYSTEM_FONT_STACK in sheet
+    family = _stylesheet_font_family(sheet)
+    if sys.platform == "win32":
+        # 单族 + 覆盖中文，两个条件缺一都会触发枚举（实测）
+        assert "," not in family, f"多族 font-family 会触发全字体库枚举: {family}"
+        assert "Microsoft YaHei" in family
+    elif sys.platform == "darwin":
+        # macOS 未实机验证，多族栈按原样保留，这里只锁住「没被顺手改掉」
+        assert "SF Pro Text" in family
+
+    # 用户自选字体也必须收敛成单族，否则挑了自定义字体的人重新踩同一个坑
+    custom = _stylesheet_font_family(
+        modern_menu_stylesheet({"theme": "light", "ui_font": "Consolas"})
+    )
+    assert "," not in custom, f"自选字体被拼成多族: {custom}"
+    assert "Consolas" in custom
