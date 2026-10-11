@@ -884,6 +884,11 @@ class Config:
             # pet/festival_animations.py）。当天只播第一次；手动「今日节日」与
             # 设置页「立即试听」每次都播。
             "festival_reminder_animation": True,  # 节日提醒是否播匹配动画
+            # 抽签（右键「抽支签」）：一次性娱乐动作，真随机抽签、不看日期。
+            # **只有两个开关、不含任何个人信息**——刻意做成与已归档的占星功能相反的形状
+            # （那套要出生日期/时刻/地点，见 .scratch/fortune-astrology）。
+            "divination_speak": True,  # 抽到签是否用报时的音色念出来（共用音频通道）
+            "divination_animation": True,  # 抽签时是否请角色动一下（动作池里没有就跳过）
             # 用户生日（MM-DD，留空=不提醒）。当天按节日提醒处理：气泡 + 可选语音 +
             # 「端蛋糕送礼物」动画（该素材随已安装版发布，仓库素材暂缺时静默跳过）。
             # 生日是**个人日期**，不受「中国节日/24 节气/西方节日」三个类别开关约束。
@@ -1136,6 +1141,8 @@ class Config:
             "festival_reminder_show_quote",
             "festival_reminder_speak",
             "festival_reminder_animation",
+            "divination_speak",
+            "divination_animation",
             "festival_birthday",
             "festival_custom_quotes_cn",
             "festival_custom_quotes_west",

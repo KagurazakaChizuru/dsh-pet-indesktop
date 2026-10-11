@@ -29,6 +29,7 @@ def test_modern_default_v1_has_compact_root_and_safety_actions():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "draw_lot",
         "voice_chime_now",
         "voice_chime_toggle",
         "festival_now",
@@ -337,6 +338,7 @@ def test_missing_user_layout_resolves_versioned_default():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "draw_lot",
         "voice_chime_now",
         "voice_chime_toggle",
         "festival_now",
@@ -368,6 +370,7 @@ def test_missing_user_layout_resolves_versioned_default():
         "agent_link",
         "proactive_screen",
         "todo_panel",
+        "draw_lot",
         "modern_settings",
         "quit",
     ]
@@ -536,6 +539,8 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
         expected_root.insert(-2, "待办提醒")
     else:
         expected_root.insert(-2, "待办提醒")
+    # 抽支签：一次性娱乐入口，2026-10-10 起默认可见（与报时/节日四项相反）
+    expected_root.insert(-2, "抽支签")
     # 报时/节日四项默认不在菜单上（模板 visible: false，2026-09-19 起）
     assert root == expected_root
     rendered = ["|" if action.isSeparator() else action.text() for action in menu.actions()]
@@ -549,9 +554,10 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     ]
     if sys.platform == "win32":
         expected_rendered.insert(-3, "主动识屏")
-    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 | 桌宠设置 退出
+    # tools 段顺序：… Agent 联动 [主动识屏] 待办提醒 [抽支签] | 桌宠设置 退出
     # （报时/节日四项默认 visible: false，不渲染）
     expected_rendered.insert(-3, "待办提醒")
+    expected_rendered.insert(-3, "抽支签")
     assert rendered == expected_rendered
     pet_controls = next(action.menu() for action in menu.actions() if action.text() == "桌宠控制")
     assert [action.text() for action in pet_controls.actions() if not action.isSeparator()] == [
@@ -869,8 +875,9 @@ def test_settings_sidebar_uses_stable_domains_and_owns_representative_rows(tmp_p
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
-    # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
+    # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）；
+    # 2026-10-10 新增「趣味」域（抽签 + 今日穿色）。
+    expected = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected
 
     def owner(setting_id):
@@ -1244,7 +1251,7 @@ def test_menu_domain_uses_in_page_task_tabs_without_changing_sidebar(tmp_path, m
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
 
-    expected_sidebar = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
+    expected_sidebar = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_sidebar
     tabs = dialog.pages.widget(3).findChild(SettingsTabContainer, "settingsTaskTabs")
     assert tabs is not None
@@ -1614,6 +1621,7 @@ def test_settings_domains_use_semantic_sidebar_icons():
         ("自动化与联动", "automation"),
         ("语音", "sound"),
         ("文件识别", "file"),
+        ("趣味", "fun"),
         ("更新", "update"),
     )
 

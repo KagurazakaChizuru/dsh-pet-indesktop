@@ -383,6 +383,11 @@ class SpriteMenuFacade:
         return _first_callable(self._hosts(), ("trigger_festival_now",))
 
     @property
+    def on_draw_lot(self):
+        """抽签（overlay 拓扑下由宿主 AppShell.trigger_draw_lot 提供）。"""
+        return _first_callable(self._hosts(), ("trigger_draw_lot",))
+
+    @property
     def on_toggle_festival(self):
         return _first_callable(self._hosts(), ("toggle_festival_reminder",))
 

@@ -97,6 +97,7 @@ ACTION_ICONS = {
     "modern_settings": "settings", "quit": "quit",
     "voice_chime_now": "chat", "voice_chime_toggle": "chat",
     "festival_now": "todo", "festival_toggle": "todo",
+    "draw_lot": "todo",
 }
 
 CUSTOM_ICON_CHOICES = (
@@ -217,6 +218,16 @@ def _build_festival_now(menu, pet):
     return add_action(menu, "今日节日", "todo", pet.on_festival_now, close_on_trigger=True)
 
 
+def _build_draw_lot(menu, pet):
+    """「抽支签」：一次性的娱乐入口，点一下抽一支并让桌宠念出来。
+
+    与「今日节日」同约定——``close_on_trigger=True``（抽完就收起菜单），可用性由
+    ``MenuActionSpec`` 的 ``_callback_available("on_draw_lot")`` 判定（overlay 拓扑下
+    回调由 ``sprite_menu_facade`` 提供同一名字的属性）。
+    """
+    return add_action(menu, "抽支签", "todo", pet.on_draw_lot, close_on_trigger=True)
+
+
 def _build_check_update(menu, pet):
     return add_action(menu, "检查更新", "update", lambda: pet.on_check_update(pet), close_on_trigger=True)
 
@@ -324,6 +335,9 @@ class MenuActionRegistry:
             ),
             "festival_toggle": MenuActionSpec(
                 _build_festival_toggle, _callback_available("on_toggle_festival")
+            ),
+            "draw_lot": MenuActionSpec(
+                _build_draw_lot, _callback_available("on_draw_lot")
             ),
             "quit": MenuActionSpec(add_quit),
         }

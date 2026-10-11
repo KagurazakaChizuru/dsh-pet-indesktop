@@ -81,6 +81,7 @@
 | [`ISSUE-EDGE-TTS-VOICE-DEPRECATION-2026-09-22.md`](ISSUE-EDGE-TTS-VOICE-DEPRECATION-2026-09-22.md) | 事故档案：edge 合成「没声音」的两条根因（微软下架音色 + 连发偶发空音频）与对策（音色表兜底、重试、非空缓存判定）。 | **改语音报时的合成/缓存路径、或再遇到「配置了却没声音」时必读**；它记录了 `NoAudioReceived` 为什么不等于网络问题的判断链。 |
 | [`grill-2026-08-21-ai-chat.md`](grill-2026-08-21-ai-chat.md) | AI 对话功能的需求对齐记录：多 Provider、流式、多轮上下文、JSON 会话、system prompt 优先级等已确认决策。 | 质疑"聊天窗口为什么这样设计/为什么用标准库 HTTP 而不是某个 SDK"时；这是原始决策依据。 |
 | [`ADDING-A-TTS-PROVIDER.md`](ADDING-A-TTS-PROVIDER.md) | 语音报时的 TTS **provider 接入指南**：`pet/tts` 的注册表/接口契约、四步接入流程、字段类型与红线。 | **新增、替换或修改任何合成后端（`pet/tts/*.py`）、或调整 `voice_chime_tts_*` 配置前必读**；改设置页的「合成后端」区之前也先看它，那里是 provider 声明驱动、不该写死后端。 |
+| [`DIVINATION-2026-10-10.md`](DIVINATION-2026-10-10.md) | 抽签（右键「抽支签」）：24 支签库的形状与扩签规矩、加权抽签（上上少见/中平最多）、真随机与可复现注入、气泡四行与语音一句、摇签动作怎么挑、两个开关、新增菜单项要改的六处。 | **改抽签任何一环（`pet/divination*.py`）、扩签库、或要给桌宠再加"点一下来一发"的娱乐入口时必读**；它也写清了它是已归档的占星功能的替代品（别再引入个人信息）。 |
 
 ---
 
@@ -134,6 +135,7 @@
 
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
+| [`PR-REPORT-DIVINATION-2026-10-10.md`](PR-REPORT-DIVINATION-2026-10-10.md) | 抽签（右键「抽支签」）：24 支签库 + 加权真随机（可注入复现）+ 一次性播报（复用既有音频通道）+ 摇签动作 + 设置页「互动 · 抽签」两个开关；含 `timeit` 实测（draw 5.2µs、冷启动 import 16.3ms、无定时器/无新 IO）与**被锁文件逼出来的"备用 dist 构建 + robocopy /MIR /XF"部署口径**（游戏录制器占着 live 目录里的 ffmpeg，`COLLECT` 半清空目录）。 | 改 `pet/divination*.py`、扩签库、加/改菜单入口，或**再遇"构建时目标目录有文件被占用"**时必读。 |
 | [`PR-REPORT-FULL-REVIEW-FIXES-2026-10-03.md`](PR-REPORT-FULL-REVIEW-FIXES-2026-10-03.md) | 全量大审修复批次：两家独立审查（astra/ops5.5）27 条发现并集，主代理逐条裁决（修 20/缓 5/否 1/产品决策 1），ds 六批修复 60+ 新回归全部红→绿——冻结根因之外的 20 条：`_idle_trim_timer` 停摆、worker 回收死路、预热竞态倒写、WebM 暂停丢帧、计划时长速率错配、暂停所有权冲突、spawn 暂停继承、restart 对称收口、预热绕闸、碰撞累计写回（手感变化待实机）、隐藏宠退出碰撞、旋转像素命中、SessionWatcher 三层修复（锁屏通知真接入）、退出收口加固、主库 shutdown、配置显式 null、flipped 回退、start 定序、句柄追踪、孤儿终局、limiter fail-closed、slot 原子写、缓存有界、屏迁移两刀。 | 评审/合并本批前必读；改播放暂停/碰撞写回/会话接入/退出收口/屏迁移/持久化任一域，或再遇「冻结/隐形障碍/迁移后位置错」时必读；缓修 5 条（非 Windows 拓扑穿透=发布阻断级）与未验收边界在其中。 |
 | [`PR-REPORT-STALE-CLIP-PAUSE-FREEZE-2026-10-03.md`](PR-REPORT-STALE-CLIP-PAUSE-FREEZE-2026-10-03.md) | clip 暂停标记跨绑定滞留致画面永久冻结（拖拽后卡住 / 提起动画变静态图 / 挂机回来三只全冻但还在移动，三症同源）：隐藏期换绑只 stop 旧 clip 不清 `_paused`，恢复只续当前 clip，旧 clip 再绑时 `start()` 看到滞留标记不起定时器 = 冻在首帧；修法 = `bind_clip` 在 sprite 未暂停时补一次幂等 `resume()`（+9 行，0.299µs/次实测），契约持有方对齐下推状态，隐藏期零推进契约不变。 | 改 `pet/pet_sprite.py` 的 bind/restart/pause/resume、`pet/frameseq_clip.py` / `pet/webm_clip.py` 的 start/pause/resume 语义、隐藏/挂起/全屏避让路径，或再遇「动画冻在静态帧但宠物还在动」时必读。 |
 | [`PR-REPORT-FRAMESEQ-V3-PIPELINE-2026-09-29.md`](PR-REPORT-FRAMESEQ-V3-PIPELINE-2026-09-29.md) | 帧序列统一档位 v3（`unblend-white-v3`）全量重出与打包部署：106 段全部收敛为 Q70 + 白底反解 v3，档串写进 meta 并成为**采纳条件**（旧三代产物一律不再采纳）；两段式转换（无损中间帧 → 逐帧反解收色 → Q70）与「为什么不让 ffmpeg 一趟做完」；v4 镂空还原**挂起**（实机误切白色鲸鳍）。磁盘 **573.3 → 379.1 MB**（−33.9%）、便携包 zip **716.0 MiB**、部署树内素材经本人现场核验为 106 段全 v3；含与交接记录「721→379MB / 908→716MB」的口径差异（721/908 不可复测，不作证据）。 | 改 `pet/frameseq_provision.py`（档串/采纳闸门/发布回滚/反解链）、`tools/convert_frameseq.py`、或要重出素材世代、判断「为什么某段帧序列没被采纳」、引用素材体积与打包大小之前必读。 |

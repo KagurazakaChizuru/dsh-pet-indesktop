@@ -879,6 +879,7 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     if sys.platform == "win32":
         expected_labels.append("主动识屏")  # 仅 Windows + 有聊天能力时显示
     expected_labels.append("待办提醒")  # 待办管理面板入口（所有平台）
+    expected_labels.append("抽支签")  # 抽签（2026-10-10 起默认可见）
     # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
     # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([
@@ -1380,8 +1381,9 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert dialog.findChild(settings_mod.QFrame, "sidebarPane").width() == 200
     assert isinstance(dialog.sidebar, QListWidget)
     assert isinstance(dialog.pages, QStackedWidget)
-    # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
+    # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）；
+    # 2026-10-10 新增「趣味」域（抽签 + 今日穿色）。
+    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_pages
     assert dialog.pages.count() == len(expected_pages)
     assert dialog.search_edit.placeholderText() == "搜索设置…"
@@ -1395,6 +1397,8 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
         "应用启动", "窗口与系统", "动画与移动", "点击反馈", "自言自语",
         "显示", "菜单外观", "对话窗口", "已配置应用", "内容与布局",
         "模型与连接", "视觉能力",
+        # 「趣味」域（2026-10-10）：抽签 + 今日穿色两节
+        "抽签", "今日穿色",
         # 「语音」总域只收 TTS 类设置（2026-09-17 定稿口径）：语音报时 + 节日提醒
         "语音报时", "节日提醒",
     }.issubset(set(section_titles))

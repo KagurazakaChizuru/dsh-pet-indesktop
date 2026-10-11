@@ -68,6 +68,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "dialogue_last_scope",
         "dialogue_mode",
         "dialogue_phrases",
+        "divination_animation",
+        "divination_speak",
         "drag_physics",
         "dynamic_island",
         "edge_probe_enabled",

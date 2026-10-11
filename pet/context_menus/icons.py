@@ -160,6 +160,12 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
         painter.drawLine(QPointF(4.8, 7.0), QPointF(8.0, 10.2))
         painter.drawLine(QPointF(11.2, 7.0), QPointF(8.0, 10.2))
         painter.drawLine(QPointF(3.0, 13.5), QPointF(13.0, 13.5))
+    elif name == "fun":
+        # 「趣味」域图标：四角星（纯矢量，不新增二进制素材）。
+        painter.drawPolygon(QPolygonF([
+            QPointF(8.0, 1.3), QPointF(9.6, 6.4), QPointF(14.7, 8.0), QPointF(9.6, 9.6),
+            QPointF(8.0, 14.7), QPointF(6.4, 9.6), QPointF(1.3, 8.0), QPointF(6.4, 6.4),
+        ]))
     elif name == "file":
         painter.drawRoundedRect(QRectF(2.5, 1.5, 9.5, 13.0), 1.6, 1.6)
         painter.drawLine(QPointF(5.0, 5.5), QPointF(11.0, 5.5))

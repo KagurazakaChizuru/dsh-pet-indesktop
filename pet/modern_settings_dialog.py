@@ -163,6 +163,7 @@ from .persona_template import (
     PARAMETERS,
 )
 from . import settings_file_interpret
+from . import divination_settings
 from . import settings_interaction
 from . import settings_music
 from . import settings_pet_controls
@@ -331,6 +332,7 @@ class ModernSettingsDialog(QDialog):
         self._build_pet_controls()
         # 「文件识别」域控件在本模块构建（行数预算原因），见 settings_file_interpret。
         self._build_file_interpret_controls()
+        self._build_divination_controls()
         # 「音乐播放器路径」控件同样在本模块构建（行数预算原因），见 settings_music。
         settings_music.create_music_player_controls(self)
         # 「随桌宠启动 dsh 服务」开关（origin/main #80 合入带回）：构建留在
@@ -1021,6 +1023,10 @@ class ModernSettingsDialog(QDialog):
     def _build_file_interpret_controls(self) -> None:
         """「文件识别」域控件（settings_file_interpret 构建，行数预算原因不在本文件展开）。"""
         settings_file_interpret.create_file_interpret_controls(self)
+
+    def _build_divination_controls(self) -> None:
+        """「互动 · 抽签」域控件（divination_settings 构建，行数预算原因不在本文件展开）。"""
+        divination_settings.create_divination_controls(self)
 
     def _build_proactive_controls(self) -> None:
         """主动识屏页控件（仅 Windows + 有聊天能力时挂载）。"""
@@ -1964,6 +1970,7 @@ class ModernSettingsDialog(QDialog):
             "自动化与联动": automation,
             "语音": voice,
             "文件识别": file_interpret,
+            "趣味": divination_settings.build_divination_page(self),
             "更新": self.update_page,
         }
         for label, icon in SETTINGS_DOMAIN_NAV:
@@ -2301,6 +2308,7 @@ class ModernSettingsDialog(QDialog):
         if self.ai_page is not None:
             self.ai_page.save()
         settings_file_interpret.save_file_interpret_settings(self)
+        divination_settings.save_divination_settings(self)
         settings_music.save_music_player_settings(self)
         if sys.platform == "win32" and self.include_ai and hasattr(self, "pro_enabled_check"):
             from .proactive import PRESET_DEFAULTS

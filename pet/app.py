@@ -540,6 +540,7 @@ class PetInstance:
         # 点击自言自语的朗读走同一条音频通道（AppShell 持有，进程内唯一）。
         win.on_self_talk_speak = self._slot_wrap(self.shell.speak_self_talk)
         win.on_festival_now = self._slot_wrap(self.shell.trigger_festival_now)
+        win.on_draw_lot = self._slot_wrap(self.shell.trigger_draw_lot)
         win.on_toggle_festival = self._slot_wrap(self.shell.toggle_festival_reminder)
         win.on_restore_fun_windows = restore_ojingjing_windows
         win.on_hidden = self._slot_wrap(self._notify_pet_hidden)
@@ -3474,6 +3475,26 @@ class AppShell:
         """
         service = self._ensure_festival_service()
         service.remind_now()
+
+    def _ensure_divination_service(self):
+        """懒创建抽签服务（只在点「抽支签」时创建；无定时器、不常驻）。"""
+        if getattr(self, "divination_service", None) is None:
+            from .divination_service import DivinationService
+
+            self.divination_service = DivinationService(self)
+        return self.divination_service
+
+    def trigger_draw_lot(self) -> None:
+        """抽一支签（右键菜单「抽支签」的入口）。
+
+        与语音报时/节日提醒的手动触发同语义：**无视总开关**，用户主动发起即执行。
+        服务自己决定气泡/语音/摇签动作（两个开关在设置页「互动 · 抽签」）。
+        """
+        try:
+            self._ensure_divination_service().draw_now()
+        except Exception:
+            # 抽签是一次性娱乐动作，失败不该把异常抛回 Qt 的菜单回调。
+            logging.getLogger("dsh-pet-standalone").exception("抽签失败")
 
     def toggle_festival_reminder(self) -> None:
         """「启用/关闭节日提醒」开关（默认隐藏、菜单编辑器可加回）：翻转配置并同步服务启停。"""

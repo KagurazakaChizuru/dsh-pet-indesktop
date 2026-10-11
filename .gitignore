@@ -43,6 +43,8 @@ _plan/
 # onedir build artifacts
 dist-onedir/
 build-onedir/
+# 备用输出目录（live 目录被占用时用 .scratch/build_onedir_alt.ps1 构建到这里）
+dist-onedir-alt/
 
 # 构建注入的变体标识（由 scripts/build_onedir.ps1 生成）
 packaging/build_variant.py

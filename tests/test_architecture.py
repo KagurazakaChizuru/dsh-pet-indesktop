@@ -198,7 +198,15 @@ WINDOW_PY_LINE_BUDGET = 4510
 # 2026-10-04 校准：合并 origin/main（beaa8f5，139 个提交）后实测——上游的 overlay
 # 拓扑设置面（D12 子肥鱼退出指令/更新页接线/文案如实）与本仓库保留的设置行
 # （多行输入框、TTS 后端行等）叠加，按文件约定只随实测校准，不为达标压行。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2396
+# 2026-10-10 校准到 2403（+7）：抽签的**页面本体与控件全部拆在新模块**
+# `pet/divination_settings.py`（同 settings_file_interpret 的做法），本文件只多出
+# 三行接线（import / `_build_divination_controls` 两行 / `_write_config` 里一行
+# save 调用）。实测 2403，按文件约定只随实测校准，不为达标压行。
+# 2026-10-10 再校准到 2404（+1）：机主要求「抽签放到设置里、归类为趣味」——
+# 抽签从「互动」域的页内标签搬成一级域，本文件只多一行
+# `domain_content["趣味"] = divination_settings.build_divination_page(self)`
+# （整页仍在 divination_settings 里构建）。实测 2404。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2404
 
 
 def _read(name: str) -> str:
