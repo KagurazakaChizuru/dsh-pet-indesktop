@@ -227,3 +227,24 @@ def test_first_frame_pixmap_is_null_before_any_frame(app, tmp_path):
     assert win.icon_pixmap(64).isNull()
     assert QIcon(win.icon_pixmap(64)).isNull()
     win.close()
+
+
+def test_tray_menu_keeps_two_flat_harness_launch_items(app, tmp_path):
+    """托盘里的 Harness 入口是**两个平铺启动项**，不是右键那个四项子菜单。
+
+    对齐依据（2026-10 双目标）：`README.md` 现行段落写「右键菜单提供 DeepSeek
+    Harness 子菜单（四项），托盘菜单是两个平铺启动项」——托盘侧此前没有守卫，
+    菜单改名或把子菜单搬进托盘都不会被发现。重启/停止只在右键子菜单里提供。
+    """
+    _shell, _win, tray = _build(Config(tmp_path), QPixmap())
+    try:
+        menu = tray.contextMenu()
+        assert menu is not None, "托盘必须挂了上下文菜单"
+        labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+        assert "启动 dsh web 界面" in labels
+        assert "启动桌面端界面" in labels
+        assert "DeepSeek Harness" not in labels, "托盘不给 Harness 子菜单，只给两个平铺启动项"
+        for label in ("重启服务", "停止服务"):
+            assert label not in labels, f"托盘不提供「{label}」（那是右键子菜单的四项之一）"
+    finally:
+        tray.hide()

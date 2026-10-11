@@ -6,7 +6,7 @@
 
 1. **门控太宽**：自动拉起只看 ``enable_chat and harness_autostart``，不看
    ``agent_link.dsh``——DSH 联动没开时那个服务没有任何消费者（桥接插件不装、
-   DshMonitor 不跑、DshStateTracker 停表），纯烧内存；
+   DshMonitor（桥目录唯一读方）不跑），纯烧内存；
 2. **退出无收口**：``_spawn`` 用 CREATE_NO_WINDOW 起进程，父死子不死（实机确认
    桌宠退出后 node 还活着），而 ``_on_about_to_quit`` 里没有任何 harness 调用。
 
@@ -20,6 +20,7 @@ OS 边界全部打桩（绝不在测试里真的起/杀进程）：Popen、进�
 from __future__ import annotations
 
 import os
+import threading
 import time
 from types import SimpleNamespace
 
@@ -56,10 +57,23 @@ def _qapp() -> QApplication:
 def _clean_self_launched_registry():
     """自拉起登记表是模块级状态：逐用例清空（退出收口只认它，串味会误杀）。"""
     hl._SELF_LAUNCHED_PIDS.clear()
+    hl._SELF_LAUNCHED_KIND.clear()
     hl._LAUNCHED_CHILDREN.clear()
     yield
     hl._SELF_LAUNCHED_PIDS.clear()
+    hl._SELF_LAUNCHED_KIND.clear()
     hl._LAUNCHED_CHILDREN.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_desktop_boundary(monkeypatch):
+    """本文件全部用例钉 web 路径：桌面端安装 / 运行探测是机器相关的 OS 边界。
+
+    开发机上装了**且正在跑**桌面端时，``auto`` 会解析成 desktop（单实例 → 直接
+    返回 already），本文件要测的 web 自启链路就一条都测不到。
+    """
+    monkeypatch.setattr(hl, "desktop_install_path", lambda: None)
+    monkeypatch.setattr(hl, "desktop_process_running", lambda: False)
 
 
 class _FakeProc:
@@ -171,8 +185,8 @@ def _gate_shell(tmp_path, *, enable_chat: bool = True, autostart: bool = True,
 def _real_shell(tmp_path, monkeypatch, *, dsh_link: bool, autostart: bool = True,
                 enable_chat: bool = True) -> app_mod.AppShell:
     """真 AppShell（真 Config + 真门方法），收口路径可直接调 ``_on_about_to_quit``。"""
-    # 联动开着时 DshStateTracker 会真起 3s 端口探活：只读探测也不许碰本机真实端口
-    # （用户机器上可能真跑着 dsh web）。
+    # 联动开着时 DshMonitor（单读方）会真起 3s 端口探活：只读探测也不许碰本机
+    # 真实端口（用户机器上可能真跑着 dsh web）。
     monkeypatch.setattr(hl, "is_running", lambda port=None: False)
     cfg = Config(base=tmp_path)
     cfg.set("harness_autostart", autostart)
@@ -217,7 +231,7 @@ def test_autostart_launches_and_registers_pid_when_dsh_link_enabled(tmp_path, sp
 
 
 def test_manual_menu_start_ignores_the_link_gate(tmp_path, monkeypatch, spawn_probe):
-    """手动「启动并打开页面」不受门控影响：用户明示要开就开。"""
+    """手动「启动 dsh web 界面 / 启动桌面端界面」不受门控影响：用户明示要开就开。"""
     calls: list[dict] = []
     monkeypatch.setattr(
         hl, "launch_harness",
@@ -226,6 +240,8 @@ def test_manual_menu_start_ignores_the_link_gate(tmp_path, monkeypatch, spawn_pr
     # 该实例的配置：联动关着（按门控不该自动拉起）
     assert _gate_shell(tmp_path, dsh_link=False)._dsh_tracker_wanted() is False
     hl.launch_harness_gui(SimpleNamespace(show_bubble=lambda *a, **kw: None), action="start")
+    # 拉起在 worker 线程执行：轮询等它落地（不赌固定 sleep）
+    assert _wait_for(lambda: bool(calls)), "手动菜单启动不得经过 agent_link 门"
     assert calls, "手动菜单启动不得经过 agent_link 门"
 
 
@@ -717,3 +733,83 @@ def test_stop_self_launched_single_flight(monkeypatch):
     gate.set()
     t.join(timeout=5.0)
     assert terminated == [4242]
+
+
+# ---------------------------------------------------------------- 双目标自启
+def test_autostart_delegates_existing_instance_check_to_launcher(tmp_path, monkeypatch):
+    """已有 web 实例在线时，自启也必须把判定交给 launcher——不能在 app 层提前 return。
+
+    回归（2026-10 双目标）：app 层用「web 端口在线就 return」当复用判定，会把
+    ``harness_launch_target=desktop/auto`` 的选择一起挡掉（桌面端不听 web 端口，
+    本机有 web 实例 ≠ 用户要的桌面端已在跑）。
+    """
+    shell = _gate_shell(tmp_path, dsh_link=True)
+    launched: list[dict] = []
+    monkeypatch.setattr(hl, "is_running", lambda port=None: True)  # 38080 已有实例
+    monkeypatch.setattr(
+        hl, "launch_harness",
+        lambda **kw: launched.append(kw) or ("already", "http://127.0.0.1:38080"),
+    )
+    shell._maybe_autostart_harness()
+    assert _wait_for(lambda: bool(launched)), "已有实例的判定必须交给 launch_harness"
+    assert launched[0].get("target") == "auto", "自启必须带上配置里的目标"
+
+
+def test_autostart_desktop_not_spawned_when_toggle_flipped_during_probe(tmp_path, monkeypatch):
+    """探测期间关掉「随桌宠启动」→ 桌面端不得被拉起（走产品的 cancel_check 门）。
+
+    回归（2026-10 双目标）：``_harness_autostart_wanted`` 只在调度时查一次，
+    launch 的 cancel_check 原来只认退出/会话结束标记——用户在慢探测（真机是注册表
+    枚举）期间关掉开关不算数。desktop 目标下这一格的代价是真弹出一个用户刚说不
+    想要的 GUI 窗口。
+
+    本用例走产品真线程 + 真 ``launch_harness``，只打桩 OS 边界（安装探测 / 进程
+    枚举 / 拉起），并借「返回后立即收口」那一分支当线程收尾信号（不赌固定 sleep）。
+
+    消融判别：删掉 app 里 cancel_check 的 ``not self._harness_autostart_wanted()``
+    一项，本用例必须变红（``_spawn_desktop`` 被调用）。
+    """
+    shell = _gate_shell(tmp_path, dsh_link=True)
+    shell.config.set("harness_launch_target", "desktop")
+    exe = tmp_path / "DeepSeek Harness.exe"
+    exe.write_bytes(b"MZ")
+    spawned: list = []
+    done = threading.Event()
+
+    def _probe_then_flip():
+        # 慢探测期间用户把开关关掉（这正是 launch_harness 里 cancel_check 的窗口）
+        shell.config.set("harness_autostart", False)
+        return exe
+
+    monkeypatch.setattr(hl, "DESKTOP_SUPPORTED", True)
+    monkeypatch.setattr(hl, "desktop_install_path", _probe_then_flip)
+    monkeypatch.setattr(hl, "desktop_process_running", lambda: False)
+    monkeypatch.setattr(hl, "_spawn_desktop", lambda path: spawned.append(path))
+    # launch 返回后 app 会走「刚拉起又被关 → 立即收口」分支：用它当线程收尾信号
+    monkeypatch.setattr(
+        hl, "stop_self_launched_harness", lambda: done.set() or [])
+
+    shell._maybe_autostart_harness()
+    assert done.wait(timeout=10.0), "自启线程没跑完（探测/中止链路卡住）"
+    assert spawned == [], "开关已被关掉：desktop 不得被拉起"
+
+
+def test_autostart_desktop_spawns_when_toggle_stays_on(tmp_path, monkeypatch):
+    """对照：开关一直开着 → desktop 照常拉起（别把门焊死）。
+
+    没有这条，上面那条「不拉起」在 cancel_check 永远返回 True 的实现下也是绿的。
+    """
+    shell = _gate_shell(tmp_path, dsh_link=True)
+    shell.config.set("harness_launch_target", "desktop")
+    exe = tmp_path / "DeepSeek Harness.exe"
+    exe.write_bytes(b"MZ")
+    spawned: list = []
+
+    monkeypatch.setattr(hl, "DESKTOP_SUPPORTED", True)
+    monkeypatch.setattr(hl, "desktop_install_path", lambda: exe)
+    monkeypatch.setattr(hl, "desktop_process_running", lambda: False)
+    monkeypatch.setattr(hl, "_spawn_desktop", lambda path: spawned.append(path))
+
+    shell._maybe_autostart_harness()
+    assert _wait_for(lambda: bool(spawned)), "开关开着时 desktop 目标必须被拉起"
+    assert spawned == [exe]

@@ -1,11 +1,14 @@
-// dsh-pet 桌宠桥接插件（仅使用 DSH 提供的 LLM 服务，不主动联网）
+// dsh-pet 桌宠桥接插件（纯本地写盘，不主动联网、不订阅 mux、不读写控制队列）
 // 订阅 DSH 的 agent 生命周期事件，追加写入共享桥目录的 dsh-{pid}.jsonl
 //（多实例分区；消费端 glob dsh*.jsonl，兼容旧单文件 dsh.jsonl），
 // 桌宠侧的 DshMonitor 通过 byte-offset tail 读取（不回放历史）。
+//
+// 脱敏口径（#226，2026-10 减法）：不落任何明文内容——用户消息正文、模型回复
+// 正文、工具命令/参数指纹、工具结果摘要一律不写盘；只写事件名、状态、工具名、
+// 错误码、会话/调用身份等元数据。
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { randomUUID } from "node:crypto";
 
 // ===== 零依赖红线 =====
@@ -13,32 +16,13 @@ import { randomUUID } from "node:crypto";
 // pnpm 不会安装被链接包自己的依赖；而链接目标常常是打包版桌宠
 // _internal 内的副本（CI 构建不带 node_modules）。一旦此处声明运行时依赖，
 // 依赖解析失败会让 Cordis 插件树初始化整体抛错、DSH 无法启动（2026-09 事故：
-// 作者与多用户 dsh 全 profile 起不来）。因此 user-message envelope 手写，
-// 形状与 @deepseek-ai/dsh-llm 的 createUserMessage 完全对齐——
-// {...input, role: "user", id: randomUUID()}，structuredClone 后深冻结。
-// dsh 升级 envelope 形状时这里必须同步（inject 的 llm.stream / steer 消费它）。
-function deepFreezeMessage(value, seen = new WeakSet()) {
-  if (value === null || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const key of Object.keys(value)) deepFreezeMessage(value[key], seen);
-  return Object.freeze(value);
-}
-
-// dsh createUserMessage 的本地等价物：补齐 role/id，返回不可变快照。
-function createUserMessage(input) {
-  const message = structuredClone({ ...input, role: "user", id: randomUUID() });
-  return deepFreezeMessage(message);
-}
+// 作者与多用户 dsh 全 profile 起不来）。
 
 const MAX_BYTES = 1024 * 1024; // 事件文件超过 1MB 时轮转（保留 .1 备份，防无限增长）
 const PLUGIN_ID = "dsh-pet-bridge";
-// These services are resolved by DSH when the plugin is loaded.  The bridge
-// uses them only for the watchdog's isolated diagnosis request; normal event
-// forwarding remains usable even when no model is configured.
-const inject = ["llm", "agentDefaultModel"];
-const CONTROL_POLL_MS = 150;
-const CONTROL_MAX_CONTEXT = 12000;
-const CONTROL_MAX_REQUEST_AGE_MS = 10 * 60 * 1000;
+// 减法后本插件不消费任何 DSH 注入服务（看门狗诊断已删）：保持空 inject，
+// 事件转发在无模型配置时同样可用。
+const inject = [];
 
 // 进程内状态去重 + 多 Agent 聚合：
 // 1) dsh 在 agent 创建/状态切换瞬间会抖动出重复 idle（实测 idle→working 仅隔
@@ -47,7 +31,6 @@ const CONTROL_MAX_REQUEST_AGE_MS = 10 * 60 * 1000;
 //   （子代理/多会话），全局单值去重会让先完成的 agent 把还在干活的顶成 idle。
 const agentStates = new Map(); // agent 对象 → "working" | "idle"
 const liveAgents = new Map(); // agent/session id → agent object
-const knownSessions = new Set();
 const sessionMetaCache = new Map(); // sessionId → { sessionName, projectName, agentName }
 let metadataRefreshPromise = null;
 let metadataRefreshTimer = null;
@@ -96,300 +79,10 @@ function bridgeDir() {
   return path.join(os.homedir(), ".config", "dsh-pet-bridge");
 }
 
-function controlRequestPath(id) {
-  return path.join(bridgeDir(), `watchdog-request-${id}.json`);
-}
-
-function controlResponsePath(id) {
-  return path.join(bridgeDir(), `watchdog-response-${id}.json`);
-}
-
-function writeControlResponse(id, result) {
-  try {
-    fs.mkdirSync(bridgeDir(), { recursive: true });
-    fs.writeFileSync(controlResponsePath(id), JSON.stringify({
-      id, ts: Date.now(), ...result,
-    }), "utf8");
-  } catch (err) {
-    // The response file is a convenience for the pet.  Never affect the Agent.
-  }
-}
-
-function controlAgent(ctx, sessionId) {
-  const id = String(sessionId || "");
-  if (!id) return null;
-  const live = liveAgents.get(id);
-  if (live) return live;
-  try {
-    return ctx?.agents?.get?.(id) || null;
-  } catch (err) {
-    // DSH's strict injection proxy may throw when the optional service is not
-    // declared. Unknown sessions must still converge to a normal not-found.
-    console.warn(`[${PLUGIN_ID}] agents lookup unavailable: ${String(err?.message || err)}`);
-    return null;
-  }
-}
-
-function agentBelongsToLiveSession(agent, sessionId) {
-  if (!agent) return false;
-  const id = String(sessionId);
-  return liveAgents.get(id) === agent ||
-    liveAgents.get(String(agent.id || "")) === agent ||
-    liveAgents.get(String(agent.session?.id || "")) === agent;
-}
-
-function controlAgentState(agent) {
-  return String(agent?.status || agent?.state || "unknown");
-}
-
-// ===== 子代理 → 根会话归一 =====
-// DSH 的会话在持久化 header 里携带谱系：parentSession（直接父会话 id）、
-// delegationDepth（顶层为 0/缺省，子代理 = 父级深度 + 1）、origin === "subagent"
-// （直接子代理标记）。运行时 Agent 经 session.header 暴露该 header。
-// 控制动作（interrupt/replan）打在一个子代理上时，主 agent 会立刻补派新的
-// 子代理——用户视角「终止没用」。因此把控制归一到目标会话的根会话：
-//   子代理链上的 agent 统一作用到其最高可解析的存活祖先（根）；
-//   顶层 session 直接作用自身。
-// 返回的对象同时给出 wasSubagent / appliedToRoot / rootSessionId / subagentChain，
-// 供 pet 侧区分「已终止会话（含子代理）」与「已终止子代理（主代理仍在运行）」。
-function resolveControlRoot(agent, sessionLookup) {
-  const sessionIdOf = (a) => String(a?.id || a?.session?.id || "");
-  const headerOf = (a) => (a && a.session && a.session.header) || null;
-  const isSubagentHeader = (a) => {
-    const h = headerOf(a);
-    if (!h) return false;
-    return Number(h.delegationDepth || 0) > 0 ||
-      String(h.origin || "") === "subagent" ||
-      String(h.parentSession || "") !== "";
-  };
-  const targetSessionId = sessionIdOf(agent);
-  if (!isSubagentHeader(agent)) {
-    return {
-      targetSessionId,
-      wasSubagent: false,
-      appliedToRoot: false,
-      rootAgent: agent,
-      rootSessionId: targetSessionId,
-      subagentChain: [],
-    };
-  }
-  // 沿 parentSession 谱系向上，尽可能解析到最高存活的祖先。
-  const chain = [];
-  let current = agent;
-  const seen = new Set();
-  while (current) {
-    const sid = sessionIdOf(current);
-    if (!sid || seen.has(sid)) break;
-    seen.add(sid);
-    chain.push(sid);
-    const h = headerOf(current);
-    const parent = h && h.parentSession ? String(h.parentSession) : "";
-    if (!parent) break;
-    const parentAgent = (typeof sessionLookup === "function") ? sessionLookup(parent) : null;
-    if (!parentAgent || parentAgent === current) break;
-    current = parentAgent;
-  }
-  const appliedToRoot = chain.length > 1 && current !== agent;
-  const rootAgent = appliedToRoot ? current : agent;
-  return {
-    targetSessionId,
-    wasSubagent: true,
-    appliedToRoot,
-    rootAgent,
-    rootSessionId: sessionIdOf(rootAgent),
-    subagentChain: chain,
-  };
-}
-
-async function waitAgentIdle(agent, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const state = controlAgentState(agent);
-    if (state === "idle" || state === "cancelled" || state === "stopped") return true;
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  return false;
-}
-
-function currentModelSelection(ctx, request) {
-  const provider = String(request.provider || "");
-  const model = String(request.model || "");
-  if (provider && model) return { provider, model };
-  const selection = typeof ctx.agentDefaultModel?.currentSelection === "function"
-    ? ctx.agentDefaultModel.currentSelection() : null;
-  return {
-    provider: provider || String(selection?.provider || ""),
-    model: model || String(selection?.model || ""),
-  };
-}
-
-async function runBridgeDiagnosis(ctx, request, signal) {
-  if (typeof ctx.llm?.stream !== "function") throw new Error("llm-unavailable");
-  const selection = currentModelSelection(ctx, request);
-  if (!selection.provider || !selection.model) throw new Error("judge-model-unavailable");
-  const context = String(request.context || "").slice(0, CONTROL_MAX_CONTEXT);
-  const goal = String(request.goal || "").slice(0, 2000);
-  const prompt = [
-    "你是执行中的 Agent 的独立规划诊断器。不要调用工具，不要泛泛解释。",
-    "根据当前用户目标和最近一个步骤批次，输出一份可以直接交给 Agent 执行的下一步计划。",
-    "计划必须包含：当前目标、最强假设、支持证据、反对证据、下一项最小可证伪实验；",
-    "完成前避免继续无目的 Search/Read。只输出计划正文，不要输出 JSON、前言或道歉。",
-    `当前用户目标：${goal || "（未知）"}`,
-    `最近上下文：\n${context || "（无）"}`,
-  ].join("\n\n");
-  const messages = [createUserMessage({
-    content: [{ type: "text", text: prompt }],
-    source: { kind: "plugin", plugin: PLUGIN_ID },
-  })];
-  let output = "";
-  let reasoning = "";
-  for await (const chunk of ctx.llm.stream({
-    provider: selection.provider,
-    model: selection.model,
-    messages,
-    // 推理型模型会先消耗 token 在 reasoning 上，700 经常被吃光导致正文为空
-    // （实机复现：empty-diagnosis）。给足预算，正文才出得来。
-    maxTokens: 2048,
-    purpose: "dsh-pet-watchdog-replan",
-    signal,
-  })) {
-    if (chunk?.type === "text-delta") output += String(chunk.text || "");
-    else if (chunk?.type === "reasoning-delta" || chunk?.type === "reasoning") reasoning += String(chunk.text || "");
-  }
-  output = output.trim();
-  if (!output) {
-    console.warn(`[${PLUGIN_ID}] diagnosis empty (reasoning ${reasoning.length} chars, model ${selection.provider}/${selection.model})`);
-    throw new Error("empty-diagnosis");
-  }
-  return output.slice(0, CONTROL_MAX_CONTEXT);
-}
-
-async function handleControlRequest(ctx, request) {
-  const id = String(request?.id || "");
-  const operation = String(request?.operation || "");
-  const sessionId = String(request?.sessionId || "");
-  if (!id || !sessionId || !["interrupt", "replan"].includes(operation)) {
-    return { ok: false, operation, sessionId, phase: "invalid", error: "invalid-control-request", foundAgent: false, cancelInvoked: false };
-  }
-  if (Date.now() - Number(request.ts || 0) > CONTROL_MAX_REQUEST_AGE_MS) {
-    return { ok: false, operation, sessionId, phase: "stale", error: "stale-control-request", foundAgent: false, cancelInvoked: false };
-  }
-  const agent = controlAgent(ctx, sessionId);
-  writeRecord({ event: "bridge/control-received", requestId: id, sessionId,
-    operation, foundAgent: !!agent && agentBelongsToLiveSession(agent, sessionId), agentState: controlAgentState(agent) });
-  const foundAgent = !!agent && agentBelongsToLiveSession(agent, sessionId);
-  if (!foundAgent) {
-    if (operation === "interrupt" && knownSessions.has(sessionId)) {
-      return { ok: true, operation, sessionId, phase: "already-idle", alreadyIdle: true, foundAgent: false, cancelInvoked: false };
-    }
-    return { ok: false, operation, sessionId, phase: "not-found", error: "session-not-found", foundAgent: false, cancelInvoked: false };
-  }
-  // 把控制归一到根会话：子代理 → 其最高存活祖先；顶层 session → 自身。
-  // 这样 interrupt 停根 agent 的当前回合（主 agent 不会再补派新子代理），
-  // replan 给根 agent 注入重规划建议，而不是只作用于空转的子代理。
-  const resolved = resolveControlRoot(agent, (sid) => liveAgents.get(String(sid)));
-  const controlTarget = resolved.appliedToRoot ? resolved.rootAgent : agent;
-  const rootNorm = {
-    wasSubagent: resolved.wasSubagent,
-    appliedToRoot: resolved.appliedToRoot,
-    rootSessionId: resolved.rootSessionId,
-    subagentChain: resolved.subagentChain,
-  };
-  let cancelInvoked = false;
-  try {
-    if (operation === "interrupt") {
-      // Terminate means terminate: discard pending watchdog/user steering too.
-      await controlTarget.cancel("dsh-pet-watchdog", { keepInbox: false });
-      cancelInvoked = true;
-      // 用户点的是这个子代理：主 agent 的回合取消未必级联到已发布的子代理
-      // 自身 driver，显式再停一次目标，确保用户看到的那个空转子代理确实停下。
-      if (resolved.appliedToRoot && agent !== controlTarget) {
-        try { agent.cancel("dsh-pet-watchdog", { keepInbox: false }); } catch {}
-      }
-      if (await waitAgentIdle(controlTarget)) {
-        return { ok: true, operation, sessionId, phase: "cancelled", alreadyIdle: false, foundAgent: true, cancelInvoked, ...rootNorm };
-      }
-      return { ok: false, operation, sessionId, phase: "timeout", error: "cancel-timeout", foundAgent: true, cancelInvoked, ...rootNorm };
-    }
-    // Stop the active driver first.  keepInbox is essential: it prevents a
-    // watchdog request from deleting ordinary queued Agent input.
-    await controlTarget.cancel("dsh-pet-watchdog-replan", { keepInbox: true });
-    cancelInvoked = true;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Math.max(1000, Number(request.timeoutMs || 8000)));
-    let plan;
-    try {
-      plan = await runBridgeDiagnosis(ctx, request, controller.signal);
-    } finally {
-      clearTimeout(timeout);
-    }
-    await controlTarget.steer(createUserMessage({
-      content: [{ type: "text", text: plan }],
-      source: { kind: "plugin", plugin: PLUGIN_ID },
-    }));
-    return { ok: true, operation, sessionId, phase: "replanned", plan, foundAgent: true, cancelInvoked, ...rootNorm };
-  } catch (err) {
-    console.warn(`[${PLUGIN_ID}] control failed: ${String(err?.message || err)}`);
-    return { ok: false, operation, sessionId, phase: "failed", error: "bridge-internal-error", foundAgent: true, cancelInvoked, ...rootNorm };
-  }
-}
-
-function writeControlOutcome(id, request, result) {
-  const controlResult = { source: "bridge", requestId: id, operation: request.operation,
-    sessionId: request.sessionId, ok: !!result.ok, phase: result.phase || "",
-    error: result.error || "", alreadyIdle: !!result.alreadyIdle,
-    foundAgent: !!result.foundAgent, cancelInvoked: !!result.cancelInvoked,
-    wasSubagent: !!result.wasSubagent, appliedToRoot: !!result.appliedToRoot,
-    rootSessionId: String(result.rootSessionId || "") };
-  writeControlResponse(id, result);
-  writeRecord({ event: "bridge/control-result", ...controlResult });
-  writeRecord({ event: "watchdog/control-result", ...controlResult });
-}
-
-function startControlQueue(ctx) {
-  let busy = false;
-  const timer = setInterval(async () => {
-    if (busy) return;
-    let names = [];
-    try {
-      names = fs.readdirSync(bridgeDir()).filter(name => name.startsWith("watchdog-request-") && name.endsWith(".json"));
-    } catch { return; }
-    for (const name of names) {
-      const id = name.slice("watchdog-request-".length, -".json".length);
-      const source = path.join(bridgeDir(), name);
-      const claimed = path.join(bridgeDir(), `watchdog-processing-${id}.json`);
-      try { fs.renameSync(source, claimed); } catch { continue; }
-      busy = true;
-      try {
-        let request;
-        try { request = JSON.parse(fs.readFileSync(claimed, "utf8")); }
-        catch { request = { id, operation: "", sessionId: "" }; }
-        const result = await handleControlRequest(ctx, request);
-        writeControlOutcome(id, request, result);
-      } catch (err) {
-        console.warn(`[${PLUGIN_ID}] control internal error: ${String(err?.message || err)}`);
-        writeControlOutcome(id, request || { operation: "", sessionId: "" }, {
-          ok: false, phase: "failed", error: "bridge-internal-error", foundAgent: false, cancelInvoked: false,
-        });
-      } finally {
-        try { fs.rmSync(claimed, { force: true }); } catch {}
-        busy = false;
-      }
-      break;
-    }
-  }, CONTROL_POLL_MS);
-  if (timer.unref) timer.unref();
-  ctx.effect?.(() => () => clearInterval(timer), `${PLUGIN_ID}.control-queue()`);
-}
-
 // 过程汇报：工具调用事件（state 不变，只带 tool 字段，桌宠端据此弹「正在跑命令…」）
 // 注：工具名在 assistant/message 的 tool-call 块与独立 tool/call 事件中均可获得，
 // 统一按 callId 去重写入（见下方 session/event 处理），不再单独 writeTool。
 
-// ===== 卡住检测数据增强 =====
-// 桌宠端 stuck_detector 需要只读的最终结果观察点。这里在转发事件时附带
-// 轻量字段（工具名、参数指纹、成败、错误码/文本、耗时），不改变任何 DSH 流程。
-const ARGS_KEY_LENGTH = 64;
 const TEXT_MAX = 300;
 
 // ===== 硬失败判定（execution/failed）=====
@@ -542,66 +235,9 @@ function decideTurnEndFailure(reason, st) {
   };
 }
 
-function summarizeArgs(args) {
-  if (args === undefined || args === null) return "";
-  let obj = args;
-  if (typeof obj === "string") {
-    try { obj = JSON.parse(obj); } catch { return String(obj).slice(0, ARGS_KEY_LENGTH); }
-  }
-  if (typeof obj !== "object" || Array.isArray(obj)) {
-    return JSON.stringify(obj).slice(0, ARGS_KEY_LENGTH);
-  }
-  const keys = Object.keys(obj).sort();
-  const parts = keys.map(k => String(k));
-  // 命令型工具：加入 argv[0]（如 pip/curl/npm）使「同命令换参数」聚成同一指纹
-  const cmdKeys = ["command", "cmd", "shell", "script", "argv", "exec"];
-  for (const k of cmdKeys) {
-    const v = obj[k];
-    if (v !== undefined && v !== null) {
-      const s = typeof v === "string" ? v : JSON.stringify(v);
-      const argv0 = s.trim().split(/\s+/)[0];
-      if (argv0) parts.push("argv0:" + argv0.slice(0, 48));
-      break;
-    }
-  }
-  return parts.slice(0, 16).join(",").slice(0, ARGS_KEY_LENGTH);
-}
-
-// Keep the command that is actually executed separate from user-facing tool
-// descriptions.  The watchdog compares execution semantics; labels such as
-// "Read file 1st time" must not make identical commands look different.
-function commandFromArgs(args) {
-  if (args === undefined || args === null) return "";
-  let obj = args;
-  if (typeof obj === "string") {
-    try { obj = JSON.parse(obj); } catch { return ""; }
-  }
-  if (!obj || typeof obj !== "object") return "";
-  for (const key of ["command", "cmd", "shell", "script", "exec", "argv"]) {
-    const value = obj[key];
-    if (value === undefined || value === null) continue;
-    return truncate(typeof value === "string" ? value : JSON.stringify(value), 800);
-  }
-  return "";
-}
-
 function truncate(s, max = TEXT_MAX) {
   if (typeof s !== "string") s = String(s || "");
   return s.length > max ? s.slice(0, max) : s;
-}
-
-function messageText(data) {
-  const d = data || {};
-  for (const value of [d.text, d.prompt, d.message && d.message.text]) {
-    if (typeof value === "string" && value.trim()) return truncate(value.trim(), 1200);
-  }
-  const content = (d.message && d.message.content) || d.content;
-  if (typeof content === "string") return truncate(content.trim(), 1200);
-  if (!Array.isArray(content)) return "";
-  return truncate(content.map(block => {
-    if (typeof block === "string") return block;
-    return block && typeof block.text === "string" ? block.text : "";
-  }).filter(Boolean).join(" ").replace(/\s+/g, " ").trim(), 1200);
 }
 
 function agentLabelFor(sessionId) {
@@ -740,27 +376,12 @@ function writeSessionMeta(agent, session, summary = null, workspace = null) {
     agentName: meta.agentName || "DSH",
   });
 
-  // 临时诊断：仅第一条 session 输出字段结构，用于确认真实 DSH payload
-  if (sessionMetaCache.size <= 1) {
-    writeRecord({
-      type: "debug/session-shape",
-      sessionId: sid,
-      rawLabel: session?.label ?? null,
-      rawTitle: session?.title ?? null,
-      rawName: session?.name ?? null,
-      rawProject: session?.parent?.name ?? session?.project?.name ?? null,
-      rawWorkspace: session?.workspace?.path ?? null,
-      rawAgentName: agent?.name ?? null,
-    });
-  }
 }
-
-const lastEvidenceByCallTarget = new Map();
 
 function toolResultInfo(data) {
   const message = (data && data.message) || {};
   const callId = message.callId || (message.source && message.source.callId) || "";
-  let isError = false, errorText = "", errorCode = "", resultText = "";
+  let isError = false, errorText = "", errorCode = "";
   const content = message.content;
   if (Array.isArray(content)) {
     for (const block of content) {
@@ -768,9 +389,9 @@ function toolResultInfo(data) {
       if (block.type === "tool-result") {
         if (block.isError) isError = true;
         const c = block.content;
-        if (c !== undefined && c !== null) {
-          resultText = typeof c === "string" ? c : JSON.stringify(c);
-          if (block.isError) errorText = resultText;
+        // 脱敏：只取错误正文（截断），成功结果正文不读不落盘
+        if (block.isError && c !== undefined && c !== null) {
+          errorText = typeof c === "string" ? c : JSON.stringify(c);
         }
         break;
       }
@@ -783,19 +404,16 @@ function toolResultInfo(data) {
   }
   return {
     callId: String(callId), isError, errorText: truncate(errorText),
-    resultText: truncate(resultText, 240), errorCode: errorCode.slice(0, 48),
+    errorCode: errorCode.slice(0, 48),
   };
 }
 
-const pendingTools = new Map(); // callId -> {tool, argsKey, command, sessionId, t0}
+const pendingTools = new Map(); // callId -> { tool, t0 }（tool/result 配对取工具名用）
 const writtenToolCallIds = new Set(); // callId -> 已写入过 tool/call 记录（去重）
 
-function noteToolCall(callId, tool, args, sessionId = "") {
+function noteToolCall(callId, tool) {
   if (!callId || pendingTools.has(callId)) return;
-  pendingTools.set(callId, {
-    tool: String(tool || ""), argsKey: summarizeArgs(args),
-    command: commandFromArgs(args), sessionId: String(sessionId || ""), t0: Date.now(),
-  });
+  pendingTools.set(callId, { tool: String(tool || ""), t0: Date.now() });
   if (pendingTools.size > 512) { // 防无限增长
     const now = Date.now();
     for (const [k, v] of pendingTools) {
@@ -809,40 +427,6 @@ function consumeToolCall(callId) {
   const info = pendingTools.get(callId) || null;
   pendingTools.delete(callId);
   return info;
-}
-
-// 审批命令只允许从同 session、同工具、且时间窗口内的最近 tool/call 回填。
-// 不再使用进程级 lastToolCall，避免并发 session 把普通命令串到审批上。
-const recentToolCalls = new Map(); // sessionId -> [{tool, args, callId, ts}]
-const APPROVAL_COMMAND_MAX_AGE_MS = 2000;
-
-function noteLatestToolCall(tool, args, sessionId = "", callId = "") {
-  const key = String(sessionId || "session:unknown");
-  const list = recentToolCalls.get(key) || [];
-  list.push({ tool: String(tool || ""), args, callId: String(callId || ""), ts: Date.now() });
-  while (list.length > 16) list.shift();
-  recentToolCalls.set(key, list);
-}
-
-function latestCommandFor(toolName, args, sessionId = "", callId = "") {
-  const direct = extractCommand(args);
-  if (direct) return direct;
-  const key = String(sessionId || "session:unknown");
-  const list = recentToolCalls.get(key) || [];
-  const expectedTool = String(toolName || "").trim();
-  const expectedCall = String(callId || "").trim();
-  const now = Date.now();
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    const item = list[i];
-    if (now - item.ts > APPROVAL_COMMAND_MAX_AGE_MS) continue;
-    if (expectedCall && item.callId && item.callId === expectedCall) {
-      return extractCommand(item.args);
-    }
-    if (expectedTool && item.tool === expectedTool) {
-      return extractCommand(item.args);
-    }
-  }
-  return "";
 }
 
 // ===== v1 DSH state linkage =====
@@ -898,46 +482,6 @@ function writeStateEvent(type, step, sessionId, agentName = "") {
   writeRecord(extra);
 }
 
-// These events are useful to the exploration watchdog but are not state
-// transitions.  Streaming delta events are intentionally excluded: they are
-// summarized by their corresponding begin/end event and must not become fake
-// Agent decisions.
-const WATCHDOG_EVENT_TYPES = new Set([
-  "agent_reasoning", "agent_reasoning_raw_content", "web_search_begin", "web_search_end",
-  "exec_command_begin", "exec_command_end", "mcp_tool_call_begin", "mcp_tool_call_end",
-  "context_compacted", "thread_rolled_back", "task_started", "task_complete",
-  "user_action",
-]);
-
-// 审批 UI 请求只由权威 mux 帧（approval/requested，带 rpcId+sessionId）产生
-// （见下方 mux 中继）。这里不再提供 writeApprovalRequest：approval/asked 等
-// session/event 只是状态/审计信号，绝不能升级成桌宠的审批弹窗——普通工具调用
-// （如 pwsh 跑 Get-Location）一旦被宿主标成 approval/asked 就会误弹无法关闭的
-// sticky 审批气泡。
-
-// 从审批 arguments 里提取「将要执行的命令」完整内容：
-//   bash/shell/pwsh 等命令型工具 → arguments.command / .cmd / .shell / .script
-//   write/edit 等文件工具 → filePath（动作对象，非全文）
-// 取不到时返回 ""（调用方回退到仅显示工具名）。
-function extractCommand(arguments_) {
-  if (!arguments_) return "";
-  let args = arguments_;
-  if (typeof args === "string") {
-    try { args = JSON.parse(args); } catch { return ""; }
-  }
-  if (!args || typeof args !== "object") return "";
-  for (const key of ["command", "cmd", "shell", "script", "argv"]) {
-    const v = args[key];
-    if (typeof v === "string" && v.trim()) return v.trim();
-    if (Array.isArray(v) && v.length) return v.join(" ").trim();
-  }
-  // 文件型工具：展示动作对象（filePath/path），帮助判断改的是哪个文件
-  for (const key of ["filePath", "path"]) {
-    const v = args[key];
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return "";
-}
 
 // ===== user-question blocking interaction =====
 // DSH's ask_user_question tool pauses the agent until the human answers, then
@@ -952,12 +496,6 @@ function extractCommand(arguments_) {
 // legacy agent_link bubble path (permanent question popup).
 const QUESTION_TOOL = "ask_user_question";
 const pendingQuestionCallIds = new Set();
-// mux rpcId ↔ callId 按到达顺序 FIFO 配对（C3）：tool/call 注册把 callId
-// 排进会话队列；mux question/requested 帧出队一个并记住 rpcId→callId，
-// 后续 question/resolved 按 rpcId 取回。同会话多问题并发时，每个帧拿到
-// 的是自己那份 callId，而不是反复取到最旧的一个。
-const pendingQuestionRpcPairs = new Map(); // rpcId → callId（resolved 取回后即删）
-const pendingQuestionOrder = new Map();    // sessionId → callId[]（FIFO，待 mux 帧出队）
 
 function questionCallIdentity(callId, sessionId) {
   return `${String(sessionId || "")}|${String(callId || "")}`;
@@ -967,23 +505,13 @@ function registerQuestionCall(callId, sessionId) {
   const id = String(callId || "");
   if (!id || pendingQuestionCallIds.has(questionCallIdentity(id, sessionId))) return false;
   pendingQuestionCallIds.add(questionCallIdentity(id, sessionId));
-  const session = String(sessionId || "");
-  const queue = pendingQuestionOrder.get(session) || [];
-  queue.push(id);
-  pendingQuestionOrder.set(session, queue);
   return true;
 }
 
 function forgetQuestionCall(callId, sessionId) {
   const id = String(callId || "");
+  if (!id) return;
   pendingQuestionCallIds.delete(questionCallIdentity(id, sessionId));
-  const session = String(sessionId || "");
-  const queue = pendingQuestionOrder.get(session);
-  if (queue) {
-    const idx = queue.indexOf(id);
-    if (idx >= 0) queue.splice(idx, 1);
-    if (!queue.length) pendingQuestionOrder.delete(session);
-  }
 }
 
 function extractQuestions(arguments_) {
@@ -1007,9 +535,8 @@ function extractQuestions(arguments_) {
 
 function writeQuestionRequest(callId, questions, sessionId) {
   if (!registerQuestionCall(callId, sessionId)) return; // 已写过，去重
-  // 两个路径（tool/call + mux）都无条件写，由 writeRecordDedup 去重：
-  // mux 正常时保留 rpcId 版本（可交互）；mux 不可用/连接失败时兜底写提示
-  // （无按钮但至少弹窗出现，不会丢问题）。
+  // 纯提示路径：assistant/message 与独立 tool/call 两处都可能发现
+  // ask_user_question，由 writeRecordDedup 去重。
   writeRecordDedup({
     event: "question/requested",
     callId: String(callId || ""),
@@ -1022,181 +549,13 @@ function resolveQuestion(callId, sessionId) {
   const id = String(callId || "");
   if (!id || !pendingQuestionCallIds.has(questionCallIdentity(id, sessionId))) return;
   forgetQuestionCall(callId, sessionId);
-  // 收尾记录不 gate mux：重复的 question/resolved 无害（桌宠幂等），
-  // 但若 mux 在问题中途才连上、丢了对应的 resolved 帧，这里必须兜底写，
+  // 收尾记录：重复的 question/resolved 无害（桌宠幂等），但必须写——
   // 否则桌宠会卡死在 waiting_question。
   writeRecord({
     event: "question/resolved",
     callId: id,
     sessionId: String(sessionId || ""),
   });
-}
-
-// mux question 帧只带 rpcId，callId 只有 tool/call 兜底路径才登记（复合键
-// sessionId|callId，FIFO 队列见 pendingQuestionOrder）。桌宠端升级重建后靠
-// callId 与兜底 question/resolved 配对，帧里缺 callId 时 mux 断线后的兜底
-// 关闭就失效，气泡永久挂住——按 FIFO 出队补上并记住 rpcId→callId。
-function muxQuestionCallId(payload, rpcId) {
-  const fromFrame = String(payload.callId || "");
-  if (fromFrame) return fromFrame;
-  const rpc = String(rpcId || "");
-  const paired = pendingQuestionRpcPairs.get(rpc);
-  if (paired) return paired;
-  const queue = pendingQuestionOrder.get(String(payload.sessionId || ""));
-  const next = queue ? queue.shift() : undefined;
-  if (next) {
-    if (rpc) pendingQuestionRpcPairs.set(rpc, next);
-    return next;
-  }
-  return "";
-}
-
-function muxQuestionCallIdForResolved(payload, rpcId) {
-  const fromFrame = String(payload.callId || "");
-  if (fromFrame) return fromFrame;
-  const rpc = String(rpcId || "");
-  const paired = pendingQuestionRpcPairs.get(rpc);
-  if (paired) {
-    pendingQuestionRpcPairs.delete(rpc); // resolved 是终态，取回即清
-    return paired;
-  }
-  return "";
-}
-
-function muxQuestionRequestedRecord(rpcId, payload) {
-  return {
-    event: "question/requested",
-    rpcId,
-    sessionId: payload.sessionId,
-    questions: payload.questions,
-    callId: muxQuestionCallId(payload, rpcId),
-  };
-}
-
-function muxQuestionResolvedRecord(rpcId, payload) {
-  return {
-    event: "question/resolved",
-    rpcId,
-    sessionId: payload.sessionId,
-    outcome: payload.outcome,
-    callId: muxQuestionCallIdForResolved(payload, rpcId),
-  };
-}
-
-// ===== interactive mux relay =====
-// DSH's /api/events.mux (WebSocket) pushes the SAME interaction frames the web
-// UI renders: approval/requested, approval/resolved, question/requested,
-// question/resolved — each carrying an rpcId the pet needs to answer back via
-// POST /api/respond. The bridge connects as one mux client and relays these
-// frames (with rpcId + full payload) into dsh.jsonl so the pet can show a
-// CLICKABLE bubble and actually resolve the approval/question in DSH, instead
-// of only hinting "go click it in the web UI".
-// Node >=22 exposes a global WebSocket client (undici) — zero dependency.
-let muxSocket = null;
-let muxTimer = null;
-let muxReconnectMs = 1000;
-let muxPortIndex = 0;
-// mux 是否已真正连接（onopen 置真、onclose 置假）。mux 连接后，审批/问题的
-// 权威记录由 mux 帧（带 rpcId，可交互）提供；未连接时才用旧路径降级写提示。
-let muxConnected = false;
-
-// DSH 可能跑在 3080（web 默认）或 38080（端口被占时的避让），也可能由
-// DSH_PORT 指定——全部作为候选，逐个尝试，任一连上即可（与桌宠端一致）。
-function muxCandidatePorts() {
-  const ports = [];
-  if (process.env.DSH_PORT) ports.push(Number(process.env.DSH_PORT));
-  ports.push(3080, 38080);
-  return [...new Set(ports.filter((p) => Number.isInteger(p) && p > 0))];
-}
-
-function muxScheduleReconnect() {
-  if (muxTimer) clearTimeout(muxTimer);
-  muxTimer = setTimeout(() => {
-    muxTimer = null;
-    muxConnect();
-  }, muxReconnectMs);
-  muxReconnectMs = Math.min(muxReconnectMs * 2, 15000);
-}
-
-function muxConnect() {
-  if (typeof WebSocket === "undefined") return; // 旧 Node：无 WS，降级为纯提示
-  const ports = muxCandidatePorts();
-  if (ports.length === 0) return;
-  if (muxPortIndex >= ports.length) muxPortIndex = 0; // 一轮试完回到起点（配合退避）
-  const port = ports[muxPortIndex];
-  let ws;
-  try {
-    ws = new WebSocket(`ws://127.0.0.1:${port}/api/events.mux`);
-  } catch {
-    muxPortIndex = (muxPortIndex + 1) % ports.length;
-    muxScheduleReconnect();
-    return;
-  }
-  muxSocket = ws;
-  ws.onopen = () => {
-    muxReconnectMs = 1000;
-    muxPortIndex = 0; // 连上了，下次重连从首选端口开始
-    muxConnected = true;
-  };
-  ws.onmessage = (ev) => {
-    let msg;
-    try {
-      msg = JSON.parse(String(ev.data));
-    } catch {
-      return;
-    }
-    if (!msg || msg.type !== "server-request" || !msg.payload) return;
-    const p = msg.payload;
-    try {
-      if (p.type === "approval/requested") {
-        // 权威 UI 审批请求：必须带 rpcId + sessionId 才可作为桌宠可交互审批落盘
-        // （approvalId 正常也会带，供 resolved 精确配对）。缺身份/空占位帧一律
-        // 忽略（只留日志），防止误弹无法关闭的审批气泡。
-        const rpcId = String(msg.rpcId || "");
-        const sessionId = String(p.sessionId || "");
-        if (rpcId && sessionId) {
-          writeRecordDedup({ event: "approval/request", rpcId, sessionId, approvalId: String(p.approvalId || ""), toolName: p.toolName, command: latestCommandFor(p.toolName, p.arguments) });
-        } else {
-          console.warn(`[${PLUGIN_ID}] 忽略缺身份的 mux 审批帧: rpcId=${rpcId ? "yes" : "no"} sessionId=${sessionId ? "yes" : "no"}`);
-        }
-      } else if (p.type === "approval/resolved") {
-        writeRecord({ event: "approval/resolved", rpcId: msg.rpcId, sessionId: p.sessionId, approvalId: p.approvalId, outcome: p.outcome });
-        writeInteractionResolved("approval", p.sessionId, { rpcId: msg.rpcId, approvalId: p.approvalId }, p.outcome || "approved");
-        // 用户介入信号
-        writeRecord({
-          event: "user_action",
-          action: "approval_resolved",
-          outcome: String(p.outcome || ""),
-          rpcId: msg.rpcId,
-          approvalId: p.approvalId,
-          sessionId: p.sessionId,
-        });
-      } else if (p.type === "question/requested") {
-        writeRecordDedup(muxQuestionRequestedRecord(msg.rpcId, p));
-      } else if (p.type === "question/resolved") {
-        const questionRpcId = p.questionRpcId || msg.rpcId;
-        writeRecord(muxQuestionResolvedRecord(questionRpcId, p));
-        writeInteractionResolved("question", p.sessionId, { rpcId: questionRpcId }, p.outcome || "answered");
-        // 用户介入信号
-        writeRecord({
-          event: "user_action",
-          action: "question_resolved",
-          outcome: String(p.outcome || ""),
-          rpcId: questionRpcId,
-          sessionId: p.sessionId,
-        });
-      }
-    } catch {}
-  };
-  ws.onclose = () => {
-    if (muxSocket === ws) muxSocket = null;
-    muxConnected = false;
-    muxPortIndex = (muxPortIndex + 1) % ports.length; // 换下一个候选端口
-    muxScheduleReconnect();
-  };
-  ws.onerror = () => {
-    try { ws.close(); } catch {}
-  };
 }
 
 // ===== 写盘去抖（batch flush） =====
@@ -1259,12 +618,9 @@ function writeRecord(extra) {
   }
 }
 
-// ===== 审批/问题写盘去重（P0 竞态防线） =====
-// approval/request 现在只由权威 mux 帧（approval/requested）产生，但 mux 重连/
-// 重复投递仍可能对同一条审批多次触发；question/requested 仍走 tool/call + mux
-// 双通道。这里按可得的稳定身份去重：短窗口内同一条审批/问题只落一条记录，
-// 杜绝「先弹无按钮气泡、交互版被队列压住」的重复气泡竞态。优先保留带 rpcId
-// 的可交互版本。
+// ===== 问题写盘去重 =====
+// question/requested 由 assistant/message 的 tool-call 块与独立 tool/call 事件
+// 双通道产生：短窗口内同一条问题只落一条记录，杜绝重复气泡。
 const INTERACTION_DEDUP_MS = 8000;
 const interactionSeen = new Map(); // key -> { ts, hasRpcId }
 const resolvedInteractionIds = new Set();
@@ -1292,27 +648,9 @@ function writeInteractionResolved(kind, sessionId, values = {}, outcome = "") {
 function _interactionDedupKeys(extra) {
   const ev = extra.event || "";
   const keys = [];
-  if (ev === "approval/request" || ev === "approval/resolved") {
-    if (extra.approvalId) keys.push(`ap:${extra.approvalId}`);
-    else if (extra.rpcId) keys.push(`ap:${extra.rpcId}`);
-    // sessionId 只能与 approvalId/rpcId 组合使用，单用 sessionId 会误从不同审批
-    // 的同 session 事件上去重（如两个不同审批在同一 session 中先后到达）。
-    if (extra.approvalId && extra.sessionId) keys.push(`ap:se:${extra.sessionId}:${extra.approvalId}`);
-    else if (extra.rpcId && extra.sessionId) keys.push(`ap:se:${extra.sessionId}:${extra.rpcId}`);
-    // tool+command 降级去重键：仅在没有任何稳定审批身份（approvalId/rpcId）
-    // 时才使用——无条件加入会让同一会话内两条身份不同的审批（同命令）在 8s
-    // 窗口内互相吞掉（P1-4）。有 sessionId 时拼进键里做基本隔离。
-    const tool = extra.toolName || extra.tool || "";
-    const cmd = extra.command || "";
-    const session = extra.sessionId || "";
-    const hasIdentity = Boolean(extra.approvalId || extra.rpcId);
-    if (!hasIdentity && (tool || cmd)) {
-      keys.push(session ? `ap:tc:${session}:${tool}|${cmd}` : `ap:tc:${tool}|${cmd}`);
-    }
-  } else if (ev === "question/requested" || ev === "question/resolved") {
+  if (ev === "question/requested" || ev === "question/resolved") {
     if (extra.rpcId) keys.push(`qu:${extra.rpcId}`);
-    // sessionId 同理：与 rpcId 组合
-    if (extra.rpcId && extra.sessionId) keys.push(`qu:se:${extra.sessionId}:${extra.rpcId}`);
+    if (extra.callId) keys.push(`qu:call:${extra.sessionId || ""}:${extra.callId}`);
   }
   return keys;
 }
@@ -1344,7 +682,8 @@ function writeRecordDedup(extra) {
   writeRecord(extra);
 }
 
-// 写 record 去重前的代理：mux 交互记录（审批/问题）走 writeRecordDedup，其余事件（状态/工具/结果/错误）直接走 writeRecord。
+// 写 record 去重前的代理：需要按 callId 去重的交互记录（问题请求在 assistant/message
+// 与独立 tool/call 两处都会出现）走 writeRecordDedup，其余事件直接走 writeRecord。
 
 export function apply(ctx) {
   // Make the resolved runtime destination observable for packaged builds.
@@ -1359,11 +698,6 @@ export function apply(ctx) {
     packaged: Boolean(process.pkg),
   });
 
-  // The pet talks to this queue instead of calling session.prompt/cancel
-  // directly.  Control therefore runs beside the real Agent and can cancel,
-  // diagnose, and steer it without relying on the web API transport.
-  startControlQueue(ctx);
-
   // 依赖 cordis 的 context 生命周期：agent/status 监听挂在 agent.ctx 上，
   // agent 销毁时随其 context 自动解绑，不累积 disposer。
   ctx.on("agent/created", ({ agent }) => {
@@ -1371,7 +705,6 @@ export function apply(ctx) {
     for (const id of [agent.id, agent.session?.id]) {
       if (id !== undefined && id !== null) {
         liveAgents.set(String(id), agent);
-        knownSessions.add(String(id));
       }
     }
     // 运行时 agent.session 不携带 Web UI 的真实标题/项目名；先写基础记录，
@@ -1392,7 +725,7 @@ export function apply(ctx) {
       });
       // 模型请求错误：agent/request-error 是 cordis agent 上下文事件
       // （agent-loop 用 dispatch.waterfall 发出），不走 session/event——
-      // 必须挂在 agent.ctx 上才能收到。供 stuck_detector 判断网络/鉴权/限流类根因。
+      // 必须挂在 agent.ctx 上才能收到。供桌宠侧识别网络/鉴权/限流类故障。
       const stopErr = agent.ctx.on("agent/request-error", ({ failure }) => {
         const errCode = String((failure && failure.code) || "");
         const errMsg = String((failure && failure.message) || "");
@@ -1466,20 +799,17 @@ export function apply(ctx) {
         writeSessionMeta(liveAgents.get(sessionId) || null, _session);
       }
 
-      // Preserve the current user goal for goal-aware loop detection.  This is
-      // still the same state event consumed by dsh_state, only enriched with a
-      // bounded text field; full conversation history is never forwarded.
       if (type === "user/message") {
         const data = event.data || {};
         // DSH 的 UserMessage.source.kind 区分真人输入（kind="user"）与
         // agent.inject() 注入上下文（kind="plugin"：system-reminder/技能目录/
         // 记忆等，每轮多条约 1200 字）——转发给桌宠侧，让它只把真人消息当作
-        // 「对话开始」触发，不被注入记录污染（dsh_state / 探索看门狗据此过滤）。
+        // 「对话开始」触发，不被注入记录污染（dsh_state 收敛器据此过滤）。
+        // 脱敏：消息正文不落盘，只写事件名 + 身份字段。
         const src = (data && data.source && data.source.kind) || "";
         writeRecord({
           event: "user/message",
           agentName,
-          text: messageText(data),
           step: stepOf(event),
           sessionId,
           ...(src ? { sourceKind: src } : {}),
@@ -1487,12 +817,10 @@ export function apply(ctx) {
       }
 
       // 1) 工具调用气泡（ask_user_question 除外——它有专门的 question/requested 常驻气泡）
-      //    同时收集模型文本（截断）、记录待跟踪调用（用于卡住检测）。
       if (type === "assistant/message") {
         // data 形状：{ turn, step, message: { content: [...] } }（兼容 data 直接是消息）
         const data = event.data || {};
         const content = (data.message && data.message.content) || data.content;
-        let texts = [];
         if (Array.isArray(content)) {
           for (const block of content) {
             if (!block) continue;
@@ -1508,32 +836,24 @@ export function apply(ctx) {
               }
               // 与下方独立 tool/call 事件同一条路径写入（按 callId 去重，避免双写）
               const cid = String(block.callId || block.id || "");
-              noteToolCall(cid, block.name, block.arguments);
-              noteLatestToolCall(block.name, block.arguments);
+              noteToolCall(cid, block.name);
               if (cid && !writtenToolCallIds.has(cid)) {
                 writtenToolCallIds.add(cid);
+                // 脱敏：只写工具名/身份/序号，命令与参数指纹不落盘
                 writeRecord({
                   event: "tool/call",
                   agentName,
                   tool: String(block.name),
-                  argsKey: summarizeArgs(block.arguments),
-                  command: commandFromArgs(block.arguments),
                   callId: cid,
                   step: stepOf(event),
                   sessionId,
                 });
               }
-            } else if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
-              texts.push(block.text);
             }
           }
         }
-        // 带截断文本的 assistant/message 记录（供 stuck_detector 分析重试措辞）
-        if (texts.length) {
-          writeRecord({ event: "assistant/message", agentName, text: truncate(texts.join(" ").replace(/\s+/g, " ")), step: stepOf(event), sessionId });
-        } else {
-          writeStateEvent("assistant/message", stepOf(event), sessionId);
-        }
+        // 模型回复正文不落盘（脱敏）：assistant/message 只作状态事件
+        writeStateEvent("assistant/message", stepOf(event), sessionId);
         // 模型成功产出 = 重试已恢复 → 连续重试计数归零（见上方硬失败判定规则）
         noteTurnRecovery(sessionKeyOf(_session, event));
       }
@@ -1543,9 +863,9 @@ export function apply(ctx) {
       //    驱动桌宠审批弹窗**——普通工具调用（如 pwsh 跑 Get-Location）一旦被宿主
       //    标成 approval/asked，桥接再升级成 approval/request，桌宠就会挂出一个
       //    永远等不到 approval/resolved 的 sticky 审批气泡。
-      //    UI 层审批请求只由权威 mux 帧 approval/requested（带 rpcId+sessionId）
-      //    产生（见下方 mux 中继）。approval/asked 仍经 STATE_EVENT_TYPES 转发为
-      //    状态/审计事件，不写 approval/request。
+      //    减法后桌宠侧不再有审批回写（mux 中继已删）：approval/asked 只经
+      //    STATE_EVENT_TYPES 转发为状态/审计事件（收敛器锁存 waiting_approval →
+      //    纯提示 attention 气泡），不写 approval/request。
       if (type === "approval/decided") {
         const data = event.data || {};
         writeInteractionResolved("approval", sessionId, { rpcId: data.rpcId, approvalId: data.approvalId, callId: data.callId }, data.outcome || data.decision || "approved");
@@ -1556,7 +876,6 @@ export function apply(ctx) {
       // 2.5) 用户问题交互（阻塞型，与审批同等待遇）：ask_user_question 会暂停
       //     Agent 直到用户选择/回答。tool/call 是权威请求信号，tool/result 用
       //     message.callId 配对表示已解决（answer 已回填给 Agent）。
-      //     同时记录卡住检测所需数据（工具名、参数指纹、成败、耗时）。
       if (type === "tool/call") {
         const d = event.data || {};
         // 工具调用 = 模型请求链已恢复推进 → 连续重试计数归零
@@ -1566,19 +885,17 @@ export function apply(ctx) {
         }
         // 记录待跟踪调用（覆盖 assistant/message 兜底，去重写入）
         if (d.callId && d.name) {
-          noteToolCall(d.callId, d.name, d.arguments);
-          noteLatestToolCall(d.name, d.arguments);
+          noteToolCall(d.callId, d.name);
           const cid = String(d.callId);
           if (!writtenToolCallIds.has(cid)) {
             writtenToolCallIds.add(cid);
             // 按需清理（防无限增长）
             if (writtenToolCallIds.size > 1024) writtenToolCallIds.clear();
+            // 脱敏：只写工具名/身份/序号，命令与参数指纹不落盘
             writeRecord({
               event: "tool/call",
               agentName,
               tool: String(d.name),
-              argsKey: summarizeArgs(d.arguments),
-              command: commandFromArgs(d.arguments),
               callId: cid,
               step: stepOf(event),
               sessionId,
@@ -1598,37 +915,17 @@ export function apply(ctx) {
         // 其后的裸 callId 查询恒为 False，那段写盘永远不可达。
         const info = toolResultInfo(d);
         const pending = consumeToolCall(info.callId) || {};
-        const tool = pending.tool || "";
-        const durationMs = pending.t0 ? Date.now() - pending.t0 : undefined;
-        const argsKey = pending.argsKey || "";
-        const timeout = /timeout|timed ?out|超时|ETIMEDOUT|ESOCKETTIMEDOUT/i.test(info.errorText || "") || /timeout/i.test(info.errorCode || "");
-        const evidenceKey = `${sessionId}|${tool}|${argsKey}`;
-        let evidenceStatus = "unavailable";
-        let evidenceHash = "";
-        if (!info.isError && info.resultText) {
-          evidenceHash = createHash("sha256").update(info.resultText, "utf8").digest("hex").slice(0, 16);
-          const previous = lastEvidenceByCallTarget.get(evidenceKey);
-          evidenceStatus = previous === evidenceHash ? "same" : "new";
-          lastEvidenceByCallTarget.set(evidenceKey, evidenceHash);
-          if (lastEvidenceByCallTarget.size > 2048) lastEvidenceByCallTarget.clear();
-        }
         writeRecord({
           event: "tool/result",
           agentName: agentLabelFor(sessionId),
-          tool,
-          argsKey,
-          command: pending.command || "",
+          tool: pending.tool || "",
           callId: info.callId,
           ok: !info.isError,
-          timeout: !!timeout,
           errorCode: info.errorCode,
           // 错误正文统一用 errorMessage（与 llm/retry / model_access / llm_error /
           // execution/failed 同一字段名），不再用并行的 errorText 别名。
+          // 脱敏：结果正文/命令/耗时/证据指纹一律不落盘。
           errorMessage: info.errorText,
-          evidenceStatus,
-          evidenceHash,
-          ...(info.resultText ? { resultSummary: info.resultText } : {}),
-          ...(durationMs !== undefined ? { durationMs } : {}),
           step: stepOf(event),
           sessionId,
         });
@@ -1651,7 +948,7 @@ export function apply(ctx) {
       //      已在上方 agent/created 的 agent.ctx 监听里转发，不走 session/event——
       //      此处不处理，避免与 agent 上下文监听重复写盘。
 
-      // 2.8) LLM 重试事件（retry 计数 + 失败原因，供 stuck_detector 判断 root cause）
+      // 2.8) LLM 重试事件（retry 计数 + 失败原因，供桌宠侧识别根因）
       if (type === "llm/retry") {
         const d = event.data || {};
         const failure = d.failure || {};
@@ -1741,34 +1038,13 @@ export function apply(ctx) {
           step: stepOf(event),
         });
       }
-      } else if (WATCHDOG_EVENT_TYPES.has(type)) {
-        const data = event.data || {};
-        const extra = { event: type, step: stepOf(event), sessionId, agentName };
-        if (type.includes("reasoning")) {
-          extra.summary = truncate(data.text || data.content || data.reasoning || "");
-        } else if (type.includes("search")) {
-          extra.tool = String(data.tool || data.name || "web_search");
-          extra.target = truncate(data.query || data.searchQuery || data.url || "");
-        } else if (type.includes("command")) {
-          extra.tool = String(data.tool || data.name || "shell");
-          extra.target = truncate(data.command || data.cmd || "");
-        }
-        writeRecord(extra);
       }
     } catch {}
   });
 
-  // 交互式 mux 中继：连接 DSH 的 WebSocket mux 流，把带 rpcId 的审批/问题
-  // 交互帧转发到 dsh.jsonl（桌宠据此弹可点选气泡并回写 /api/respond）。
-  // 失败/断线只退避重连，绝不影响 DSH 主流程。
-  muxConnect();
 }
 
 export { inject };
-// Kept private-by-convention: package tests use this surface to exercise the
-// control boundary without starting a DSH host or touching the real queue.
-export const __controlTest = { controlAgent, handleControlRequest, liveAgents, knownSessions };
-export const __messageTest = { createUserMessage };
 export const __retryTest = {
   threshold: RETRY_EVENT_THRESHOLD,
   reset: resetRetryConnection,
@@ -1786,10 +1062,6 @@ export const __hardFailureTest = {
 export const __questionTest = {
   questionCallIdentity,
   pendingQuestionCallIds,
-  pendingQuestionRpcPairs,
-  pendingQuestionOrder,
   registerQuestionCall,
   forgetQuestionCall,
-  muxQuestionRequestedRecord,
-  muxQuestionResolvedRecord,
 };

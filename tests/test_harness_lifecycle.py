@@ -225,8 +225,10 @@ def test_restart_stops_before_starting(monkeypatch):
         order.append("stop")
         return "stopped", "已停止"
 
-    def fake_launch(port=hl.DEFAULT_PORT, *, open_browser=True):
+    def fake_launch(port=hl.DEFAULT_PORT, *, open_browser=True, target="auto"):
         order.append("launch")
+        # 重启的是 web 服务进程：必须显式钉 web，不跟随 harness_launch_target
+        assert target == "web", "restart 必须钉 web（否则装了桌面端的机器会重启出桌面端）"
         return "started", f"http://127.0.0.1:{port}"
 
     monkeypatch.setattr(hl, "stop_harness", fake_stop)
@@ -245,7 +247,8 @@ def test_restart_does_not_start_when_stop_refused(monkeypatch):
     launched: list[str] = []
     monkeypatch.setattr(
         hl, "launch_harness",
-        lambda port=hl.DEFAULT_PORT, *, open_browser=True: launched.append("x") or ("started", ""),
+        lambda port=hl.DEFAULT_PORT, *, open_browser=True, target="auto":
+            launched.append("x") or ("started", ""),
     )
     status, info = hl.restart_harness()
     assert status == "not-ours"
@@ -259,7 +262,8 @@ def test_restart_starts_when_nothing_was_running(monkeypatch):
     )
     monkeypatch.setattr(
         hl, "launch_harness",
-        lambda port=hl.DEFAULT_PORT, *, open_browser=True: ("started", "http://127.0.0.1:38080"),
+        lambda port=hl.DEFAULT_PORT, *, open_browser=True, target="auto":
+            ("started", "http://127.0.0.1:38080"),
     )
     status, _info = hl.restart_harness()
     assert status == "started"
@@ -348,9 +352,12 @@ def test_launch_harness_gui_actions_without_confirmation_for_start(monkeypatch):
         return 0
 
     monkeypatch.setattr(QMessageBox, "exec", fail_exec)
+    # 替身必须收 ``target``：不收会让 worker 里的调用抛 TypeError 被吞成 error
+    # （本用例只断言 calls 为空，静默走 error 分支也能「绿」）。
     monkeypatch.setattr(
         hl, "launch_harness",
-        lambda port=hl.DEFAULT_PORT, *, open_browser=True: ("already", "http://127.0.0.1:3080"),
+        lambda port=hl.DEFAULT_PORT, *, open_browser=True, target="auto":
+            ("already", "http://127.0.0.1:3080"),
     )
 
     class _Pet:
@@ -366,6 +373,38 @@ def test_launch_harness_gui_actions_without_confirmation_for_start(monkeypatch):
         app.processEvents()
         time.sleep(0.01)
     assert calls == [], "start 不应弹窗也不应冒泡（already 复用是静默的）"
+    del app
+
+
+def test_start_action_threads_target_to_launch_harness(monkeypatch):
+    """start 动作必须把 ``target`` 原样交给 ``launch_harness``，且不得被 worker 吞掉。
+
+    回归（2026-10 双目标）：worker 里 ``target = describe_harness_process()`` 让
+    参数 ``target`` 变成局部变量，start 分支新增的 ``launch_harness(target=target)``
+    抛 UnboundLocalError，被 worker 的 ``except Exception`` 吞成 status="error"——
+    所有「启动」入口静默失败（菜单点了没反应）。本用例钉住「参数真到达」这一环。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        hl, "launch_harness",
+        lambda **kw: calls.append(kw) or ("already", "http://127.0.0.1:38080"),
+    )
+
+    class _Pet:
+        def show_bubble(self, text, duration=0):
+            pass
+
+    hl.launch_harness_gui(_Pet(), action="start", target="desktop")
+    import time
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and not calls:
+        app.processEvents()
+        time.sleep(0.01)
+    assert calls == [{"target": "desktop"}], "target 必须原样传到 launch_harness"
     del app
 
 
@@ -392,16 +431,20 @@ def _harness_submenu(menu):
 
 
 def test_harness_submenu_wires_three_lifecycle_actions(tmp_path, monkeypatch):
-    """子菜单三件套齐全，且各自绑到正确的 action（启动/重启/停止 不能串线）。"""
+    """子菜单齐全，且各自绑到正确的 (action, target)（启动/重启/停止 不能串线）。
+
+    启动是**双目标**（2026-10）：web 界面 / 桌面端界面各一个入口；重启/停止仍
+    只有一套（只作用于 web 服务进程，不跟随拉起目标）。
+    """
     from PySide6.QtWidgets import QApplication, QMenu
 
     app = QApplication.instance() or QApplication([])
     from pet.context_menus.shared import add_harness
 
-    calls: list[str] = []
+    calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "pet.context_menus.shared.launch_harness_gui",
-        lambda pet, action="start": calls.append(action),
+        lambda pet, action="start", target="auto": calls.append((action, target)),
     )
 
     class _Pet:
@@ -410,13 +453,17 @@ def test_harness_submenu_wires_three_lifecycle_actions(tmp_path, monkeypatch):
     menu = QMenu()
     add_harness(menu, _Pet())
     submenu = _harness_submenu(menu)
-    assert _menu_labels(submenu) == ["启动并打开页面", "重启服务", "停止服务"]
+    assert _menu_labels(submenu) == [
+        "启动 dsh web 界面", "启动桌面端界面", "重启服务", "停止服务",
+    ]
     for action in submenu.actions():
         action.trigger()
     # 菜单可见时的回调会被推迟到关闭后执行；这里直接驱动菜单关闭路径
     menu.close()
     app.processEvents()
-    assert calls == ["start", "restart", "stop"]
+    assert calls == [
+        ("start", "web"), ("start", "desktop"), ("restart", "auto"), ("stop", "auto"),
+    ]
     del app, tmp_path
 
 
@@ -440,7 +487,7 @@ def test_lite_build_hides_the_harness_submenu(tmp_path, monkeypatch):
     assert gate_at < harness_at, "门禁必须包住 add_harness（纯桌宠版不得出现 Harness 入口）"
 
     # 子菜单的顶层标题（旧的平级项「启动 DeepSeek Harness」已不存在）：
-    # 轻量替身也验证三个动作都在子菜单内、不会绕过门禁漏成平级项。
+    # 轻量替身也验证四个入口都在子菜单内、不会绕过门禁漏成平级项。
     from pet.context_menus.shared import add_harness
 
     class _Pet:
@@ -449,10 +496,13 @@ def test_lite_build_hides_the_harness_submenu(tmp_path, monkeypatch):
     menu = QMenu()
     add_harness(menu, _Pet())
     assert "DeepSeek Harness" in _menu_labels(menu)
-    assert "启动并打开页面" not in _menu_labels(menu)
+    assert "启动 dsh web 界面" not in _menu_labels(menu)
+    assert "启动桌面端界面" not in _menu_labels(menu)
     assert "停止服务" not in _menu_labels(menu)
     submenu = _harness_submenu(menu)
-    assert _menu_labels(submenu) == ["启动并打开页面", "重启服务", "停止服务"]
+    assert _menu_labels(submenu) == [
+        "启动 dsh web 界面", "启动桌面端界面", "重启服务", "停止服务",
+    ]
     menu.close()
     app.processEvents()
     del app, tmp_path, monkeypatch
@@ -460,7 +510,7 @@ def test_lite_build_hides_the_harness_submenu(tmp_path, monkeypatch):
 
 # ------------------------------------------------------------ GUI 线程模型（复审 P1-3/P1-4）
 def test_harness_submenu_actions_close_on_trigger(tmp_path, monkeypatch):
-    """三个 Harness 动作都必须 close_on_trigger：菜单先关闭、回调延迟执行，
+    """四个 Harness 入口都必须 close_on_trigger：菜单先关闭、回调延迟执行，
     确认框才不会在 macOS 原生菜单跟踪会话里被 AppKit 抑制。"""
     from PySide6.QtWidgets import QApplication, QMenu
 
@@ -473,7 +523,9 @@ def test_harness_submenu_actions_close_on_trigger(tmp_path, monkeypatch):
     menu = QMenu()
     add_harness(menu, _Pet())
     submenu = _harness_submenu(menu)
-    assert _menu_labels(submenu) == ["启动并打开页面", "重启服务", "停止服务"]
+    assert _menu_labels(submenu) == [
+        "启动 dsh web 界面", "启动桌面端界面", "重启服务", "停止服务",
+    ]
     for action in submenu.actions():
         assert bool(action.property("closeOnTrigger")), action.text()
     menu.close()

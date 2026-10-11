@@ -30,8 +30,7 @@ def alert_survives_suppression(alert_type: str, *, sticky: bool, buttons, priori
     kind = str(alert_type or "").strip().lower()
     if kind in {
         "approval", "question", "interaction", "approval/resolved", "question/resolved",
-        "interaction/resolved", "control", "control-result", "bridge/control-result",
-        "watchdog/control-result", "lifecycle", "turn/end", "task_complete",
+        "interaction/resolved", "lifecycle", "turn/end", "task_complete",
         "execution/failed", "agent/request-error", "session/end", "balance",
     }:
         return True
@@ -559,6 +558,25 @@ def start_music_sing_polling(host) -> None:
         QTimer.singleShot(0, host, host._check_music_sing)
 
 
+def _push_browser_media_setting(host, music_detect) -> None:
+    """把「浏览器媒体会话参与歌词」开关推给 ``music_detect``。
+
+    宿主（PetWindow / OverlayShell）是唯一持有 cfg 的一层，music_detect 不引
+    配置模块；每拍读一次而不是初始化一次，避免多一份会过期的副本。没有 cfg
+    的最小宿主保持 music_detect 当前值（默认关）。
+    """
+    getter = getattr(getattr(host, "cfg", None), "get", None)
+    if not callable(getter):
+        return
+    try:
+        music_detect.set_browser_media_enabled(
+            bool(getter("music_browser_media_enabled", False))
+        )
+    except Exception:
+        # 坏配置（自定义 cfg 替身）不能把唱歌检测整个打死。
+        pass
+
+
 def check_music_sing(host) -> None:
     """检测后台音乐并自动播放唱歌动画（可配置开关）。
 
@@ -568,6 +586,12 @@ def check_music_sing(host) -> None:
     退出唱歌要经过一段宽限期，而不是一检测到静音就退：``is_music_playing``
     看的是音频峰值，歌曲的前奏/间奏/轻声段会让峰值瞬时跌到阈值以下，立刻退出
     会表现为"唱着唱着主动退出、然后静默不唱"。
+
+    当前会话被否决（明确的视频、或关掉"浏览器媒体会话参与歌词"后的浏览器会话）
+    时 ``is_music_playing`` 直接为 False，于是走上面这段宽限期退出——**刻意不
+    在这里另加一条立即退出的分支**：那会让"只桩 is_music_playing 的既有测试"
+    绕过桩直接读到真实 SMTC（本机开着浏览器视频时用例就红），也把否决规则拆成
+    两处。规则只留在 ``music_detect`` 一处。
     """
     from .window import SING_ANIM
     if not host.isVisible():
@@ -583,6 +607,9 @@ def check_music_sing(host) -> None:
         host._music_sing_silent_since = None
         return
     from . import music_detect
+    # 上游 #230 批次新增：把「浏览器媒体会话是否参与」的设置推给 music_detect，
+    # 再判音乐。（与下面那条"自己正在播报"的登记互补，两者都保留。）
+    _push_browser_media_setting(host, music_detect)
     if music_detect.is_self_speaking():
         # 桌宠自己在报时/节日播报：峰值来自自己的语音，不是音乐——既不开始唱歌，
         # 也不推进静音退出计时（真在放音乐时唱歌照常持续，不被自己的播报打断）。

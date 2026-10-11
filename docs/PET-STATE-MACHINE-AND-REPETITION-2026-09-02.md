@@ -1,5 +1,7 @@
 # Pet 状态机与重复检查说明
 
+> **已退役**（2026-10，feature/agent-link-subtraction 减法）：本文描述的 DshStateTracker + 检测器体系（StuckDetector / BehaviorPatternDetector / ExplorationWatchdog）已删除，现状以 `pet/agent_link.py` 的 DshMonitor 单读方 + `pet/dsh_state.py` 纯收敛器为准。本文仅作历史设计参考。
+
 ## 目的
 
 本文说明 Pet 如何把 Agent 的事件转换成状态、动画、提醒和风险判断，重点记录当前

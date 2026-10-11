@@ -39,11 +39,6 @@
     "哼，本机没有发现{name}，人家已经帮您看过啦。",
     "当前检测不到{name}的安装，主人帮忙确认一下嘛～"
   ],
-  "approval.command": [
-    "主人～当前会话 {sessionName} 里的{name}请求执行命令：{command}，得您点头才行哦。",
-    "哼，会话 {sessionName} 里的{name}正在等您审批，通过{toolName}执行的命令是：{command}",
-    "{name}在当前会话 {sessionName} 里的{label}正在等待主人决定，您批准以后才能继续～"
-  ],
   "approval.generic": [
     "主人～当前会话 {sessionName} 里的{name}有一项操作正在等您批准。",
     "哼，会话 {sessionName} 里的{name}正在等您拍板呢，相关内容是{label}。",
@@ -99,11 +94,6 @@
     "哼，总算顺利做完了，{name}这次勉强还算靠谱。",
     "{name}任务完成～主人去验收吧，人家要去吃米饭然后趴一会儿啦。"
   ],
-  "dsh.writeback.failed": [
-    "呜呜，Agent 的消息没有成功写回 DSH，主人去界面处理一下吧～",
-    "回写 DSH 失败啦……哼，这次真的不是人家偷懒。",
-    "消息没能送回 DSH，主人需要去 DSH 界面确认一下哦。"
-  ],
   "failure.generic": [
     "主人～当前会话 {sessionName} 里的{name}本轮运行失败啦，失败类型是{failureType}。",
     "哼，会话 {sessionName} 里的{name}遇到了错误{errorCode}：{errorMessage}",
@@ -134,16 +124,6 @@
     "会话 {sessionName} 的模型访问暂时没成功，错误码是{errorCode}：{errorMessage}",
     "当前会话 {sessionName} 的第{retry}次尝试还没成功，连续模型访问失败次数是{consecutiveRetryCount}，人家先替主人盯着～"
   ],
-  "pattern.control": [
-    "主人～{name}的重复行为已经达到需要干预的程度啦：{reasons}",
-    "哼，{name}又在明显绕圈子，原因是{reasons}，继续下去不划算啦。",
-    "{name}的行为模式已经建议介入：{reasons}，主人来决定怎么处理嘛～"
-  ],
-  "pattern.warning": [
-    "主人～{name}出现重复行为迹象啦：{reasons}",
-    "唔，{name}的行为模式有点重复，原因是{reasons}，不过现在只是提醒哦。",
-    "{name}当前需要留意一下：{reasons}，还没有到必须干预的程度～"
-  ],
   "question.empty": [
     "主人～当前会话 {sessionName} 里的{name}正在等您从选项里做决定哦。",
     "哼，会话 {sessionName} 里的{name}还停在{label}这里，主人选一个嘛。",
@@ -164,19 +144,9 @@
     "哼，{name}终于开始干活了，人家才没有一直等它哦。",
     "{name}已经进入工作状态啦，主人放心，人家会乖乖替您看着～"
   ],
-  "stuck.reminder": [
-    "呜——超时信号！{name}好像钻进牛角尖里啦，主人最好来看一眼嘛。",
-    "哼，{name}在这里卡太久了，看起来需要主人介入一下。",
-    "{name}疑似卡在当前思路里了，人家已经用尾鳍敲过它啦～"
-  ],
   "thinking": [
     "唔…{name}正在认真想办法呢，主人先别催嘛～",
     "鲸鱼脑袋正在陪{name}一起思考……才、才不是发呆啦。",
     "{name}还在分析哦，现在只是正常思考状态，人家陪主人一起等～"
-  ],
-  "watchdog.warning": [
-    "主人～{name}最近出现重复探索的风险啦：{reasons}",
-    "哼，{name}好像开始反复排查同一类东西了，原因是{reasons}。",
-    "{name}的探索轨迹需要留意一下：{reasons}，现在只是预警，还没有强制打断哦～"
   ]
 }

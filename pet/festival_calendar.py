@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import datetime as _dt
 from dataclasses import dataclass
+from functools import lru_cache
 
 from lunar_python import Lunar, Solar
+from lunar_python.util import HolidayUtil
 
 # 24 节气：按公历年内出现顺序（小寒起，冬至止）。名称必须与
 # lunar-python 的 getJieQi() 返回值逐字一致，否则匹配不到。
@@ -113,3 +115,31 @@ def nth_weekday(year: int, month: int, weekday: int, nth: int) -> _dt.date:
     first = _dt.date(int(year), int(month), 1)
     offset = (int(weekday) - first.weekday()) % 7
     return first + _dt.timedelta(days=offset + 7 * (int(nth) - 1))
+
+
+@lru_cache(maxsize=1024)
+def statutory_holiday_name(day: _dt.date) -> str | None:
+    """该公历日是否为中国法定放假日；是则返回节假日名（如「国庆节」），否则 None。
+
+    数据来自 ``lunar_python.util.HolidayUtil`` 内嵌的国务院节假日安排表
+    （覆盖 2001-12-29 ~ 2026-10-10）。三条语义必须分清：
+
+    1. **放假日**：``getHoliday()`` 非空且 ``isWork()`` 为假（如 2026-10-01
+       国庆节）——返回名字。
+    2. **调休补班**：安排表里 ``isWork()`` 为真（如 2026-10-10 周六补班）。
+       它是上班日、**不是**放假日，故返回 None；周末是否高峰由调用方自己的
+       星期规则决定，这里不做判断。
+    3. **表外日期**：``getHoliday()`` 返回 None（2026-10-11 起，含 2027 及
+       以后）——返回 None 表示**未知**，调用方必须降级成「非放假日」（即只按
+       星期规则处理）。不要把 None 读成「已确认上班」，也不要为了补数据在这里
+       硬编码年份表：安排表每年由国务院另行发布，写死即过期。
+
+    ``lru_cache`` 的实测理由：内嵌表是只读常量，函数是纯查询（~10µs/次，实测
+    本机 CPython 3.13）；而余额峰谷的切换扫描同一天要问 4 次、并且它落在
+    灵动岛的逐帧路径上——春节/国庆这类长假里单帧累计 300µs+，缓存后重复查询
+    降到 ~0.1µs。1024 条 ≈ 3 年日期，足够覆盖扫描窗口且不无界增长。
+    """
+    holiday = HolidayUtil.getHoliday(day.year, day.month, day.day)
+    if holiday is None or holiday.isWork():
+        return None
+    return str(holiday.getName() or '') or None

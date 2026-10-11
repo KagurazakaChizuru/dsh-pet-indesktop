@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""O5 后台常驻门控：DSH 状态跟踪器 / 进程级共享全屏 watcher。
+"""O5 后台常驻门控：DSH 桥接读方 / 进程级共享全屏 watcher。
 
 默认配置下这两项都该真正停下来（现状是**无条件**常驻）：
 
-1. ``DshStateTracker``（3s 一轮的 loopback 端口探测线程 + 1.2s 一轮的桥目录
-   事件轮询）的全部输出只喂 DSH 联动管线（``notify_dsh_state`` 在 DSH 监视器
-   未运行时直接 no-op）——DSH 联动没开时它读的桥接插件根本没装，纯空转。
-   门 = ``agent_link.dsh``；设置保存 / 外部配置变更链同步启停。
+1. DSH 桥目录的唯一读方 ``DshMonitor``（1.5s 一轮的桥目录轮询 + 3s 一节拍的
+   端口探活 + dsh_state 收敛器，全部在它自己的 worker 线程里）的全部输出只喂
+   DSH 联动管线——DSH 联动没开时它读的桥接插件根本没装，纯空转。
+   门 = ``agent_link.dsh``（``AgentLinkManager.apply_config`` 按它启停监视器）。
 2. overlay 拓扑下进程级共享全屏 watcher 的扇出目标是 sprite 世界的壳，而该壳
    **刻意不暴露** ``_watch_required`` / ``_cursor_hidden_passthrough_enabled``
    / ``auto_hide_fullscreen``（overlay 自持 ``FullscreenCursorWatcher``）——
@@ -125,97 +125,85 @@ def _save_external(config) -> None:
     raise AssertionError("外部保存重试 10s 仍失败（Config.save 返回 False）")
 
 
-# ---------------------------------------------------------------- DSH 状态跟踪器
-def test_default_config_keeps_dsh_tracker_stopped(tmp_path, monkeypatch):
-    """默认配置（agent_link 四 agent 全关）：跟踪器不启，零端口探测。"""
+# ---------------------------------------------------------------- DSH 桥接读方门
+def _dsh_monitor(shell):
+    return shell._shared.agent_link.monitors["dsh"]
+
+
+def test_default_config_keeps_dsh_monitor_stopped(tmp_path, monkeypatch):
+    """默认配置（agent_link 四 agent 全关）：读方不启，零端口探测。"""
     connects: list[int] = []
     monkeypatch.setattr(harness_launcher, "is_running",
                         lambda port: connects.append(port) or False)
     shell = _start_shell(tmp_path, monkeypatch)
-    tracker = shell._dsh_state_tracker
-    assert tracker._started is False, "默认配置下 DSH 跟踪器不得启动"
-    assert not tracker._online_timer.isActive()
-    assert not tracker._event_timer.isActive()
-    assert connects == [], "跟踪器未启动就不得发起 loopback 端口探测"
+    monitor = _dsh_monitor(shell)
+    assert monitor._running is False, "默认配置下 DSH 读方不得启动"
+    assert connects == [], "读方未启动就不得发起 loopback 端口探测"
     _pump(0.2)
-    assert connects == [], "3s 探测表未启，后续也不得自启"
+    assert connects == [], "监视器未启动，后续也不得自启探测"
 
 
-def test_dsh_link_enabled_starts_tracker(tmp_path, monkeypatch):
-    """DSH 联动开启：跟踪器照常跑（功能不变）。"""
+def test_dsh_link_enabled_starts_monitor(tmp_path, monkeypatch):
+    """DSH 联动开启：读方照常跑（功能不变），worker 线程存活。"""
     monkeypatch.setattr(harness_launcher, "is_running", lambda port: False)
     shell = _start_shell(tmp_path, monkeypatch, dsh=True)
-    tracker = shell._dsh_state_tracker
-    assert tracker._started is True
-    assert tracker._online_timer.isActive()
-    assert tracker._event_timer.isActive()
+    monitor = _dsh_monitor(shell)
+    assert monitor._running is True
+    assert monitor._worker is not None and monitor._worker.is_alive()
 
 
-def test_malformed_agent_link_config_keeps_tracker_stopped(tmp_path, monkeypatch):
-    """脏配置（agent_link 不是 dict）：门判假、不抛，跟踪器保持不跑。"""
+def test_malformed_agent_link_config_keeps_monitor_stopped(tmp_path, monkeypatch):
+    """脏配置（agent_link 不是 dict）：门判假、不抛，读方保持不跑。"""
     shell = _start_shell(tmp_path, monkeypatch)
     shell.config.data["agent_link"] = "broken"
     assert shell._dsh_tracker_wanted() is False
-    shell._sync_dsh_state_tracker()
-    assert shell._dsh_state_tracker._started is False
+    shell._shared.agent_link.apply_config()
+    assert _dsh_monitor(shell)._running is False
 
 
-class _FakeLinkManager:
-    """联动管理器替身：只记录 DSH 状态注入与交互收口。"""
-
-    def __init__(self):
-        self.notified: list[str] = []
-        self.dismissed = False
-
-    def notify_dsh_state(self, state):
-        self.notified.append(state)
-
-    def dismiss_all_interactions(self):
-        self.dismissed = True
-
-
-def test_gated_tracker_still_drives_offline_dismiss(tmp_path, monkeypatch):
-    """门开时行为与现在一致：tracker 信号仍到联动管线（DSH 离线收口审批气泡）。"""
-    win = _StubWin()
-    win.agent_link_manager = _FakeLinkManager()
-    shell = _start_shell(tmp_path, monkeypatch, dsh=True, win=win)
-    assert shell._dsh_state_tracker._started is True
-    shell._dsh_state_tracker.state_changed.emit("thinking", "offline")
-    app.processEvents()
-    assert win.agent_link_manager.dismissed is True, "DSH 离线必须照常收口常驻气泡"
-
-
-def test_disabling_dsh_link_stops_tracker_on_config_change(tmp_path, monkeypatch):
-    """设置保存链（外部配置变更）关掉 DSH 联动 → 跟踪器同步停表。"""
+def test_gated_monitor_still_drives_offline_dismiss(tmp_path, monkeypatch):
+    """门开时行为与现在一致：收敛器 offline 仍收口常驻审批/问题气泡。"""
     monkeypatch.setattr(harness_launcher, "is_running", lambda port: False)
     shell = _start_shell(tmp_path, monkeypatch, dsh=True)
-    tracker = shell._dsh_state_tracker
-    assert tracker._started is True
+    manager = shell._shared.agent_link
+    dismissed: list[bool] = []
+    monkeypatch.setattr(manager, "dismiss_all_interactions",
+                        lambda: dismissed.append(True))
+    _dsh_monitor(shell).dsh_state_changed.emit("thinking", "offline", "")
+    app.processEvents()
+    assert dismissed, "DSH 离线必须照常收口常驻气泡"
+
+
+def test_disabling_dsh_link_stops_monitor_on_apply_config(tmp_path, monkeypatch):
+    """关掉 DSH 联动 → apply_config（设置保存链的终点）同步停读方。"""
+    monkeypatch.setattr(harness_launcher, "is_running", lambda port: False)
+    shell = _start_shell(tmp_path, monkeypatch, dsh=True)
+    monitor = _dsh_monitor(shell)
+    assert monitor._running is True
 
     agent_cfg = dict(shell.config.get("agent_link") or {})
     agent_cfg["dsh"] = False
     shell.config.set("agent_link", agent_cfg)
-    shell._apply_external_config_change()
+    shell._shared.agent_link.apply_config()
 
-    assert tracker._started is False, "关掉 DSH 联动后跟踪器必须停"
-    assert not tracker._online_timer.isActive()
-    assert not tracker._event_timer.isActive()
+    assert monitor._running is False, "关掉 DSH 联动后读方必须停"
+    assert monitor._worker is None or not monitor._worker.is_alive()
 
 
-def test_enabling_dsh_link_starts_tracker_on_config_change(tmp_path, monkeypatch):
-    """反向：运行期从设置保存打开 DSH 联动 → 跟踪器立即起来。"""
+def test_enabling_dsh_link_starts_monitor_on_apply_config(tmp_path, monkeypatch):
+    """反向：运行期打开 DSH 联动 → apply_config 立即拉起读方。"""
     monkeypatch.setattr(harness_launcher, "is_running", lambda port: False)
     shell = _start_shell(tmp_path, monkeypatch)
-    tracker = shell._dsh_state_tracker
-    assert tracker._started is False
+    monitor = _dsh_monitor(shell)
+    assert monitor._running is False
 
     agent_cfg = dict(shell.config.get("agent_link") or {})
     agent_cfg["dsh"] = True
     shell.config.set("agent_link", agent_cfg)
-    shell._apply_external_config_change()
+    shell._shared.agent_link.apply_config()
 
-    assert tracker._started is True
-    assert tracker._online_timer.isActive()
+    assert monitor._running is True
+    assert monitor._worker is not None and monitor._worker.is_alive()
 
 
 # ---------------------------------------------------------------- 共享全屏 watcher

@@ -1,8 +1,9 @@
-// P1-4：审批/问题写盘去重的降级键必须带 sessionId。
+// 问题写盘去重键的契约（2026-10 减法后：审批帧不再由桥接写出，只剩问题一族）。
 //
-// 背景：`ap:tc:<tool>|<command>` 不含 session/审批身份，8 秒内两个不同审批
-// （同命令）会被静默丢弃。本测试直接从源码提取并求值纯函数
-// `_interactionDedupKeys`（与仓库既有 bridge 契约测试一致）。
+// question/requested 由 assistant/message 的 tool-call 块与独立 tool/call 事件
+// 双通道产生，`_interactionDedupKeys` 按 callId（复合 sessionId 隔离）去重——
+// 同一条问题 8s 内只落一条记录，跨会话同 callId 不互吞。
+// 直接从源码提取并求值纯函数（与仓库既有 bridge 契约测试一致）。
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -19,56 +20,30 @@ function loadInteractionDedupKeys() {
   return new Function(`${match[0]}; return _interactionDedupKeys;`)();
 }
 
-test("approval fallback dedup key distinguishes sessions", () => {
+test("question dedup key carries callId scoped by session", () => {
   const keysFor = loadInteractionDedupKeys();
-  const base = { event: "approval/request", tool: "exec_command", command: "rm -rf /tmp/x" };
-
-  const keysA = keysFor({ ...base, sessionId: "sess-a" });
-  const keysB = keysFor({ ...base, sessionId: "sess-b" });
-  const fallbackA = keysA.find((key) => key.startsWith("ap:tc:"));
-  const fallbackB = keysB.find((key) => key.startsWith("ap:tc:"));
-
-  assert.ok(fallbackA, "应生成 tool+command 降级去重键");
-  assert.ok(fallbackB, "应生成 tool+command 降级去重键");
-  assert.notEqual(
-    fallbackA,
-    fallbackB,
-    "不同 session 的同命令审批不得共用降级去重键（会被 8s 窗口静默丢弃）",
-  );
-  // 同一 session 的同一命令仍应得到同一组键（去重语义不变）。
-  assert.deepEqual(keysFor({ ...base, sessionId: "sess-a" }), keysA);
+  const keys = keysFor({ event: "question/requested", callId: "call-1", sessionId: "sess-a" });
+  assert.ok(keys.includes("qu:call:sess-a:call-1"), "callId 去重键必须带 sessionId 隔离");
 });
 
-test("approval fallback dedup key without sessionId stays legacy", () => {
+test("same callId in different sessions never shares a dedup key", () => {
   const keysFor = loadInteractionDedupKeys();
-  const keys = keysFor({ event: "approval/request", tool: "exec", command: "ls" });
-  assert.deepEqual(keys, ["ap:tc:exec|ls"]);
+  const a = keysFor({ event: "question/requested", callId: "call-1", sessionId: "sess-a" });
+  const b = keysFor({ event: "question/requested", callId: "call-1", sessionId: "sess-b" });
+  assert.deepEqual(a.filter((k) => b.includes(k)), [], "跨会话同 callId 不得共享去重键");
 });
 
-test("approval identity key still wins when approvalId is present", () => {
+test("approval records no longer produce dedup keys (mux relay removed)", () => {
   const keysFor = loadInteractionDedupKeys();
-  const keys = keysFor({
-    event: "approval/request", approvalId: "ap-1", sessionId: "sess-a",
-    tool: "exec", command: "ls",
-  });
-  assert.ok(keys.includes("ap:ap-1"));
-  assert.ok(keys.includes("ap:se:sess-a:ap-1"));
-});
-
-test("distinct approvals in one session never share a dedup key", () => {
-  // 审计场景 1：用户拒绝 pwsh Get-Location，Agent 8s 内再次请求同一条命令
-  // → 第二条 approval/request 被粗降级键 ap:tc:<tool>|<command> 丢弃。
-  const keysFor = loadInteractionDedupKeys();
-  const base = {
-    event: "approval/request", sessionId: "sess-a",
-    tool: "pwsh", command: "Get-Location",
-  };
-  const first = keysFor({ ...base, approvalId: "ap-1", rpcId: "rpc-1" });
-  const second = keysFor({ ...base, approvalId: "ap-2", rpcId: "rpc-2" });
-  const shared = first.filter((key) => second.includes(key));
+  // 减法后桥接不写 approval/request（mux 中继已删）；即便旧桩/手写记录流入，
+  // 也不再生成审批去重键。
   assert.deepEqual(
-    shared,
+    keysFor({ event: "approval/request", approvalId: "ap-1", sessionId: "sess-a", tool: "exec", command: "ls" }),
     [],
-    "同一会话内两条身份不同的审批（同命令）不得共享任何去重键",
   );
+});
+
+test("unrelated events produce no dedup keys", () => {
+  const keysFor = loadInteractionDedupKeys();
+  assert.deepEqual(keysFor({ event: "tool/call", callId: "c-1" }), []);
 });

@@ -221,7 +221,7 @@ def test_dialogue_key_params_match_runtime_call_sites():
     assert "ok" not in DIALOGUE_KEY_PARAMS["activity.read"]
     assert {"errorCode", "errorMessage", "consecutiveRetryCount", "retry"} <= set(
         DIALOGUE_KEY_PARAMS["model_access.one"])
-    assert DIALOGUE_KEY_PARAMS["dsh.writeback.failed"] == ()
+    assert "dsh.writeback.failed" not in DIALOGUE_KEY_PARAMS, "回写链已删，其文案键不得残留"
 
 
 def test_dialogue_template_export_is_blank_without_current_phrases(qapp, tmp_path):

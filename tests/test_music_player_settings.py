@@ -209,3 +209,58 @@ def test_detected_path_is_written_to_config_on_save(dialog, monkeypatch):
     dialog._save()
 
     assert dialog.config.get("music_player_paths") == {"netease": r"D:\CloudMusic\cloudmusic.exe"}
+
+
+# ------------------------------------------------- 浏览器媒体会话开关：平台契约
+#
+# SMTC 是 Windows 专属能力。非 Windows 上这个开关既没有效果也不该出现在设置页
+# （SETTINGS-CHANGE-GATES §4「永久不支持的能力不创建控件」），所以控件与设置行
+# 都只在 Windows 创建——与 cursor_hidden_passthrough 的处置一致。
+
+
+def test_browser_media_row_is_absent_on_non_windows(monkeypatch):
+    """非 Windows 平台：即使控件存在，设置行也不出现（平台闸门优先）。"""
+    import sys
+
+    from pet.settings_widgets import ToggleSwitch
+
+    _qapp()
+    host = type("H", (), {"music_browser_media_check": ToggleSwitch()})()
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert settings_music.browser_media_supported() is False
+    assert settings_music.browser_media_rows(host) == []
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert settings_music.browser_media_rows(host) == []
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert settings_music.browser_media_supported() is True
+    rows = settings_music.browser_media_rows(host)
+    assert [row.objectName() for row in rows] == ["settingRow_music_browser_media"]
+
+
+def test_browser_media_row_is_absent_when_widget_missing():
+    """控件没建（非 Windows 的实际形态）时行也不建：不留"只有行没有控件"的残骸。"""
+    _qapp()
+    host = type("H", (), {"music_browser_media_check": None})()
+
+    assert settings_music.browser_media_rows(host) == []
+
+
+def test_browser_media_widget_is_windows_only(monkeypatch, tmp_path):
+    """控件本体同样只在 Windows 创建（设置页构造路径）。"""
+    import sys
+
+    from pet import settings_pet_controls
+    from pet.config import Config
+    from pet.modern_settings_dialog import ModernSettingsDialog
+
+    app = _qapp()
+    monkeypatch.setattr(settings_pet_controls.sys, "platform", "linux")
+    dialog = ModernSettingsDialog(Config(tmp_path), include_ai=False)
+    assert dialog.music_browser_media_check is None, "非 Windows 不该建这个控件"
+    # 缺控件时保存路径要安全跳过（不许抛，也不许把它写成 False）
+    dialog._save()
+    dialog.reject()
+    app.processEvents()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -951,7 +952,8 @@ def test_pure_pet_context_menu_keeps_web_but_hides_harness():
     labels = labels_in(menu)
     # Harness 入口现为子菜单（标题 "DeepSeek Harness"），纯桌宠版整块不显示
     assert "DeepSeek Harness" not in labels
-    assert "启动并打开页面" not in labels
+    assert "启动 dsh web 界面" not in labels
+    assert "启动桌面端界面" not in labels
     assert "停止服务" not in labels
     assert "打开网页版 DeepSeek" in labels
     menu.close()
@@ -2885,19 +2887,15 @@ def test_pet_app_binds_about_to_quit_once_to_current_window(tmp_path, monkeypatc
     assert current.saved == 1
     assert old.saved == 0  # 旧窗口不再被保存
 
-    # start() 启动了真实的 DshStateTracker（3s 周期端口探测 QTimer）：
-    # 不停掉会跨测试存活，在后续用例泵事件时继续发起探测，
-    # 是全量套件原生崩溃的帮凶之一。
-    owner._dsh_state_tracker.stop()
 
 
-def test_dsh_state_tracker_wiring_drives_thinking(tmp_path):
-    """AppShell 恢复对 DshStateTracker 的订阅：thinking/真人消息 → 联动管线。
+def test_dsh_converged_state_wiring_drives_thinking(tmp_path, monkeypatch):
+    """单读方合并后：收敛器状态/真人消息仍打通联动管线。
 
-    回归（本次调查结论）：d04fc10 曾接线 state_changed/user_message，post-merge
-    重构时丢失 → DSH 的 THINKING 气泡结构性不触发、对话开始不稳定。本用例钉住
-    两条信号都接了、thinking/真人消息会调 notify_dsh_state、offline 收交互，
-    且无窗/无联动管理器时绝不崩。
+    回归（原 dsh_state tracker 接线用例的继任者）：DshMonitor 是桥目录唯一
+    读方，收敛输出经 ``dsh_state_changed`` / ``dsh_user_message`` 到管理器——
+    thinking/真人消息注入 ``notify_dsh_state``、offline 收交互，AppShell 侧只剩
+    灵动岛活跃指示（无岛时绝不崩）。
     """
     from PySide6.QtWidgets import QApplication
 
@@ -2906,52 +2904,37 @@ def test_dsh_state_tracker_wiring_drives_thinking(tmp_path):
 
     QApplication.instance() or QApplication([])
     owner = AppShell(QApplication.instance(), Config(tmp_path))
-    owner._dsh_state_tracker.stop()  # 断真实轮询，手动驱动信号
+    manager = owner._shared.agent_link
+    monitor = manager.monitors["dsh"]
 
-    class FakeAlm:
-        def __init__(self):
-            self.notified = []
-            self.dismissed = False
-
-        def notify_dsh_state(self, state):
-            self.notified.append(state)
-
-        def dismiss_all_interactions(self):
-            self.dismissed = True
+    notified: list[str] = []
+    dismissed: list[bool] = []
+    monkeypatch.setattr(manager, "notify_dsh_state", lambda state: notified.append(state))
+    monkeypatch.setattr(manager, "dismiss_all_interactions", lambda: dismissed.append(True))
 
     try:
-        # 无窗/无联动管理器：两个处理器都必须静默 no-op
-        owner._on_dsh_user_message("s1", "hi")
-        owner._on_dsh_state_changed("working", "thinking")
-
-        alm = FakeAlm()
-
-        class FakeWin:
-            pass
-
-        win = FakeWin()
-        win.agent_link_manager = alm
-        owner.instance.win = win
-
         # 真人消息 = 对话开始：与状态边沿竞态解耦的稳定触发
-        owner._on_dsh_user_message("s1", "hi")
-        assert alm.notified == ["thinking"]
+        monitor.dsh_user_message.emit("s1", "hi")
+        assert notified == ["thinking"]
 
         # thinking 状态也触发（turn/start 路径）；同轮重复由呈现管线去重
-        alm.notified.clear()
+        notified.clear()
+        monitor.dsh_state_changed.emit("working", "thinking", "turn/start")
+        assert notified == ["thinking"]
+
+        # offline：收掉失效的常驻审批/问题气泡
+        monitor.dsh_state_changed.emit("thinking", "offline", "")
+        assert dismissed == [True]
+
+        # 非 thinking/offline/等待态不动作
+        notified.clear()
+        monitor.dsh_state_changed.emit("thinking", "working", "tool/call")
+        assert notified == []
+
+        # AppShell 转发口在无岛时必须静默 no-op
         owner._on_dsh_state_changed("working", "thinking")
-        assert alm.notified == ["thinking"]
-
-        # offline：收掉失效的常驻审批/问题气泡（d04fc10 原行为）
-        owner._on_dsh_state_changed("thinking", "offline")
-        assert alm.dismissed is True
-
-        # 非 thinking/offline 状态不动作
-        alm.notified.clear()
-        owner._on_dsh_state_changed("thinking", "working")
-        assert alm.notified == []
     finally:
-        owner._dsh_state_tracker.stop()
+        owner._shared.stop_all()
 
 
 def test_external_character_dirs_uses_variant_then_legacy_fallback(tmp_path, monkeypatch):
@@ -3169,4 +3152,142 @@ def test_settings_image_directories_use_preview_but_audio_folders_do_not(tmp_pat
     assert dialog.egg_image_dir_picker.preview_button is not None
     assert dialog.click_sound_picker.folder_picker.preview_button is None
     dialog.reject()
+    app.processEvents()
+
+
+def test_clear_proactive_memory_reports_failure_truthfully(tmp_path, monkeypatch):
+    """清空陪伴记忆失败时不得再报"已清空"（按 clear() 返回值分支）。
+
+    设置页是**独立进程**（`python -m pet --settings`），与主进程后台主动识屏
+    写同一份记忆文件；拿不到跨进程锁就是"这次没清"。之前无条件弹"已清空"，
+    用户看到的是"清了还在"。
+    """
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    import pet.modern_settings_dialog as settings_mod
+    import pet.proactive as proactive_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    dialog = settings_mod.ModernSettingsDialog(Config(tmp_path), include_ai=True)
+
+    class _RefusingMemory:
+        """拿不到锁的 ProactiveMemory 替身（真实失败路径，不是异常）。"""
+
+        def __init__(self, path):
+            self.path = path
+
+        def clear(self):
+            return False
+
+    monkeypatch.setattr(proactive_mod, "ProactiveMemory", _RefusingMemory)
+
+    shown: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda _p, title, text: shown.append(("info", title, text))))
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda _p, title, text: shown.append(("warn", title, text))))
+
+    dialog._on_pro_clear_memory()
+
+    assert shown, "清空失败必须有用户可见反馈（不能静默）"
+    assert all(kind != "info" for kind, _, _ in shown), f"失败仍报了成功：{shown}"
+    assert shown[0][0] == "warn", shown
+    assert "失败" in shown[0][1], f"标题必须表明失败：{shown[0]}"
+    dialog.close()
+    app.processEvents()
+
+
+def test_clear_proactive_memory_reports_success_and_removes_file(tmp_path, monkeypatch):
+    """对照组：真清空成功仍报"已清空"，且文件确实被删（返回值不是摆设）。"""
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    config = Config(tmp_path)
+    dialog = settings_mod.ModernSettingsDialog(config, include_ai=True)
+
+    mem_file = config.dir / "proactive_screen_memory.json"
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    mem_file.write_text(
+        json.dumps({"entries": [{"ts": 1.0, "process": "A.exe", "activity": "上网"}]},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    shown: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda _p, title, text: shown.append(("info", title, text))))
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda _p, title, text: shown.append(("warn", title, text))))
+
+    dialog._on_pro_clear_memory()
+
+    assert [kind for kind, _, _ in shown] == ["info"], shown
+    assert not mem_file.exists(), "报了已清空就必须真的删掉文件"
+    dialog.close()
+    app.processEvents()
+
+
+def test_clear_proactive_memory_reports_failure_when_probe_fails(tmp_path, monkeypatch):
+    """探测失败（stat 报 EACCES/EIO/WinError）时设置页必须走既有的**失败分支**。
+
+    这条走**真实** `ProactiveMemory`（不是替身）：`clear()` 内部的存在性探测抛错。
+    以前异常从 `_on_pro_clear_memory` 直接穿出去——用户既没看到"已清空"也没看到
+    "清空失败"，只有一个异常；`clear()` 现在返回 False，走 `cleared is False`
+    分支弹警告，记忆文件一个字节都不动。
+    """
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    import pet.modern_settings_dialog as settings_mod
+    from pet.config import Config
+
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
+    config = Config(tmp_path)
+    dialog = settings_mod.ModernSettingsDialog(config, include_ai=True)
+
+    mem_file = config.dir / "proactive_screen_memory.json"
+    mem_file.parent.mkdir(parents=True, exist_ok=True)
+    mem_file.write_text(
+        json.dumps({"entries": [{"ts": 1.0, "process": "A.exe", "activity": "上网"}]},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    before = mem_file.read_bytes()
+
+    real_stat = Path.stat
+    targets = {mem_file, mem_file.resolve()}
+
+    def denied_probe(self, *args, **kwargs):
+        # 只让记忆文件的探测失败（EACCES/WinError 5 这类 is_file 会原样上抛的错误）
+        if Path(self) in targets:
+            raise OSError(5, "Access is denied", None, 5)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied_probe)
+
+    shown: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        staticmethod(lambda _p, title, text: shown.append(("info", title, text))))
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        staticmethod(lambda _p, title, text: shown.append(("warn", title, text))))
+
+    dialog._on_pro_clear_memory()
+
+    assert shown, "清空失败必须有用户可见反馈（探测失败也不许静默）"
+    assert all(kind != "info" for kind, _, _ in shown), f"失败仍报了成功：{shown}"
+    assert shown[0][0] == "warn" and "失败" in shown[0][1], shown
+    assert mem_file.read_bytes() == before, "报失败时记忆文件不得被动过"
+    dialog.close()
     app.processEvents()

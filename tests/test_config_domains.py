@@ -21,7 +21,6 @@ from pet.config_domains import (
     MenuConfig,
     ProactiveConfig,
 )
-from pet.report_gates import REPORT_GATE_KEYS
 
 
 class _UnavailableSecretStore:
@@ -66,7 +65,7 @@ CHAT_DIRTY = {
 }
 AGENT_LINK_DIRTY = {
     "dsh": "yes",                        # bool("yes") → True
-    # 事件汇报概率门：越界收敛、无法解析回落该门默认（activity 默认 0.6，不是 1.0）。
+    # 减法退役键（概率门）：读入即丢弃，不再写回。
     "report_gates": {"activity": 1.5, "done": "abc", "nope": 0.5},
     "sound_volume": 5.0,                 # clamp → 1.0
     "sound_cooldown_seconds": -1,        # clamp → 0.0
@@ -244,43 +243,30 @@ def test_agent_link_extension_keys_and_custom_agent_key_preserved():
     assert normalized["future_ext"] == {"keep": 1}
 
 
-def test_agent_link_legacy_report_keys_migrate_to_gates_and_are_dropped():
-    """旧事件汇报键一次性迁移到 report_gates，且迁移后**不再留在结果里**。
-
-    旧模型是 5 个 notify_* 布尔开关 + 一个 0-100 的 report_probability 百分比；
-    新模型是 report_gates 概率门。这里验证 facade 与 Config 加载路径同规则：
-    迁移出对应的门值，且结果里不留兼容别名（不做双写）。
-    """
-    migrated = AgentLinkConfig.normalize({
-        "notify_state": True,          # 开 → 1.0
-        "notify_activity": False,      # 关 → 0.0
-        "notify_done": 0,              # 假值 → 0.0
-        "report_probability": 60,      # 0-100 → activity 0.0-1.0
-    })
-    legacy = ("notify_state", "notify_activity", "notify_approval",
-              "notify_done", "notify_exec_failed", "report_probability")
-    for key in legacy:
-        assert key not in migrated, f"{key} 迁移后不得留在配置里"
-
-    gates = migrated["report_gates"]
-    assert float(gates["state"]) == pytest.approx(1.0)
-    assert float(gates["done"]) == pytest.approx(0.0)
-    # report_probability 晚于 notify_activity 迁移 → 百分比赢（60 → 0.6）
-    assert float(gates["activity"]) == pytest.approx(0.6)
-    # 未被旧键覆盖的门保持默认，且门集合完整
-    assert set(gates) == set(REPORT_GATE_KEYS)
-    assert float(gates["stuck"]) == pytest.approx(1.0)
-
-
-def test_agent_link_new_gate_shape_wins_over_legacy_keys():
-    """新旧键并存时以新形状 report_gates 为准，不被旧键覆盖。"""
+def test_agent_link_removed_keys_are_dropped():
+    """减法退役的 agent_link 键（概率门及其旧前身、卡住/行为模式/探索看门狗）
+    读入即丢弃，facade 与 Config 加载路径同规则——结果里不留死键。"""
     normalized = AgentLinkConfig.normalize({
+        "notify_state": True,
+        "notify_activity": False,
+        "report_probability": 60,
         "report_gates": {"activity": 0.25},
-        "report_probability": 100,
-        "notify_activity": True,
+        "stuck_detect": True,
+        "stuck_cooldown_seconds": 300,
+        "pattern_detect": True,
+        "pattern_w6_control": 3,
+        "exploration_watchdog_enabled": True,
+        "exploration_watchdog_long_run_minutes": 10,
+        "sound_enabled": True,
     })
-    assert float(normalized["report_gates"]["activity"]) == pytest.approx(0.25)
-    assert "report_probability" not in normalized
+    dead = ("notify_state", "notify_activity", "notify_approval", "notify_done",
+            "notify_exec_failed", "report_probability", "report_gates",
+            "stuck_detect", "stuck_cooldown_seconds",
+            "pattern_detect", "pattern_w6_control",
+            "exploration_watchdog_enabled", "exploration_watchdog_long_run_minutes")
+    for key in dead:
+        assert key not in normalized, f"退役键 {key} 不得留在配置里"
+    assert normalized["sound_enabled"] is True
 
 
 def test_chat_extension_keys_preserved():

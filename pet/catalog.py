@@ -137,8 +137,21 @@ CLICKS = ['点击回应 - 开心跃动', '点击回应 - 害羞惊讶', '点击�
 DRAG = '被鼠标拖拽悬空反馈'
 ACTS = [n for n in ANIM_FILES if n not in (IDLE, TURN, DRAG, *MOVES, *CLICKS)]
 
-assert len(ANIM_FILES) == 51, f"动画总数应为 51，实际 {len(ANIM_FILES)}"
-assert len(ACTS) == 42, f"动作池应为 42，实际 {len(ACTS)}"
+
+def _verify_animation_pools() -> None:
+    """资产完整性底线（#202）：动画总数 / 动作池条数不得漂移。
+
+    用显式异常而不是模块级 ``assert``：``python -O`` / ``PYTHONOPTIMIZE=1``
+    会把 assert 整句删除，打包版开优化时这两条底线就完全不设防。数字漂移
+    意味着动作池里出现了素材包里没有的动画（切换过去只会静默不动）。
+    """
+    if len(ANIM_FILES) != 51:
+        raise RuntimeError(f"动画总数应为 51，实际 {len(ANIM_FILES)}")
+    if len(ACTS) != 42:
+        raise RuntimeError(f"动作池应为 42，实际 {len(ACTS)}")
+
+
+_verify_animation_pools()
 
 
 def characters_dir() -> Path:

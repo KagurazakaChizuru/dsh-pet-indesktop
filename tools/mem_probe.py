@@ -244,7 +244,7 @@ def _gc_census() -> dict:
                         'QTimer', 'QThread', 'QObject', 'DynamicIsland', 'QMenu', 'QAction',
                         'AgentLinkManager', 'SharedAgentLinkManager', 'SharedSubsystems',
                         'MultiWindowProxy', 'SharedProactiveWatcher', 'SharedFullscreenWatcher',
-                        'ProactiveScreenWatcher', 'DshStateTracker', 'DecodeFanoutHub',
+                        'ProactiveScreenWatcher', 'DshStateConverger', 'DecodeFanoutHub',
                         'TodoReminderService', 'VoiceChimeService', 'FestivalReminderService',
                         'IslandChatBubble', 'PetSpeechBubble', 'QSystemTrayIcon',
                         'DirGlobTailer', 'ByteOffsetTailer', 'DshMonitor', 'OpenCodeMonitor',

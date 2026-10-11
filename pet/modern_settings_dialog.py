@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
 from . import __version__
 from . import autostart as autostart_mod
 from . import catalog
+from . import harness_launcher as harness_mod
 from .click_sound import warm_click_sound_effects
 from .config import (
     DEFAULT_CONTEXT_MENU_APPEARANCE,
@@ -141,7 +142,6 @@ from .settings_widgets import (
     BrowserSpinBox,
     BrowserDoubleSpinBox,
     CollapsibleGroup,
-    ProbabilitySlider,
     SettingRow,
     ResponsiveActionRow,
     ResponsiveToggleActionRow,
@@ -167,7 +167,6 @@ from . import divination_settings
 from . import settings_interaction
 from . import settings_music
 from . import settings_pet_controls
-from .report_gates import REPORT_GATE_KEYS, REPORT_GATE_LABELS, gate_for_event
 
 
 # 语言配置页只展示用户能理解的事件名称；内部 key 仍用于保存和渲染。
@@ -186,14 +185,11 @@ DIALOGUE_LABELS = {
     "bridge.install.success": "桥接安装成功",
     "bridge.install.failed": "桥接安装失败",
     "bridge.uninstall.failed": "桥接卸载失败",
-    "dsh.writeback.failed": "agent 写回失败",
-    "approval.command": "审批命令",
     "approval.tool": "审批工具",
     "approval.generic": "审批提示",
     "question.empty": "等待选择",
     "question.one": "单个用户问题",
     "question.many": "多个用户问题",
-    "watchdog.warning": "循环检测警告",
     "model_access.one": "模型访问失败（单次）",
     "model_access.many": "模型访问失败（连续）",
     "llm_error.api": "AI 服务错误",
@@ -202,20 +198,17 @@ DIALOGUE_LABELS = {
     "failure.retry": "重试后失败",
     "failure.tool": "工具执行失败",
     "failure.generic": "执行失败",
-    "stuck.reminder": "卡住提醒",
-    "pattern.warning": "行为重复警告",
-    "pattern.control": "行为重复干预",
     "balance.loading": "查询余额中",
     "balance.result": "余额结果",
 }
 
 DIALOGUE_PARAMS = {
     "name": "Agent 名称",
-    "command": "命令文本",
+    "command": "命令文本（已退役：恒隐藏）",
     "label": "标签（工具标签/会话标签随事件而定）",
     "body": "问题内容",
     "count": "数量",
-    "reasons": "判断原因",
+    "reasons": "判断原因（已退役：恒隐藏）",
     "detail": "错误详情",
     "text": "显示文本",
     "event": "未知事件名（bridge.unknown）",
@@ -223,7 +216,7 @@ DIALOGUE_PARAMS = {
     "callId": "工具调用 ID",
     "step": "步骤序号",
     "toolName": "审批原始工具名",
-    "argsKey": "工具参数摘要键",
+    "argsKey": "工具参数摘要键（已退役：恒隐藏）",
     "sessionName": "会话显示名",
     "projectName": "项目名",
     "errorCode": "错误码（llm_error 为上游真实码，如 bad_response_status_code）",
@@ -340,9 +333,39 @@ class ModernSettingsDialog(QDialog):
         self.harness_autostart_check = ToggleSwitch(self)
         self._harness_autostart_initial = bool(self.config.get("harness_autostart", False))
         self.harness_autostart_check.setChecked(self._harness_autostart_initial)
+        # 自启目标下拉（2026-10 双目标）：auto=检测到桌面端优先桌面端、否则 web；
+        # 只作用于「随桌宠启动」，菜单的两个启动入口是显式选择（不受本项影响）。
+        # 桌面端探测/自动拉起本轮只支持 Windows，唯一口径是
+        # harness_launcher.DESKTOP_SUPPORTED（不在设置页另写一份平台判定）。
+        # 不支持的平台上该项**保留但置灰**（能力暂不可用 ≠ 永久不支持，见
+        # docs/SETTINGS-CHANGE-GATES.md §4「暂不可用的能力保留并解释原因」），
+        # 并保证 desktop 绝不会被写回：显示与保存两处都回落 auto（该平台上
+        # auto 解析就是 web），存量配置里的 desktop 因此不会变成无声死选项。
+        self._harness_desktop_available = bool(harness_mod.DESKTOP_SUPPORTED)
+        self.harness_launch_target_select = ModernSelect(self, width=190)
+        self.harness_launch_target_select.addItem(
+            "自动（桌面端优先）" if self._harness_desktop_available else "自动（dsh web 界面）",
+            "auto",
+        )
+        self.harness_launch_target_select.addItem("dsh web 界面", "web")
+        self.harness_launch_target_select.addItem("桌面端界面", "desktop")
+        if not self._harness_desktop_available:
+            self.harness_launch_target_select.setItemDisabled(
+                self.harness_launch_target_select.findData("desktop"), True
+            )
+            self.harness_launch_target_select.setToolTip(
+                "本平台暂不支持自动拉起桌面端（本版本仅 Windows）"
+            )
+        target = str(self.config.get("harness_launch_target", "auto") or "auto")
+        if target == "desktop" and not self._harness_desktop_available:
+            target = "auto"
+        idx = self.harness_launch_target_select.findData(target)
+        self.harness_launch_target_select.setCurrentIndex(max(0, idx))
         if self.config.instance_id:
             self.harness_autostart_check.setEnabled(False)
             self.harness_autostart_check.setToolTip("仅主桌宠可设置")
+            self.harness_launch_target_select.setEnabled(False)
+            self.harness_launch_target_select.setToolTip("仅主桌宠可设置")
 
         # 灵动岛控件构建保留在对话框本体，便于上游直接修改后上传。
         island_cfg = self.config.get("dynamic_island", {})
@@ -441,13 +464,37 @@ class ModernSettingsDialog(QDialog):
         general_layout.setContentsMargins(0, 0, 0, 0)
         general_layout.setSpacing(18)
         autostart_desc = "登录系统后自动启动桌宠。" if not self.config.instance_id else "登录系统后自动启动桌宠。（仅主桌宠可设置）"
+        # 「自启目标」的说明随平台变：桌面端项在非 Windows 上置灰，文案必须
+        # 说清原因（不能留着「自动 = 检测到桌面端就起桌面端」这种本平台做不到的话）。
+        if self._harness_desktop_available:
+            harness_target_hint = (
+                "只决定「随桌宠启动」拉起哪一个：自动 = 检测到桌面端安装则起桌面端、否则起 dsh web。"
+                "右键菜单/托盘的「启动 dsh web 界面」「启动桌面端界面」是你点哪项就起哪项，"
+                "不受本项影响；「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
+            )
+        else:
+            harness_target_hint = (
+                "只决定「随桌宠启动」拉起哪一个：本平台暂不支持自动拉起桌面端（本版本仅 Windows），"
+                "所以「桌面端界面」置灰、自动 = 起 dsh web；右键菜单里的「启动桌面端界面」会如实提示不支持、"
+                "不会静默改开网页。「重启/停止服务」始终只作用于 dsh web 服务。仅主桌宠可设置。"
+            )
         launch_rows = [
             SettingRow("autostart", "开机自启", autostart_desc, self.autostart_check),
             SettingRow(
                 "harness_autostart",
                 "随桌宠启动 dsh 服务",
-                "桌宠启动后自动在后台静默拉起 dsh web 服务（只起服务，不开浏览器、不弹窗口；需要使用时点「启动 DeepSeek Harness」秒开页面）。关闭本项即停止已拉起的服务；桌宠退出会断开自拉起页面。仅主桌宠生效。",
+                "桌宠启动后自动拉起下面「自启目标」：dsh web 时在后台静默起服务（不开浏览器、不弹窗口），桌面端界面时直接打开桌面端应用。"
+                "本项要同时开着 DSH 联动才会自启——联动关着时 dsh web 没有消费者，拉起只是白占一个进程。"
+                "关闭本项后不再自动拉起；已经跑起来的 dsh web 不因此退出，例外是刚在拉起探测期间关掉本项——"
+                "那一次刚拉起的实例会被立刻收掉。稳态下要等桌宠退出或关闭 DSH 联动时才收口。"
+                "桌面端是你自己的应用，桌宠退出或关闭本项都不会结束它。仅主桌宠生效。",
                 self.harness_autostart_check,
+            ),
+            SettingRow(
+                "harness_launch_target",
+                "自启目标",
+                harness_target_hint,
+                self.harness_launch_target_select,
             ),
         ]
         if sys.platform == "darwin":
@@ -600,7 +647,7 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("music_sing", "音乐自动唱歌", "检测到后台播放音乐时，自动播放唱歌动画。", self.music_sing_check),
                     SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制（SMTC），酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
                     SettingRow("music_lyric_lead", "歌词提前量", "歌词相对音频的时间偏移。正值让歌词抢先显示，负值让它延后；唱得比音乐早一点通常更自然。", self.music_lyric_lead_spin),
-                ],
+                ] + settings_music.browser_media_rows(self),
                 behavior_content,
             )
         )
@@ -689,29 +736,6 @@ class ModernSettingsDialog(QDialog):
             SettingRow("agent_sound_cooldown", "冷却时间", "防止短时间内频繁触发音效；0 表示无时间冷却（仍单次去重）。", self.agent_sound_cooldown_spin),
         ]
         behavior_layout.addWidget(SettingsSection("Agent 联动 · 提示音效", agent_sound_rows, behavior_content))
-        # 事件气泡触发概率：每个事件聚合类别一个 0.00–1.00 滑块（没有开关），
-        # 与该类的气泡文案行同组；域导航重建时整体收进「事件气泡触发概率」
-        # 下的可折叠框，让设置位置与真正控制的位置绑定。
-        self.report_gate_rows = {}
-        report_gate_rows = []
-        for gate in REPORT_GATE_KEYS:
-            gate_label = REPORT_GATE_LABELS[gate]
-            row = SettingRow(
-                f"report_gate_{gate}",
-                "汇报概率",
-                f"{gate_label}：这一类气泡的通过概率。0.00 = 该类完全不汇报（静音），"
-                "1.00 = 每次都汇报，中间值按概率抽稀。概率只作用于「出气泡」这一步，"
-                "卡住 / 行为重复 / 循环等检测本身不受影响；右键菜单只提供 0/1 两端快捷入口。",
-                self.report_gate_sliders[gate],
-                stacked=True,
-            )
-            # 行内可见标题统一是「汇报概率」，无障碍名必须带上类别才不歧义。
-            row.control.setAccessibleName(f"{gate_label}：汇报概率")
-            self.report_gate_rows[gate] = row
-            report_gate_rows.append(row)
-        # 暂存宿主：这些行由域导航重建时认领并移入「事件气泡触发概率」可折叠框，
-        # 认领后本卡片为空（不残留空标题小节）。与气泡文案行同一处理方式。
-        behavior_layout.addWidget(SettingsCard(report_gate_rows, behavior_content))
         labels = DIALOGUE_LABELS
         behavior_layout.addWidget(
             SettingsSection(
@@ -928,12 +952,6 @@ class ModernSettingsDialog(QDialog):
         # _rebuild_domain_navigation. Do not temporarily hand the controller
         # widget to a QScrollArea: that creates a second Qt ownership path when
         # its rows are reparented into the shared card system.
-
-        # Agent Exploration Loop Watchdog 独立设置页
-        from .exploration_watchdog_settings import WatchdogSettingsPage
-
-        agent_link_cfg = self.config.get("agent_link", {})
-        self.watchdog_page = WatchdogSettingsPage(self.config, agent_link_cfg, self)
 
         # 语音报时设置页（行在 _rebuild_domain_navigation 中拾入「语音」总域）
         from .voice_chime_settings import VoiceChimeSettingsPage
@@ -1177,7 +1195,17 @@ class ModernSettingsDialog(QDialog):
     def _on_pro_clear_memory(self) -> None:
         from .proactive import ProactiveMemory
 
-        ProactiveMemory(self.config.dir / "proactive_screen_memory.json").clear()
+        # clear() 返回本次是否真的清空：设置页是独立进程，主进程可能正在写同一
+        # 份记忆文件（拿不到跨进程锁 = 这次没清）。失败必须如实提示，不能无条件
+        # 报"已清空"——那正是用户看到的"清了还在"。
+        cleared = ProactiveMemory(self.config.dir / "proactive_screen_memory.json").clear()
+        if cleared is False:
+            QMessageBox.warning(
+                self,
+                "陪伴记忆清空失败",
+                "未能清空陪伴记忆：可能主程序正在写入它，或文件被安全软件占用。\n请稍后重试。",
+            )
+            return
         QMessageBox.information(self, "陪伴记忆", "已清空主动识屏的短期陪伴记忆。")
 
     def _proactive_page_content(self) -> QWidget:
@@ -1714,7 +1742,7 @@ class ModernSettingsDialog(QDialog):
 
         general = page_content(
             [
-                ("应用启动", claim("autostart", "harness_autostart")),
+                ("应用启动", claim("autostart", "harness_autostart", "harness_launch_target")),
                 ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "stream_capture")),
                 # 「多开」分组已随拓扑收口 Phase A 隐藏（见上方注释）
             ]
@@ -1733,7 +1761,7 @@ class ModernSettingsDialog(QDialog):
             [
                 ("显示", claim("scale", "bubble_text_scale", "pet_opacity")),
                 ("动画与移动", claim("playback_speed", "animation_gap", "idle_low_fps", "no_move")),
-                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead")
+                ("音乐关联", claim("music_sing", "music_lyric", "music_lyric_lead", "music_browser_media")
                  + settings_music.build_music_player_rows(self)),
                 ("拖拽与弹射", claim("drag_physics", "throw_strength", "slingshot_enabled", "lock_position", "shift_drag")),
                 ("边缘探头", claim("edge_probe")),
@@ -1846,52 +1874,30 @@ class ModernSettingsDialog(QDialog):
 
         proactive_rows = list(old_pages.get("主动识屏", QWidget()).findChildren(SettingRow))
         claimed.update(proactive_rows)
-        watchdog_rows = list(self.watchdog_page.findChildren(SettingRow))
-        claimed.update(watchdog_rows)
         voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
         claimed.update(voice_chime_rows)
         festival_rows = list(self.festival_page.findChildren(SettingRow))
         claimed.update(festival_rows)
-        # WatchdogSettingsPage 现同时承载「循环检测」（watchdog/long_think）、
-        # 「卡住检测」（stuck_*）与「行为重复检测」（pattern_*）三组行，
-        # 按 objectName 前缀分组显示。
-        stuck_rows = [r for r in watchdog_rows if r.objectName().startswith("settingRow_stuck_")]
-        pattern_rows = [r for r in watchdog_rows if r.objectName().startswith("settingRow_pattern_")]
-        loop_rows = [r for r in watchdog_rows if not r.objectName().startswith(("settingRow_stuck_", "settingRow_pattern_"))]
         dialogue_rows = claim_prefix("dialogue_")
-        gate_rows = claim_prefix("report_gate_")
         automation = page_content(
             [
                 ("待办提醒", claim("todo_reminder_enabled", "todo_reminder_lead_minutes")),
                 ("主动感知", proactive_rows),
-                ("循环检测", loop_rows),
-                ("卡住检测", stuck_rows),
-                ("行为重复检测", pattern_rows),
             ]
         )
-        # 「事件气泡触发概率」＝一个可折叠框：按**事件聚合类别**分组，每组只放
-        # 该类触发概率滑块（紧凑、常用，默认展开）。
-        # 逐事件自定义文案行单独收进第二个折叠框并**默认折叠**（不用自定义台词的用户
-        # 不该翻过整页文案框；搜索命中时两个框都会自动展开，见 _search_settings）。
-        gates_box = CollapsibleGroup("事件气泡触发概率", automation)
+        # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
+        # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
+        # （见 _search_settings）。全局风格控件（表达风格/专属文案对象/模板 JSON）
+        # 不是事件文案，单独放「文案风格与模板」小节。
         phrases_box = CollapsibleGroup("自定义台词（逐事件文案）", automation)
-        gate_row_by_id = {row.objectName(): row for row in gate_rows}
-        phrase_rows_by_gate: dict[str, list] = {}
-        for row in dialogue_rows:
-            event_key = row.objectName()[len("settingRow_dialogue_") :]
-            phrase_rows_by_gate.setdefault(gate_for_event(event_key) or "", []).append(row)
-        for gate in REPORT_GATE_KEYS:
-            gate_row = gate_row_by_id.get(f"settingRow_report_gate_{gate}")
-            if gate_row is not None:
-                gates_box.add_group(REPORT_GATE_LABELS[gate], [gate_row])
-            phrase_rows = phrase_rows_by_gate.get(gate, [])
-            if phrase_rows:
-                phrases_box.add_group(REPORT_GATE_LABELS[gate], phrase_rows)
-        # 默认展开：这些文案行改造前就在该页可见，折叠框只提供"可以收起来"，
-        # 不把原有入口藏起来；搜索命中时也会自动展开（见 _search_settings）。
-        gates_box.set_expanded(True)
+        phrase_edit_keys = set(self.dialogue_phrase_edits)
+        phrase_rows = [row for row in dialogue_rows
+                       if row.objectName()[len("settingRow_dialogue_"):] in phrase_edit_keys]
+        ungated_dialogue_rows = [row for row in dialogue_rows
+                                 if row.objectName()[len("settingRow_dialogue_"):] not in phrase_edit_keys]
+        if phrase_rows:
+            phrases_box.add_group("事件气泡文案", phrase_rows)
         phrases_box.set_expanded(False)
-        self.report_gates_box = gates_box
         self.dialogue_phrases_box = phrases_box
         automation_layout = automation.layout()
         # 「Agent 联动」＝两级结构：折叠框下按用途分子组（消费统计 / 提示音效）。
@@ -1909,26 +1915,19 @@ class ModernSettingsDialog(QDialog):
         # 这些行已被上面的折叠框认领，必须登记，否则会再落进「待分类」。
         claimed.update(agent_cost_rows)
         claimed.update(claim_prefix("agent_sound_"))
-        # dialogue_* 里有一类行**不属于任何事件门**（表达风格、专属文案对象、弹窗文案
-        # 模板 JSON）：它们不是某个事件的气泡文案，而是文案风格的全局控件，因此
-        # gate_for_event 返回 None、只会落到上面那个空串桶里。这些行已被
-        # claim_prefix("dialogue_") 认领（不再进 leftovers），若不显式放回本域就会
-        # 从设置页里彻底消失。
-        # 顶层顺序：「文案风格与模板」（全局风格控件）在前，「事件气泡触发概率」
-        # 折叠框**排在其末尾**——概率门按**事件类别**抽稀气泡，与文案风格/模板无关，
-        # 所以让风格控件先出现，概率门收在它后面。
+        # dialogue_* 里的全局风格控件（表达风格、专属文案对象、弹窗文案模板 JSON）
+        # 不是某个事件的气泡文案，已被 claim_prefix("dialogue_") 认领（不再进
+        # leftovers），若不显式放回本域就会从设置页里彻底消失。
+        # 顶层顺序：「文案风格与模板」（全局风格控件）在前，自定义台词折叠框随后。
         insert_at = 0
-        ungated_dialogue_rows = phrase_rows_by_gate.get("", [])
         if ungated_dialogue_rows:
             automation_layout.insertWidget(
                 insert_at,
                 SettingsSection("文案风格与模板", ungated_dialogue_rows, automation),
             )
             insert_at += 1
-        automation_layout.insertWidget(insert_at, gates_box)
-        insert_at += 1
         automation_layout.insertWidget(insert_at, phrases_box)
-        # 顶层顺序：消费统计 → Agent 联动 → 文案风格 → 触发概率 → 自定义台词 → 各类检测。
+        # 顶层顺序：消费统计 → Agent 联动 → 文案风格 → 自定义台词。
         # 「消费统计」独立成一级分组且排最前（直接可见，不藏在折叠框里）。
         # 必须在上面的插入全部做完之后再插，否则会被后来的 insertWidget(0, ...) 挤下去。
         cost_section = SettingsSection("消费统计", agent_cost_rows, automation)
@@ -2185,6 +2184,10 @@ class ModernSettingsDialog(QDialog):
             self.config.set(
                 "music_lyric_lead_seconds", float(self.music_lyric_lead_spin.value())
             )
+        if getattr(self, "music_browser_media_check", None) is not None:
+            self.config.set(
+                "music_browser_media_enabled", self.music_browser_media_check.isChecked()
+            )
         self.config.set("golden_spin_on_click", self.golden_spin_click_check.isChecked())
         self.config.set("golden_spin_direct", self.golden_spin_direct_check.isChecked())
         self.config.set("edge_probe_enabled", self.edge_probe_check.isChecked())
@@ -2240,9 +2243,6 @@ class ModernSettingsDialog(QDialog):
         # 记住上次编辑层：下次打开设置直接回到该 Agent 专属层（未知值回落全局）
         self.config.set("dialogue_last_scope", str(getattr(self, "_dialogue_scope", "") or ""))
         agent_cfg = dict(self.config.get("agent_link", {}))
-        # 循环检测设置页（合并写回，不覆盖 agent_link 其他字段）
-        if self.watchdog_page is not None:
-            agent_cfg = self.watchdog_page.apply_to_config(agent_cfg)
 
         # Agent 联动音效写回
         agent_cfg["sound_enabled"] = self.agent_sound_check.isChecked()
@@ -2254,11 +2254,6 @@ class ModernSettingsDialog(QDialog):
         agent_cfg["sound_error_path"] = self.agent_sound_error_picker.text().strip() or "builtin:agent-error"
         agent_cfg["sound_volume"] = float(self.agent_sound_volume_spin.value()) / 100.0
         agent_cfg["sound_cooldown_seconds"] = float(self.agent_sound_cooldown_spin.value())
-        # 事件汇报概率门：滑块值即通过概率（0.00–1.00，步长 0.05），逐类写回。
-        report_gates = dict(agent_cfg.get("report_gates") or {})
-        for gate, slider in self.report_gate_sliders.items():
-            report_gates[gate] = round(float(slider.value()), 2)
-        agent_cfg["report_gates"] = report_gates
 
         self.config.set("agent_link", agent_cfg)
         self.config.set("todo_reminder_enabled", self.todo_reminder_check.isChecked())
@@ -2344,6 +2339,12 @@ class ModernSettingsDialog(QDialog):
             self.config.set("proactive_screen", pro_data)
         self.config.set("autostart_wanted", self.autostart_check.isChecked())
         self.config.set("harness_autostart", self.harness_autostart_check.isChecked())
+        # 最后一道门：本平台不支持桌面端时绝不把 desktop 落盘（下拉里那项已置灰，
+        # 但存量配置/程序化设置仍可能带着它走到这里）——存下去就是无声死选项。
+        harness_target = str(self.harness_launch_target_select.currentData() or "auto")
+        if harness_target == "desktop" and not self._harness_desktop_available:
+            harness_target = "auto"
+        self.config.set("harness_launch_target", harness_target)
         # 批 C：落种占位语义——仅当用户在该子肥鱼自己的设置界面保存过才置真；
         # 位置自动保存等一切后台写盘不得置位。主配置（slot 0/主肥鱼）保存不置位。
         if self.config.instance_id:

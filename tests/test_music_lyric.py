@@ -747,7 +747,8 @@ def test_sampling_resumes_after_disable_enable(monkeypatch):
     calls = {"n": 0}
     seen: list = []
 
-    def fake_get_now_playing(tracked_app_id=None):
+    def fake_get_now_playing(tracked_app_id=None, **kwargs):
+        # **kwargs：采样线程现在还会传 allow_browser（浏览器会话开关）
         calls["n"] += 1
         seen.append(tracked_app_id)
         return None

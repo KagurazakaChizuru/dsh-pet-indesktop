@@ -9,7 +9,8 @@
 v4.1 扩展（同步上游 dsh-pet 余额动画）：
 - 余额按 ¥20 满额折算为“已用百分比”，分 6 档触发不同余额动画；
 - DeepSeek 峰谷计价提示（北京时间：工作日 9-12/14-18 高峰，其余空闲；
-  周六/周日全天空闲，下一高峰为下周一 9 点）。
+  周六/周日与**中国法定节假日**全天空闲——调休补班的周六/周日按官方口径
+  仍是空闲；下一高峰由 09/12/14/18 点边界逐点扫描得出）。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import json
 import socket
 import urllib.error
 import urllib.request
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -165,49 +166,68 @@ def _beijing_now(now: datetime | None = None) -> datetime:
     return now.astimezone(_BEIJING_TZ)
 
 
+def _statutory_holiday(day: date) -> str | None:
+    """查询该日是否为中国法定放假日（放假日名 / None）。
+
+    函数内 import `pet.festival_calendar`：它是唯一的 lunar-python 边界，
+    而 `tests/test_app_lazy_imports.py` 要求 `import pet.app` 常驻时不得连带
+    载入节日模块（实测 ~7.7MB），故不能在模块顶层引入。历法后端缺失时按
+    「无节假日数据」降级（返回 None），不阻断余额提示。
+    """
+    try:
+        from .festival_calendar import statutory_holiday_name
+    except ImportError:
+        return None
+    return statutory_holiday_name(day)
+
+
 def deepseek_pricing_tier(now: datetime | None = None) -> str:
     """DeepSeek 峰谷计价档位（北京时间）。
 
-    高峰：工作日 9:00–12:00、14:00–18:00；其余为空闲（低谷）。
-    周六/周日全天按低谷价计费。
+    高峰：周一至周五（**不含中国法定节假日**）9:00–12:00、14:00–18:00；
+    其余为空闲（低谷）。周六/周日与法定节假日全天空闲——调休补班的周六/周日
+    按官方口径仍是空闲，不是工作日高峰。节假日安排表覆盖范围之外（2026-10-11
+    起）降级为只按星期规则判断。
     """
     bj = _beijing_now(now)
     if bj.weekday() >= 5:
+        return 'idle'
+    if _statutory_holiday(bj.date()):
         return 'idle'
     hour = bj.hour
     return 'peak' if (9 <= hour < 12) or (14 <= hour < 18) else 'idle'
 
 
+# 一天内的计价切换时刻：09:00 / 14:00 进入高峰，12:00 / 18:00 离开高峰。
+_PRICING_BOUNDARIES = (time(9, 0), time(12, 0), time(14, 0), time(18, 0))
+
+# 切换扫描窗口（天）：法定长假最长 8 天，叠加两端周末约 10 天，40 天留足余量。
+_PRICING_SCAN_DAYS = 40
+
+
 def _next_pricing_switch(now: datetime | None = None) -> tuple[str, datetime]:
-    """返回 (下一档位, 下一档位开始时间)，按北京时间计算。"""
+    """返回 (下一档位, 下一档位开始时间)，按北京时间计算。
+
+    逐个扫描未来 09:00/12:00/14:00/18:00 边界，取**最早**一个档位与当前不同的
+    时刻。这样周末、法定节假日、连同调休补班后的空档都能被跨越，无需为每种
+    日历情形单独写分支。
+    """
     bj = _beijing_now(now)
     tz = bj.tzinfo or _BEIJING_TZ
+    current = deepseek_pricing_tier(bj)
     day = bj.date()
-    weekday = bj.weekday()
-
-    if weekday >= 5:
-        # 周末全天低谷：下一高峰为下周一 9:00
-        days_until_monday = 7 - weekday
-        return 'peak', datetime.combine(day + timedelta(days=days_until_monday), time(9, 0), tzinfo=tz)
-
-    hour = bj.hour
-    if hour < 9:
-        return 'peak', datetime.combine(day, time(9, 0), tzinfo=tz)
-    if hour < 12:
-        return 'idle', datetime.combine(day, time(12, 0), tzinfo=tz)
-    if hour < 14:
-        return 'peak', datetime.combine(day, time(14, 0), tzinfo=tz)
-    if hour < 18:
-        return 'idle', datetime.combine(day, time(18, 0), tzinfo=tz)
-    # 18:00 后：下一高峰通常为次日 9:00，但若次日是周六/周日，
-    # 周末全天空闲，下一高峰应跳到下周一 9:00。
-    next_day = day + timedelta(days=1)
-    if next_day.weekday() >= 5:
-        days_until_monday = 7 - next_day.weekday()
-        return 'peak', datetime.combine(
-            next_day + timedelta(days=days_until_monday), time(9, 0), tzinfo=tz
-        )
-    return 'peak', datetime.combine(next_day, time(9, 0), tzinfo=tz)
+    for offset in range(_PRICING_SCAN_DAYS + 1):
+        candidate_day = day + timedelta(days=offset)
+        for boundary in _PRICING_BOUNDARIES:
+            candidate = datetime.combine(candidate_day, boundary, tzinfo=tz)
+            if candidate <= bj:
+                continue
+            tier = deepseek_pricing_tier(candidate)
+            if tier != current:
+                return tier, candidate
+    # 扫描窗口内没有翻转（历法数据耗尽的远期日期才会走到这里）：退回次日 09:00。
+    fallback = datetime.combine(day + timedelta(days=1), time(9, 0), tzinfo=tz)
+    return deepseek_pricing_tier(fallback), fallback
 
 
 def next_pricing_switch(now: datetime | None = None) -> tuple[str, datetime]:
@@ -226,15 +246,18 @@ _WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周�
 def _format_switch_time(now: datetime, next_time: datetime) -> str:
     """把下一档位切换时间格式化为易读文案。
 
-    当天切换只显示 HH:MM；跨天切换显示“明天 HH:MM”或“下周一 HH:MM”，
-    避免周末/周五晚上把“09:00”误解为次日早晨。
+    当天切换只显示 HH:MM；跨天切换显示“明天 HH:MM”，更远的日期按 **ISO 周**
+    决定措辞：同一周内用“周四 HH:MM”，跨周才用“下周四 HH:MM”。避免把周五晚上
+    的“09:00”误解为次日早晨，也避免把同一周的周四说成“下周四”。
     """
     if next_time.date() == now.date():
         return f"{next_time:%H:%M}"
     days = (next_time.date() - now.date()).days
     if days == 1:
         return f"明天 {next_time:%H:%M}"
-    return f"下{_WEEKDAY_CN[next_time.weekday()]} {next_time:%H:%M}"
+    same_week = next_time.date().isocalendar()[:2] == now.date().isocalendar()[:2]
+    prefix = "" if same_week else "下"
+    return f"{prefix}{_WEEKDAY_CN[next_time.weekday()]} {next_time:%H:%M}"
 
 
 def format_switch_time(now: datetime, next_time: datetime) -> str:

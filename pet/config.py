@@ -16,12 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from . import catalog
-from .report_gates import (
-    LEGACY_PERCENT_GATES,
-    LEGACY_SWITCH_GATES,
-    REPORT_GATE_DEFAULTS,
-    clean_report_gates,
-)
 
 
 DEFAULT_ANIMATION_GAP_SECONDS = 0.0
@@ -242,40 +236,6 @@ def _default_agent_link_data() -> dict:
         # 自定义联动 Agent（协议见 docs/AGENT_LINK_PROTOCOL.md §4）：只读监听
         # 用户指定的事件文件，不写外部配置、无需授权弹窗，默认空
         "custom_agents": [],
-        # 事件气泡触发概率（默认值见 pet/report_gates.py）：设置页把它们收进
-        # 「自动化与联动 → 事件气泡触发概率」下的可折叠框，按事件聚合类别逐类调。
-        # 值是**通过概率** 0.00–1.00（0 = 该类完全不汇报，1 = 全部汇报），没有布尔开关。
-        "report_gates": dict(REPORT_GATE_DEFAULTS),
-        # 卡住检测（默认开）：DSH 联动开启时，根据工具成败/超时/错误
-        # 推断「Agent 钻牛角尖了」，档位 1 播焦急动画、档位 2 弹持续提醒气泡。
-        "stuck_detect": True,
-        "stuck_worried_threshold": 3,
-        "stuck_intervene_threshold": 5,
-        "stuck_window_seconds": 90,
-        "stuck_cooldown_seconds": 300,
-        "stuck_reminder_text": "",
-        "exploration_watchdog_enabled": True,
-        "exploration_watchdog_warning_threshold": 3,
-        "exploration_watchdog_control_threshold": 5,
-        "exploration_watchdog_cooldown_steps": 3,
-        "exploration_watchdog_early_grace_minutes": 5,
-        "exploration_watchdog_long_run_minutes": 10,
-        "exploration_watchdog_long_think_seconds": 120,
-        # 行为模式检测（默认开）：双窗口规则识别慢性循环 / 短时爆发 / 纯探索无产出。
-        # 细分类：W10 同类 >= 3 → warning；W10 >= 4 → control；W6 >= 3 → control。
-        # 大类：W6 EXPLORATION >= 5 且 ACTION == 0 → control；W10 EXPLORATION >= 7 且
-        # ACTION <= 1 → warning。触发后至少新增 pattern_min_steps_between 个 step
-        # 且间隔 pattern_cooldown_seconds 秒才允许再次触发（step 去重防止误杀并行调用）。
-        "pattern_detect": True,
-        "pattern_w6_control": 3,
-        "pattern_w10_warn": 3,
-        "pattern_w10_control": 4,
-        "pattern_macro_w6_explore": 5,
-        "pattern_macro_w6_action": 0,
-        "pattern_macro_w10_explore": 7,
-        "pattern_macro_w10_action": 1,
-        "pattern_min_steps_between": 3,
-        "pattern_cooldown_seconds": 60,
         # 音效配置
         "sound_enabled": False,
         "sound_start_path": "builtin:agent-start",
@@ -315,6 +275,25 @@ def _clean_click_sound_pack(value: Any) -> dict:
 _AGENT_LINK_BUILTIN_KEYS = ("dsh", "claude", "cursor", "opencode")
 # 自定义联动 Agent 条目上限（防配置文件被塞爆）
 _CUSTOM_AGENT_MAX = 8
+
+# DSH 联动线减法（2026-10）退役的 agent_link 子键：事件汇报概率门
+# （report_gates 及旧布尔/百分比前身）、卡住检测、行为模式检测、探索看门狗。
+# 读入即丢弃，不再写回。
+_AGENT_LINK_REMOVED_KEYS = (
+    "report_gates",
+    "notify_state", "notify_activity", "notify_approval", "notify_done",
+    "notify_exec_failed", "report_probability",
+    "stuck_detect", "stuck_worried_threshold", "stuck_intervene_threshold",
+    "stuck_window_seconds", "stuck_cooldown_seconds", "stuck_reminder_text",
+    "pattern_detect", "pattern_w6_control", "pattern_w10_warn",
+    "pattern_w10_control", "pattern_macro_w6_explore", "pattern_macro_w6_action",
+    "pattern_macro_w10_explore", "pattern_macro_w10_action",
+    "pattern_min_steps_between", "pattern_cooldown_seconds",
+    "exploration_watchdog_enabled", "exploration_watchdog_warning_threshold",
+    "exploration_watchdog_control_threshold", "exploration_watchdog_cooldown_steps",
+    "exploration_watchdog_early_grace_minutes", "exploration_watchdog_long_run_minutes",
+    "exploration_watchdog_long_think_seconds",
+)
 
 
 def _clean_custom_agents(raw: Any) -> list[dict]:
@@ -374,23 +353,10 @@ def _clean_agent_link_data(raw: Any) -> dict:
         result["sound_volume"] = _float_or_default(raw.get("sound_volume"), defaults["sound_volume"], 0.0, 1.0)
     if "sound_cooldown_seconds" in raw:
         result["sound_cooldown_seconds"] = _float_or_default(raw.get("sound_cooldown_seconds"), defaults["sound_cooldown_seconds"], 0.0, 30.0)
-    # 事件汇报概率门：新形状（report_gates 字典）优先；旧键一次性迁移——
-    # 布尔开关 → 1.0/0.0，旧百分比 report_probability(0-100) → activity 概率。
-    # 迁移后**不再写出旧键**，配置里不留兼容别名（用户可编辑文案的键名另见
-    # docs/PERSONA-PHRASES-PRESET-STORAGE-2026-09-08.md）。
-    raw_gates = raw.get("report_gates")
-    gates = clean_report_gates(raw_gates)
-    if not isinstance(raw_gates, dict):
-        for legacy_key, gate in LEGACY_SWITCH_GATES.items():
-            if legacy_key in raw:
-                gates[gate] = 1.0 if bool(raw[legacy_key]) else 0.0
-        for legacy_key, gate in LEGACY_PERCENT_GATES.items():
-            if legacy_key in raw:
-                percent = _float_or_default(raw.get(legacy_key), REPORT_GATE_DEFAULTS[gate] * 100.0, 0.0, 100.0)
-                gates[gate] = min(1.0, max(0.0, percent / 100.0))
-    result["report_gates"] = gates
-    for legacy_key in (*LEGACY_SWITCH_GATES, *LEGACY_PERCENT_GATES):
-        result.pop(legacy_key, None)
+    # 减法后退役的键（概率门 / 卡住检测 / 行为模式 / 探索看门狗，含它们的旧
+    # 布尔/百分比前身）：读入即丢弃，保存时不再写回，配置里不留死键。
+    for dead_key in _AGENT_LINK_REMOVED_KEYS:
+        result.pop(dead_key, None)
     return result
 
 
@@ -814,6 +780,11 @@ class Config:
             "music_lyric_enabled": False,  # 在气泡里显示当前播放歌曲的歌词（Windows SMTC）
             "music_lyric_lead_seconds": 1.0,  # 歌词提前量（秒）：正值=歌词抢先于音频
             "music_lyric_cache_limit": 2000,  # 歌词缓存条数上限，超出按最旧淘汰
+            # 浏览器媒体会话参与歌词/唱歌：默认关——浏览器把网页视频也上报成
+            # 音乐类型（2026-10 实测 Edge/Chromium 播 B 站视频恒为 MUSIC），
+            # 不否决就会对着视频显示「我在唱《视频标题》」。网页版音乐平台
+            # 需要用户显式打开。
+            "music_browser_media_enabled": False,
             # 手动指定播放器路径 {netease|qqmusic: exe 路径}：自动搜索找不到时的
             # 逃生口，只能手改 config.json（暂无设置页控件），空 = 走自动搜索。
             "music_player_paths": {},
@@ -822,7 +793,11 @@ class Config:
             "golden_spin_direct": False,  # 点击触发黄金回旋时跳过点击动画，直接回旋并逐圈加速
             "edge_probe_enabled": False,  # 拖到屏幕左右边缘后自动进入探头姿态
             "autostart_wanted": False,  # 用户曾开启过开机自启（用于启动自检：被安全软件清理时提醒）
-            "harness_autostart": False,  # 随桌宠启动自动拉起 dsh web 服务（只起服务，不开浏览器）
+            "harness_autostart": False,  # 随桌宠启动自动拉起（web 目标=只起服务不开浏览器；桌面端目标=打开界面）
+            # 自启目标：auto=检测到桌面端安装则桌面端、否则 web；web/desktop 显式指定。
+            # **只作用于「随桌宠启动」**：右键菜单/托盘的启动入口是显式选择，不受它影响；
+            # 「重启/停止服务」始终只作用于 dsh web 服务进程。
+            "harness_launch_target": "auto",
             # 手动指定 pnpm 入口（文件 / 目录 / 包装脚本都行，语义同 DSH_PNPM_BIN）。
             # 默认空 = 走内置的自动发现（PATH/注册表/各版本管理器/多布局）；
             # 面向"环境特殊又不想改环境变量"的用户，属于开发者向高级键，不进设置页。
@@ -1086,6 +1061,7 @@ class Config:
             "balance_refresh_minutes",
             "autostart_wanted",
             "harness_autostart",
+            "harness_launch_target",
             "stream_capture_mode",
             "pnpm_bin",
             "music_sing_enabled",
@@ -1093,6 +1069,7 @@ class Config:
             "music_lyric_enabled",
             "music_lyric_cache_limit",
             "music_lyric_lead_seconds",
+            "music_browser_media_enabled",
             "music_player_paths",
             "agent_cost_enabled",
             "golden_spin_on_click",
@@ -1328,6 +1305,8 @@ class Config:
                     stack.append(value)
 
     def _normalize_pet_settings(self):
+        target = str(self.data.get("harness_launch_target") or "auto").strip().lower()
+        self.data["harness_launch_target"] = target if target in ("auto", "web", "desktop") else "auto"
         dialogue_mode = str(self.data.get("dialogue_mode") or "legacy").lower()
         self.data["dialogue_mode"] = dialogue_mode if dialogue_mode in {"legacy", "whale_maid", "custom"} else "legacy"
         raw_phrases = self.data.get("dialogue_phrases")
@@ -1438,6 +1417,11 @@ class Config:
         # 唱歌动画检测开关：同族漏网的第六个键（交付前审查 P2-b）——字符串
         # "false" 被 bool() 判真，用户明确关掉的开关会自己打开，与上面两键同规。
         self.data["music_sing_enabled"] = _bool_or_default(self.data.get("music_sing_enabled"), False)
+        # 浏览器媒体会话开关：同族第七个键，同样走 _bool_or_default——
+        # 字符串 "false" 被 bool() 判真会让用户明确关掉的否决自己失效。
+        self.data["music_browser_media_enabled"] = _bool_or_default(
+            self.data.get("music_browser_media_enabled"), False
+        )
         # 持续静音判定时长：下限 1s（低于它就退回"瞬时静音即退出"的老问题），
         # 上限必须有——否则手改 1e9 会让唱歌状态永不退出。
         self.data["music_sing_grace_seconds"] = _float_or_default(
@@ -1602,6 +1586,7 @@ class Config:
             "music_lyric_enabled",
             "music_lyric_lead_seconds",
             "music_lyric_cache_limit",
+            "music_browser_media_enabled",
             "agent_cost_enabled",
             "music_player_paths",
             "character_profiles",

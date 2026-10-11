@@ -365,7 +365,7 @@ def test_modern_template_exposes_same_capabilities(tmp_path):
 
 
 def test_harness_launcher_gets_widget_dialog_parent(tmp_path, monkeypatch):
-    """harness 三件套的模态父必须是 QWidget（facade 不能当 QMessageBox parent）。
+    """harness 四个入口的模态父必须是 QWidget（facade 不能当 QMessageBox parent）。
 
     同时锁住宿主形气泡面：``launch_harness_gui`` 用 ``parent.show_bubble`` 反馈。
     """
@@ -379,7 +379,8 @@ def test_harness_launcher_gets_widget_dialog_parent(tmp_path, monkeypatch):
     try:
         monkeypatch.setattr(
             shared_mod, "launch_harness_gui",
-            lambda parent=None, action="start": captured.append((parent, action)))
+            lambda parent=None, action="start", target="auto": captured.append(
+                (parent, action, target)))
         monkeypatch.setattr(
             shell, "show_bubble",
             lambda text, duration_ms=3200, **kw: bubbles.append((text, duration_ms)))
@@ -391,9 +392,11 @@ def test_harness_launcher_gets_widget_dialog_parent(tmp_path, monkeypatch):
         harness = _find(menu, "DeepSeek Harness").menu()
         for action in harness.actions():
             action.trigger()            # 菜单未弹出 → 回调立即执行
-        assert [action for _, action in captured] == ["start", "restart", "stop"]
-        assert all(isinstance(parent, QWidget) for parent, _ in captured)
-        assert all(parent is shell.overlay for parent, _ in captured)
+        assert [(action, target) for _, action, target in captured] == [
+            ("start", "web"), ("start", "desktop"), ("restart", "auto"), ("stop", "auto"),
+        ]
+        assert all(isinstance(parent, QWidget) for parent, _, _ in captured)
+        assert all(parent is shell.overlay for parent, _, _ in captured)
     finally:
         shell._delete_runtime_marker()
 

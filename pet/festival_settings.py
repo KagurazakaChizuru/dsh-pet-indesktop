@@ -13,7 +13,7 @@
 语音播报（``festival_reminder_speak``）复用语音报时服务的音频通道，不新增音色/
 语速/音调/音量键；同一分钟两者都到点时由报时让位（见 festival_service）。
 
-风格对齐 pet/voice_chime_settings.py 与 pet/exploration_watchdog_settings.py：
+风格对齐 pet/voice_chime_settings.py：
 自含 QWidget 页，提供 apply_to_config，
 由 modern_settings_dialog.py 在 automation 域注册并参与 _write_config 保存。
 

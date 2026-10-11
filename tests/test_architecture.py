@@ -195,6 +195,25 @@ WINDOW_PY_LINE_BUDGET = 4510
 # SettingRow 改为按构建变体条件收录（净 +3，注释另计）：无 pet.chat 的
 # 打包变体不再展示该死路开关（运行时回退在 pet/dynamic_island.py 的
 # chat_available）。实测 2357；按文件约定只随实测校准，不为达标压行。
+# 2026-09-23 上调到 2377：4.2c 后段 D12「一键退出子肥鱼」按拓扑分流（+20）——
+# overlay 拓扑下子肥鱼是进程内 sprite，跨进程 taskkill 回退（child_pet_cleanup）
+# 找不到目标、按钮静默失效，改为写指令文件由主进程消费；legacy 回退逐行不变。
+# 拓扑判定/写指令/校验的实现全在零 Qt 的 pet/overlay_settings_command.py，
+# 本文件只做一次分支与身份回填（slot_from_instance_id）。
+# 2026-09-24 上调到 2391：合入上游更新页接线（更新页主体在 pet/update_settings.py）。
+# 实测 2391；按文件约定只随实测校准，不为达标压行（拆分仍是待办）。
+# 2026-09-27 上调到 2393：overlay 文案如实（省电模式 hint 改调 settings_pet_controls、
+# 窗口级键「对所有桌宠生效」标注接线 +2 行）。
+# 2026-10-06 上调到 2403：清空陪伴记忆按 clear() 返回值如实提示（失败弹告警而不是
+# 一律「已清空」）+10 行；实测 2403，按文件约定只随实测校准（拆分仍是待办）。
+# 2026-10-06 上调到 2408：SMTC 工单「视频被当歌曲」新增设置行「浏览器媒体会话
+# 参与歌词」（行构造 1 行 + 保存回写 4 行，控件本体在 settings_pet_controls，
+# 「音乐关联」域 claim 同步登记）。实测 2408；按文件约定只随实测校准，不为达标
+# 压行（拆分仍是待办）。
+# 2026-10-06 回调到 2407：该设置行改为 settings_music.browser_media_rows（受
+# 平台条件约束、并入既有的 `] + settings_music.browser_media_rows(self),` 一行），
+# 本文件净 −1 行（保存回写 4 行仍在）。实测 2407。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2407
 # 2026-10-04 校准：合并 origin/main（beaa8f5，139 个提交）后实测——上游的 overlay
 # 拓扑设置面（D12 子肥鱼退出指令/更新页接线/文案如实）与本仓库保留的设置行
 # （多行输入框、TTS 后端行等）叠加，按文件约定只随实测校准，不为达标压行。
@@ -207,6 +226,10 @@ WINDOW_PY_LINE_BUDGET = 4510
 # `domain_content["趣味"] = divination_settings.build_divination_page(self)`
 # （整页仍在 divination_settings 里构建）。实测 2404。
 MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2404
+# 2026-10-11 合并 origin/main（ee699c7，13 个提交）后实测 **2405**：上游的 SMTC
+# 「浏览器媒体会话参与歌词」接线与本仓库「趣味」域接线叠加，按文件约定只随实测
+# 校准，不为达标压行。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2405
 
 
 def _read(name: str) -> str:

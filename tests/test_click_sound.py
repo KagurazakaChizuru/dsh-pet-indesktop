@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import random
 import sys
+import time
 import types
 import wave
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 from PySide6.QtCore import QTimer
 
 from pet import click_sound
@@ -707,3 +710,195 @@ def test_sounds_root_resolved_once_per_meipass(monkeypatch):
     assert before >= 1, "首次解析仍需 resolve 一次"
     click_sound.resolve_click_sound_candidates(pack)
     assert len(counts) == before, "第二次解析不得再 resolve 音源根目录"
+
+
+# ===========================================================================
+# #199 非 Windows 回退播放器的子进程回收
+# ===========================================================================
+
+@pytest.fixture
+def system_player_registry():
+    """隔离回退播放器的句柄登记表，并在用例结束时清干净（模块级状态不串味）。"""
+    click_sound._SYSTEM_PLAYERS[:] = []
+    yield click_sound._SYSTEM_PLAYERS
+    for proc in list(click_sound._SYSTEM_PLAYERS):
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=30)
+    click_sound._SYSTEM_PLAYERS[:] = []
+
+
+def _install_python_as_player(monkeypatch) -> None:
+    """把回退播放器指到 Python 自身：起的是**真子进程**，且立刻退出。
+
+    `_play_with_system_player` 只负责 "which 找得到就从命令行拉起"，用解释器
+    顶替 afplay/paplay 后命令是 `python <非源码文件>`——秒退且不依赖平台播放器
+    是否安装，回收语义（poll 是否被调用）才是本组用例的观测对象。
+    """
+    monkeypatch.setattr(
+        click_sound, "shutil", SimpleNamespace(which=lambda name: sys.executable))
+
+
+def test_system_player_child_is_reaped_after_exit(monkeypatch, tmp_path, system_player_registry):
+    """#199：拉起的播放器句柄必须登记并在退出后被 poll 回收（POSIX 僵尸）。
+
+    旧实现丢弃 Popen 返回值且全文件无 poll/wait：每次点击音都留一个僵尸，
+    桌宠长开就是"调几次留几个"。
+    """
+    target = _make_file(tmp_path, "click.wav")
+    _install_python_as_player(monkeypatch)
+
+    assert click_sound._play_with_system_player(target) is True, "起播成功仍须返回 True"
+
+    tracked = list(system_player_registry)
+    assert len(tracked) == 1, "拉起的播放器句柄必须登记（不登记就没有任何回收点）"
+    proc = tracked[0]
+    assert proc.pid > 0, "登记的必须是真子进程句柄"
+
+    assert proc.wait(timeout=30) is not None, "顶替播放器应自然退出"
+    click_sound._reap_system_players()
+    assert system_player_registry == [], "已退出的句柄必须被收割（否则僵尸累积）"
+
+
+def test_system_player_registry_does_not_grow_with_play_count(
+    monkeypatch, tmp_path, system_player_registry,
+):
+    """#199：登记表只留活着的子进程——播放前先收割，不随播放次数增长。
+
+    断言用 `<= 1`：登记表**另外**还有一条不依赖下次播放的自回收路径（本文件的
+    `test_system_player_registry_self_reaps_without_another_play`），已退出的条目
+    可能在那条路径上先被拿走，两条路径都不允许表里堆死句柄。
+    """
+    target = _make_file(tmp_path, "click.wav")
+    _install_python_as_player(monkeypatch)
+
+    for _ in range(3):
+        assert click_sound._play_with_system_player(target) is True
+        for proc in list(system_player_registry):
+            proc.wait(timeout=30)  # 每次都等它退
+
+    assert len(system_player_registry) <= 1, \
+        f"3 次播放后登记表不得堆积已退出的句柄，实得 {len(system_player_registry)}"
+
+    assert click_sound._play_with_system_player(target) is True
+    assert len(system_player_registry) <= 1, \
+        f"再播放一次仍不得堆积（收割 + 登记各一次），实得 {len(system_player_registry)}"
+
+
+def test_system_player_registry_self_reaps_without_another_play(
+    monkeypatch, tmp_path, system_player_registry,
+):
+    """#199：最后一批播放器退出后必须被回收——回收点不得挂在"下次播放"上。
+
+    旧实现只在 `_play_with_system_player` 开头收割，而点击音是"不点就不播"的
+    高频动作：最后一批退出之后没有任何后续调用，句柄/僵尸就一直留在表里
+    （POSIX 僵尸、Windows 句柄滞留）。
+
+    观测纪律：本用例**不碰** `Popen.wait()/poll()`——在测试里先自己 wait 一遍
+    就等于测试亲手把它回收了，缺陷会被掩盖。子进程退出只通过它自己写出的哨兵
+    文件观察，登记表是否清空由被测代码负责。
+    """
+    monkeypatch.setattr(click_sound, "_REAP_INTERVAL_S", 0.05)
+    sentinel = tmp_path / "child-exited"
+    script = tmp_path / "player.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('x', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        click_sound, "shutil", SimpleNamespace(which=lambda name: sys.executable))
+    real_popen = click_sound.subprocess.Popen
+
+    def popen(command, **kwargs):
+        # 顶替播放器：起的是**真子进程**，秒退并留下哨兵文件
+        return real_popen([sys.executable, str(script), str(sentinel)], **kwargs)
+
+    monkeypatch.setattr(click_sound.subprocess, "Popen", popen)
+
+    assert click_sound._play_with_system_player(_make_file(tmp_path, "click.wav")) is True
+    assert len(system_player_registry) == 1, "拉起的播放器句柄必须登记"
+
+    deadline = time.monotonic() + 30
+    while not sentinel.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sentinel.exists(), "顶替播放器未自然退出"
+
+    deadline = time.monotonic() + 30  # 宽预算：CI 慢机不赌时序
+    while system_player_registry and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert system_player_registry == [], \
+        "已退出的最后一批播放器必须自行被回收（旧实现只在下一次播放前收割）"
+
+
+def test_system_player_missing_player_registers_nothing(monkeypatch, tmp_path, system_player_registry):
+    """找不到播放器时不得登记空条目（只有真拉起的进程才进登记表）。"""
+    target = _make_file(tmp_path, "click.wav")
+    monkeypatch.setattr(click_sound, "shutil", SimpleNamespace(which=lambda name: None))
+
+    assert click_sound._play_with_system_player(target) is False
+    assert system_player_registry == []
+
+
+def test_reaper_start_failure_does_not_break_playback(
+    monkeypatch, tmp_path, system_player_registry, caplog,
+):
+    """收割线程起不来（RuntimeError）既不得拖累播放，也不得让登记项永久滞留。
+
+    旧实现把 `Thread.start()` 的 RuntimeError 原样从 `_ensure_reaper` 抛出去，而
+    `_play_with_system_player` 唯一的 except 是 OSError——异常继续穿到 `play_sound`
+    （那里没有 try）再穿进 GUI 调用栈：一次点击音换一次抛错；同时那条已经 Popen
+    起来的句柄失去唯一的周期回收点（登记表里没人再碰它）。
+
+    取舍（最小可靠方案）：起不了线程只记 warning、不向调用方抛错，回收退到既有
+    路径——`_play_with_system_player` 入口的同步收割（该路径本来就在，用于"不点
+    就不播"的最后一批之前）。播放功能不该被回收机制拖累。
+    """
+    monkeypatch.setattr(click_sound, "_REAPER", None)
+    _install_python_as_player(monkeypatch)
+
+    reap_calls: list[int] = []
+    real_reap = click_sound._reap_system_players
+
+    def counting_reap() -> None:
+        reap_calls.append(1)
+        real_reap()
+
+    monkeypatch.setattr(click_sound, "_reap_system_players", counting_reap)
+
+    class _RefusingThread:
+        """顶替 threading.Thread：start() 必抛 RuntimeError（线程名额耗尽）。"""
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(
+        click_sound, "threading", SimpleNamespace(Thread=_RefusingThread))
+
+    target = _make_file(tmp_path, "click.wav")
+
+    caplog.set_level("WARNING")
+    assert click_sound._play_with_system_player(target) is True, \
+        "起不了收割线程也必须照常播放（回收机制不得拖累播放）"
+
+    assert len(system_player_registry) == 1, "拉起的句柄仍要登记"
+    assert click_sound._REAPER is None, \
+        "没起来的线程不得留在 _REAPER 里（状态必须与事实一致，下次登记才能重试）"
+    assert "收割" in caplog.text, f"启动失败必须留下可发现的日志：{caplog.text!r}"
+
+    first = system_player_registry[0]
+    assert first.wait(timeout=30) is not None, "顶替播放器应自然退出"
+
+    assert click_sound._play_with_system_player(target) is True
+    assert len(reap_calls) >= 2, \
+        f"每次播放入口的同步收割必须仍然活着（否则登记项永久滞留）：{len(reap_calls)}"
+    assert first not in system_player_registry, \
+        "已退出的句柄必须被下次播放前的同步收割拿走（永久滞留 = 句柄泄漏）"
+    assert len(system_player_registry) <= 1, \
+        f"收割 + 登记各一次，表里最多剩新拉起的那一个：{len(system_player_registry)}"

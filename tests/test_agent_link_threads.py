@@ -477,14 +477,14 @@ class TestOpenCodeDbRotation:
 
 class TestManagerDeterministicTeardown:
     """PR91 回归：Python 持有所有权（parent=None）的 manager 在 shutdown 后必须
-    脱离「GC 在任意线程回收 C++ 对象」的命运，且控制 worker 可被取消、不超活。
+    脱离「GC 在任意线程回收 C++ 对象」的命运，监视器 worker 不超活。
 
     根因链：parent=None 时 C++ 对象随 wrapper 被循环 GC 回收，而 GC 可能在任意
     线程（含 monitor worker 线程）触发——跨线程删除带 QTimer 子对象/信号连接的
     QObject 会腐化 Qt 事件队列，崩溃点在后续测试的 processEvents 漂移
     （CI Windows access violation / macOS bus error）。修复：shutdown 把
     parentless 的 manager 过继给 QApplication（与进程同寿、主线程销毁），
-    停掉自带定时器，并以 _worker_cancel 取消 30s 阻塞轮询的控制 worker。"""
+    并停掉自带定时器。"""
 
     def test_shutdown_reparents_python_owned_manager_to_app(self, tmp_path, app):
         """parent=None 的 manager：shutdown 后过继给 QApplication，C++ 不再随
@@ -514,27 +514,3 @@ class TestManagerDeterministicTeardown:
         mgr.shutdown()
         mgr.shutdown()
         assert mgr.parent() is QApplication.instance()
-
-    def test_shutdown_cancels_control_worker_promptly(self, tmp_path, app, monkeypatch):
-        """控制 worker 的 30s 桥接轮询必须可被取消：shutdown 后 worker 立即退出，
-        不超活到 manager 销毁之后。"""
-        import pet.dsh_control as dsh_control_mod
-
-        # 桥接目录指到空临时目录：真实走 request 的轮询循环（无人应答），
-        # 不碰真实 %APPDATA% 桥接目录。
-        monkeypatch.setattr(dsh_control_mod, "_bridge_dir", lambda: str(tmp_path / "bridge"))
-        mgr = AgentLinkManager(None, Config(base=tmp_path))
-        payload = {"session_id": "sess-x", "goal": "", "reasons": [], "steps": []}
-        mgr._request_exploration_control("replan", "sess-x", payload)
-        with mgr._respond_threads_lock:
-            workers = list(mgr._respond_threads)
-        assert workers, "控制请求应已创建后台线程"
-        t0 = time.monotonic()
-        mgr.shutdown()
-        elapsed = time.monotonic() - t0
-        assert elapsed < 3.0, f"取消后 join 耗时 {elapsed:.2f}s（应远小于 30s 轮询超时）"
-        assert all(not w.is_alive() for w in workers), "shutdown 后控制 worker 必须已退出"
-        # request 的 finally 应清理请求/响应文件（取消路径同样清理）
-        bridge_dir = tmp_path / "bridge"
-        leftovers = list(bridge_dir.glob("watchdog-*.json")) if bridge_dir.exists() else []
-        assert leftovers == [], f"取消后残留桥接临时文件: {leftovers}"

@@ -289,13 +289,13 @@ def test_win_consumers_stay_safe_with_overlay_host(tmp_path):
 
     ``app.win`` 只有三处消费（三个提醒服务之外）：
 
-    - ``_dsh_link_manager``：壳持有的是同一个共享 agent_link（DSH 离线收口照常）；
+    - ``win.agent_link_manager``：壳持有的是同一个共享 agent_link（DSH 离线收口照常）；
     - ``open_todo_panel``：壳是 QObject，不能当 QDialog 的 parent（必须回落 None）。
     """
     shell, inst, overlay = _make_overlay_app(tmp_path)
     try:
         assert shell.win is overlay
-        assert shell._dsh_link_manager() is shell._shared.agent_link
+        assert shell.win.agent_link_manager is shell._shared.agent_link
 
         shell.open_todo_panel()
 

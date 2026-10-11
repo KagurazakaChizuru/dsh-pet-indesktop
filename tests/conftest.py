@@ -219,15 +219,6 @@ def _close_qt_top_level_widgets():
         OverlayShell._shutdown_live_for_tests()
     except Exception:
         pass
-    # dsh_state：QTimer 只停了不算完——在途在线探测线程（daemon + 阻塞 socket）
-    # 回来后仍会跨线程 emit；先 stop() 换代作废其结果，再销毁顶层窗口，
-    # 否则 deleteLater + processEvents 收尾时 worker 向已销毁 QObject emit
-    # （macOS 全量套件 segfault：conftest._close_qt_top_level_widgets + socket 线程）。
-    try:
-        from pet import dsh_state
-        dsh_state._shutdown_live_for_tests()
-    except Exception:
-        pass
     # 销毁残留顶层窗口（QDialog/QWidget）：只用 deleteLater，绝不用 close()。
     # close() 会触发 closeEvent → _write_config → warm_click_sound_effects 的
     # 副作用（t4 曾因此崩溃）；deleteLater 走 DeferredDelete，Qt 安全销毁且不

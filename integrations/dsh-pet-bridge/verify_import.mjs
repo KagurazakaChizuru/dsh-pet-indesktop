@@ -54,6 +54,25 @@ try {
   assert.ok(!/\bimport\s*\(/.test(source),
     "index.js 不得使用动态 import（含计算型说明符：惰性加载可绕过清单与门禁）");
 
+  // 减法后的事件面静态闸（2026-10）：
+  // - mux WebSocket 中继 / 看门狗控制队列 / WATCHDOG 事件转发已删；
+  // - 脱敏（#226）：明文正文/命令/参数指纹/结果摘要不落盘，写函数不得存在。
+  for (const banned of [
+    "muxConnect", "muxSocket", "events.mux",
+    "startControlQueue", "handleControlRequest", "runBridgeDiagnosis",
+    "CONTROL_POLL_MS", "watchdog-request-",
+    "WATCHDOG_EVENT_TYPES",
+    "messageText", "commandFromArgs", "summarizeArgs", "extractCommand",
+    "latestCommandFor", "argsKey", "resultSummary",
+    "createUserMessage", "deepFreezeMessage",
+    "session-shape", "rawWorkspace", "rawProject",
+  ]) {
+    assert.ok(
+      !source.includes(banned),
+      `index.js 不得再含已删机制/明文字段的标识符: ${banned}`,
+    );
+  }
+
   // cordis.patch.yml 最低限度 sanity：必须声明桥接 bundle 挂载点。
   const patch = readFileSync(path.join(tmp, "cordis.patch.yml"), "utf8");
   assert.ok(patch.includes("@dsh-pet/bridge") && patch.includes("dsh-pet-bridge"),
@@ -62,21 +81,10 @@ try {
   const bridge = await import(pathToFileURL(path.join(tmp, "index.js")).href);
 
   assert.equal(typeof bridge.apply, "function", "插件应导出 apply(ctx)");
-  assert.deepEqual(bridge.inject, ["llm", "agentDefaultModel"]);
-
-  // envelope 形状与 dsh createUserMessage 对齐（llm.stream / steer 直接消费）：
-  // role/id 补齐、深冻结、且不回冻调用方传入的对象。
-  const input = { content: [{ type: "text", text: "hi" }], source: { kind: "plugin", plugin: "smoke" } };
-  const msg = bridge.__messageTest.createUserMessage(input);
-  assert.equal(msg.role, "user");
-  assert.equal(typeof msg.id, "string");
-  assert.ok(msg.id.length > 0);
-  assert.deepEqual(msg.content, input.content);
-  assert.deepEqual(msg.source, input.source);
-  assert.ok(Object.isFrozen(msg) && Object.isFrozen(msg.content) && Object.isFrozen(msg.content[0]));
-  assert.ok(!Object.isFrozen(input), "envelope 不得冻结调用方传入的对象");
+  // 减法后不消费任何注入服务（看门狗 LLM 诊断已删）
+  assert.deepEqual(bridge.inject, []);
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log("bridge zero-dependency smoke: import + envelope + source bans OK");
+console.log("bridge zero-dependency smoke: import + subtraction surface + source bans OK");

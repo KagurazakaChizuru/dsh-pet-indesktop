@@ -492,25 +492,6 @@ class _ProxyShell:
         self._shared = None
 
 
-def _proxy_payload(**over):
-    payload = {
-        "type": "pet/exploration-watchdog",
-        "level": "control",
-        "risk": 6,
-        "riskScore": 6,
-        "reasons": ["W6 同类重复"],
-        "steps": [{"behaviors": ["READ"], "targets": ["src/a.py"]}],
-        "session_id": "sess-1",
-        "goal": "修好登录",
-        "agent_key": "dsh",
-        "agent_name": "DSH",
-        "targetCount": 1,
-        "targets": ["src/a.py"],
-    }
-    payload.update(over)
-    return payload
-
-
 def _make_proxy_manager(tmp_path, windows):
     """构造共享 manager，win 为只读 MultiWindowProxy 集合（生产 320 行同构）。"""
     config = Config(base=tmp_path)
@@ -524,65 +505,24 @@ def _control_buttons(alert):
     return [name for name, _ in (alert["buttons"] or [])]
 
 
-def test_proxy_control_alert_fans_out_buttons(tmp_path, app):
-    """红→绿：无 show_alert 的 proxy 会把控制提醒退化为无按钮气泡（按钮丢失）。
-    现行语义：交互式提醒只入队首个可见窗（多窗不重复轰炸），按钮不丢。"""
-    w1, w2 = _AlertRecordWin(visible=True), _AlertRecordWin(visible=True)
-    _, mgr = _make_proxy_manager(tmp_path, [w1, w2])
-    try:
-        mgr._on_exploration_warning("sess-1", _proxy_payload())
-        assert w1.alerts, "首个可见窗应收到控制提醒（而非退化气泡）"
-        alert = w1.alerts[-1]
-        assert alert["alert_type"] == "control"
-        assert _control_buttons(alert) == ["自动优化", "终止", "忽略"]
-        assert alert["sticky"] is True
-        assert not w2.alerts, "交互式提醒只在首个可见窗展示，不多窗重复"
-    finally:
-        mgr.shutdown()
-
-
-def test_proxy_interaction_approval_buttons_fan_out(tmp_path, app):
-    """红→绿：审批按钮也要经 show_alert 展示，不因 proxy 缺面而退化无按钮。"""
+def test_proxy_interaction_approval_fans_out_without_buttons(tmp_path, app):
+    """审批提醒经 show_alert 扇出到首个可见窗（不多窗重复）；减法后为纯提示，
+    不出「同意/拒绝」按钮。"""
     w1, w2 = _AlertRecordWin(visible=True), _AlertRecordWin(visible=True)
     _, mgr = _make_proxy_manager(tmp_path, [w1, w2])
     try:
         mgr._pending_interactions["itest"] = {
-            "kind": "approval", "text": "DSH 请求执行：rm -rf，请选择：",
-            "interactive": True, "rpc_id": "rpc-1", "alert_id": "interaction:itest",
+            "kind": "approval", "text": "DSH 有审批等你决定，请到 DSH 界面处理～",
+            "rpc_id": "rpc-1", "alert_id": "interaction:itest",
             "session_id": "s1", "agent_key": "dsh",
         }
         mgr._show_interaction_bubble("itest")
-        assert w1.alerts, "审批应经 show_alert 展示（同意/拒绝按钮不丢）"
-        assert _control_buttons(w1.alerts[-1]) == ["同意", "拒绝"]
+        assert w1.alerts, "审批应经 show_alert 展示"
+        assert _control_buttons(w1.alerts[-1]) == [], "减法后审批气泡不得出按钮（纯提示）"
         assert not w2.alerts, "审批只在首个可见窗展示"
-    finally:
-        mgr.shutdown()
-
-
-def test_proxy_resolve_alert_collapses_all_windows(tmp_path, app):
-    """新行为：任一窗点「忽略」，其它窗的同款控制气泡也必须被收起。"""
-    w1, w2 = _AlertRecordWin(visible=True), _AlertRecordWin(visible=True)
-    proxy, mgr = _make_proxy_manager(tmp_path, [w1, w2])
-    try:
-        mgr._on_exploration_warning("sess-1", _proxy_payload())
-        ignore = next(cb for name, cb in w1.alerts[-1]["buttons"] if name == "忽略")
-        ignore()
-        assert w1.resolved == ["exploration-control:sess-1"]
-        assert w2.resolved == ["exploration-control:sess-1"], "其它窗同款气泡也要收起"
-    finally:
-        mgr.shutdown()
-
-
-def test_proxy_control_uses_show_alert_not_bubble_fallback(tmp_path, app):
-    """钉住 :3175 的 TypeError 兜底：proxy 有 show_alert 后，控制提醒绝不落入
-    show_bubble 兜底（否则按钮会随兜底退化掉）。提醒只在首个可见窗入队。"""
-    w1, w2 = _AlertRecordWin(visible=True), _AlertRecordWin(visible=True)
-    _, mgr = _make_proxy_manager(tmp_path, [w1, w2])
-    try:
-        mgr._on_exploration_warning("sess-1", _proxy_payload())
-        assert w1.alerts, "首个可见窗应走 show_alert 通路"
-        for win in (w1, w2):
-            assert win.bubbles == [], "不得退化到 show_bubble 的 TypeError 兜底路径"
+        # resolved 精确关闭：首个可见窗收起
+        mgr._resolve_interaction("itest")
+        assert w1.resolved == ["interaction:itest"]
     finally:
         mgr.shutdown()
 

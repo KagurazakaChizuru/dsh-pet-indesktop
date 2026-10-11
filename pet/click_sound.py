@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 from collections.abc import Sequence
@@ -815,6 +816,77 @@ def _effect_status_is_error(effect: Any) -> bool:
         return False
 
 
+#: 回退播放器的子进程句柄登记（#199）。不持有引用就没人 poll/wait，POSIX 上
+#: 每个播完的 afplay/paplay 都会留成僵尸，Windows 上句柄也要等进程对象回收
+#: ——点击音是高频动作，长时间挂着就是"调几次留几个"。
+_SYSTEM_PLAYERS: list[subprocess.Popen] = []
+# 登记表互斥：播放可能来自定时器/worker 线程，收割与登记并发时会互相吞掉
+# （重新赋值的收割与 append 交错会让刚拉起的句柄凭空消失）。粒度只护列表读写。
+_SYSTEM_PLAYERS_LOCK = threading.Lock()
+
+#: 自回收周期（秒）。收割不能只挂在"下一次播放"上：点击音是"用户不点就不播"的
+#: 动作，最后一批播放器退出之后没有任何后续调用，句柄/僵尸就一直留着。
+#: 周期由登记触发（懒启动），登记表空了线程自行退出，不常驻。
+_REAP_INTERVAL_S = 5.0
+_REAPER: threading.Thread | None = None
+_REAPER_LOCK = threading.Lock()
+
+
+def _reap_system_players() -> None:
+    """非阻塞收割已退出的回退播放器（POSIX 防僵尸，Windows 防句柄泄漏）。"""
+    with _SYSTEM_PLAYERS_LOCK:
+        alive = [proc for proc in _SYSTEM_PLAYERS if proc.poll() is None]
+        _SYSTEM_PLAYERS[:] = alive
+
+
+def _reaper_loop() -> None:
+    """周期性收割；登记表空了就退出（不常驻线程）。
+
+    退出前在 `_REAPER_LOCK` 内复查登记表：若有新播放刚登记完、还没走到
+    `_ensure_reaper`，这里会看到非空而继续跑；反过来说，`_ensure_reaper`
+    一定看得到 `_REAPER is None` 并另起一个——两条路都不会留下没人收割的表。
+    """
+    global _REAPER
+    while True:
+        time.sleep(_REAP_INTERVAL_S)
+        _reap_system_players()
+        with _REAPER_LOCK:
+            with _SYSTEM_PLAYERS_LOCK:
+                if _SYSTEM_PLAYERS:
+                    continue
+            _REAPER = None
+            return
+
+
+def _ensure_reaper() -> None:
+    """确保有一个收割线程在跑（懒启动，已活着则不动）。
+
+    **本函数不向调用方抛错**：起不了线程（RuntimeError：线程名额耗尽、解释器
+    正在关闭）只记 warning 并返回，回收退到既有路径——每次
+    `_play_with_system_player` 入口本来就会同步 reap 一次。异常穿出去的代价与
+    收益完全不对等：`_ensure_reaper` 是被 `_play_with_system_player` 直接调的，
+    而那里的 except 只接 OSError，RuntimeError 会继续穿到 `play_sound`（无 try）
+    再穿进 GUI 调用栈——一次点击音换一次抛错，播放功能被回收机制拖累。
+
+    失败时把 `_REAPER` 复位成 None：留着一个没起来的线程对象会让状态与事实不符，
+    也会让下一次登记的"是否有收割线程"判断基于假象。
+    """
+    global _REAPER
+    with _REAPER_LOCK:
+        if _REAPER is not None and _REAPER.is_alive():
+            return
+        thread = threading.Thread(
+            target=_reaper_loop, name="click-sound-player-reaper", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError:
+            log.warning("播放器收割线程启动失败，回退到下次播放前收割登记项",
+                        exc_info=True)
+            _REAPER = None
+            return
+        _REAPER = thread
+
+
 def _play_with_system_player(path: Path) -> bool:
     """非 Windows 回退：afplay / paplay / aplay。"""
     player = shutil.which("afplay") or shutil.which("paplay") or shutil.which("aplay")
@@ -824,7 +896,13 @@ def _play_with_system_player(path: Path) -> bool:
     if Path(player).name == "aplay":
         command.insert(1, "-q")
     try:
-        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # 先收割上一批（非阻塞 poll，不卡 GUI 线程）再登记本次句柄；登记之后
+        # 另起/唤活在跑的周期收割线程，**最后一批**退出时也有人回收（不靠下次播放）。
+        _reap_system_players()
+        proc = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with _SYSTEM_PLAYERS_LOCK:
+            _SYSTEM_PLAYERS.append(proc)
+        _ensure_reaper()
         return True
     except OSError:
         log.exception("系统播放器失败: %s", player)

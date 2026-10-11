@@ -1014,8 +1014,12 @@ class DynamicIsland(QWidget):
             return self._clamp_rect(rect)
         return self._clamp_rect(QRect(self.pos(), size))
 
+    def _screen_at(self, point: QPoint):
+        """按给定全局坐标选屏；落在多屏空洞（错位拼接）时回退主屏。"""
+        return QGuiApplication.screenAt(point) or QGuiApplication.primaryScreen()
+
     def _current_screen(self):
-        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+        screen = self._screen_at(self.pos())
         return screen
 
     def _apply_position(self) -> None:
@@ -1469,7 +1473,13 @@ class DynamicIsland(QWidget):
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        screen = self._current_screen()
+        # 选屏按**松手光标**的全局位置，不按窗口左上角：跨屏拖拽的触发带恰等于
+        # 抓取偏移量——光标刚过屏缝松手时左上角仍在原屏，按左上角选屏会把整窗
+        # 夹回原屏边缘（夹取距离 0 → 就近判定停靠）并落回原屏，用户看到的是
+        # "拖过去又弹回来"（issue #154）。光标在哪块屏，岛就落在哪块屏。
+        # 心跳 _clamp_to_screen 仍按窗口左上角：跨缝中途夹回所在屏是保守合理
+        # 行为，不动。
+        screen = self._screen_at(event.globalPosition().toPoint())
         available = screen.availableGeometry() if screen is not None else None
         if not self._dragging:
             if self._mode == "docked" and not self._hover_peek:

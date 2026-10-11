@@ -65,8 +65,11 @@ stay gone and are never imported again. Collision math is pure (`pet/collision.p
 `pet/multi_window_shared.py` is always on: one process-wide agent_link /
 proactive / fullscreen watcher fanned out to every window or sprite. Under the
 overlay topology the shared fullscreen watcher is not started (the overlay shell
-owns its own `FullscreenCursorWatcher`), and `DshStateTracker` only runs while
-`agent_link.dsh` is enabled.
+owns its own `FullscreenCursorWatcher`). The DSH bridge directory has exactly one
+reader: `DshMonitor` (one `DirGlobTailer` + one polling thread; parsed records feed
+both the signal dispatch and the pure 8-state converger in `pet/dsh_state.py`,
+with the DSH port probe folded into the same thread), started by
+`AgentLinkManager.apply_config` only while `agent_link.dsh` is enabled.
 
 ## Change discipline
 

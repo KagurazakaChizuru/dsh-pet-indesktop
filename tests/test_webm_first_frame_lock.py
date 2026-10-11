@@ -516,3 +516,78 @@ def test_abandoned_entry_terminal_disposal_logs_path_and_duration(app, monkeypat
     clip.cleanup()
     webm_clip_mod._ORPHAN_REGISTRY._clips.discard(clip)
     app.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# #201 首帧校验静默：两个失败出口都必须可诊断
+# ---------------------------------------------------------------------------
+
+def _make_meta_clip(tmp_path, width: int = 2, height: int = 2) -> WebMClip:
+    """元数据直接给足的最小 clip：_decode_first_qimage 不触真实 ffmpeg 探测。"""
+    clip = WebMClip(str(tmp_path / "x.webm"))
+    clip._w = width
+    clip._h = height
+    clip._fps = 24.0
+    clip._duration = 0.1
+    clip._frame_count = 3
+    clip._frame_count_exact = True
+    return clip
+
+
+def _install_frames(monkeypatch, meta, frame):
+    """把 read_frames 换成"返回 meta + 一帧"的替身（与真实契约一致：生成器）。"""
+
+    def fake_read_frames(*args, **kwargs):
+        yield meta
+        yield frame
+
+    monkeypatch.setattr(webm_clip_mod.imageio_ffmpeg, "read_frames", fake_read_frames)
+
+
+def test_first_frame_length_mismatch_is_logged(tmp_path, monkeypatch, caplog):
+    """#201：首帧尺寸不符必须留 warning（对齐播放侧 :3004 的可诊断口径）。
+
+    旧实现直接 ``return None``，既不记日志也不计数——"素材尺寸与画布不符"这类
+    问题在首帧路径上完全不可诊断（播放路径靠同款 warning 一眼定位过）。
+    """
+    clip = _make_meta_clip(tmp_path)
+    expect = clip._w * clip._h * clip._bpp
+    _install_frames(monkeypatch, {"fps": 24.0, "duration": 0.1}, b"\x00" * (expect - 4))
+
+    with caplog.at_level(logging.WARNING):
+        assert clip._decode_first_qimage() is None, "尺寸不符仍须按 None 降级（行为不变）"
+
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    hit = [m for m in msgs if "首帧长度异常" in m]
+    assert hit, f"尺寸不符必须留 warning，实得 {msgs}"
+    assert str(clip.path) in hit[0], f"warning 必须含素材路径：{hit[0]}"
+    assert f"got={expect - 4}" in hit[0] and f"expect={expect}" in hit[0], hit[0]
+
+
+def test_first_frame_null_image_is_logged(tmp_path, monkeypatch, caplog):
+    """#201：QImage 构造为空（画布尺寸为 0）同样不得静默 return None。"""
+    clip = _make_meta_clip(tmp_path, width=0, height=0)
+    _install_frames(monkeypatch, {"fps": 24.0, "duration": 0.1}, b"")
+
+    with caplog.at_level(logging.WARNING):
+        assert clip._decode_first_qimage() is None
+
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    hit = [m for m in msgs if "首帧图像为空" in m]
+    assert hit, f"空图像出口必须留 warning，实得 {msgs}"
+    assert str(clip.path) in hit[0], f"warning 必须含素材路径：{hit[0]}"
+
+
+def test_first_frame_success_path_stays_silent(tmp_path, monkeypatch, caplog):
+    """对照组：尺寸正确时不得出现任何 warning（新日志不能变成噪声）。"""
+    clip = _make_meta_clip(tmp_path)
+    expect = clip._w * clip._h * clip._bpp
+    _install_frames(monkeypatch, {"fps": 24.0, "duration": 0.1}, b"\x11" * expect)
+
+    with caplog.at_level(logging.WARNING):
+        img = clip._decode_first_qimage()
+
+    assert img is not None and not img.isNull(), "正确尺寸必须照常返回 QImage"
+    assert img.width() == clip._w and img.height() == clip._h
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert msgs == [], f"成功路径不得打日志：{msgs}"

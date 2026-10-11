@@ -43,7 +43,6 @@ from .context_menus.icons import vector_widget_icon
 from .fun_image_popup import oijingjing_image_path, resolve_fun_asset
 from .persona_phrases import PUBLIC_DIALOGUE_EVENTS, phrase_keys
 from .persona_template import build_persona_template
-from .report_gates import REPORT_GATE_DEFAULTS, REPORT_GATE_KEYS
 from .settings_widgets import (
     AUDIO_NAME_FILTER,
     BrowserDoubleSpinBox,
@@ -51,7 +50,6 @@ from .settings_widgets import (
     ClickSoundPackPicker,
     ColorPicker,
     ModernSelect,
-    ProbabilitySlider,
     ResourcePathPicker,
     ResponsiveToggleActionRow,
     SettingRow,
@@ -317,6 +315,15 @@ def build_pet_controls(host) -> None:
         host.music_lyric_check.setToolTip(
             "当前系统读不到媒体会话（仅 Windows 且已安装 winrt 时可用）"
         )
+    # 浏览器媒体会话开关只在 Windows 创建（上游 #230 批次）：SMTC 是 Windows 专属能力，
+    # 非 Windows 建了也没效果（违反 settings 门禁「永久不支持的能力不创建控件」）。与
+    # cursor_hidden_passthrough_check 同一处置——控件与设置行一起条件创建。
+    host.music_browser_media_check = None
+    if sys.platform == "win32":
+        host.music_browser_media_check = ToggleSwitch(host)
+        host.music_browser_media_check.setChecked(
+            bool(host.config.get("music_browser_media_enabled", False))
+        )
     host.agent_cost_check = ToggleSwitch(host)
     host.agent_cost_check.setChecked(bool(host.config.get("agent_cost_enabled", False)))
     host.music_lyric_lead_spin = BrowserDoubleSpinBox(host)
@@ -577,20 +584,6 @@ def build_pet_controls(host) -> None:
     host.agent_sound_cooldown_spin.setDecimals(1)
     host.agent_sound_cooldown_spin.setSuffix(" 秒")
     host.agent_sound_cooldown_spin.setValue(float(agent_link_cfg.get("sound_cooldown_seconds", 2.0)))
-
-    # 事件气泡触发概率（0.00–1.00 滑块，无开关）：按事件聚合类别逐类调通过概率。
-    # 0.00 = 该类完全不汇报（等同关闭），1.00 = 全部汇报。滑块是唯一控制项，
-    # 右键菜单只给 0/1 两端快捷入口；键名即门名（见 pet/report_gates.py）。
-    gates_cfg = agent_link_cfg.get("report_gates")
-    if not isinstance(gates_cfg, dict):
-        gates_cfg = {}
-    host.report_gate_sliders = {}
-    for gate in REPORT_GATE_KEYS:
-        slider = ProbabilitySlider(
-            host, value=float(gates_cfg.get(gate, REPORT_GATE_DEFAULTS[gate]))
-        )
-        slider.setObjectName(f"reportGateSlider_{gate}")
-        host.report_gate_sliders[gate] = slider
 
     host.agent_sound_check.toggled.connect(host._update_agent_sound_controls)
     host.agent_sound_check.toggled.connect(host._apply_agent_sound_enabled_now)

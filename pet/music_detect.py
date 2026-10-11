@@ -1,9 +1,18 @@
 # -*- coding: utf-8 -*-
 """后台音乐/音频播放检测（Windows）。
 
-通过 pycaw 读取默认音频输出设备的瞬时峰值电平：只要系统正在输出声音
-（音乐、视频、游戏等），峰值就会高于静音阈值。桌宠据此自动播放唱歌动画；
-阈值设置得较低，避免只有极微弱提示音时频繁触发。
+通过 pycaw 读取默认音频输出设备的瞬时峰值电平：系统正在输出声音（音乐、
+视频、游戏等）峰值就会高于静音阈值。峰值只能说明"有声音在出"，所以还叠加
+一道**否决**：当前 SMTC 会话被明确判定为视频（``playback_type=VIDEO``），或
+（设置里关掉"浏览器媒体会话参与歌词"时）来自已知浏览器，就不触发唱歌动画。
+
+为什么要按来源否决而不是只看类型：浏览器把网页里的**视频**也上报成
+``MUSIC(1)``（2026-10 实测 Edge / Chromium 播放 B 站视频，类型恒为 1，且
+artist/album/subtitle 全空，SMTC 里没有任何字段能把它与网页音乐分开）。
+
+没有 SMTC 会话时维持旧行为（只看峰值）：游戏这类不上报会话的声音照常触发。
+判定结果由 ``now_playing`` 的常驻探针在非主线程产出，本模块只读缓存——主线程
+同步查 SMTC 实测会永久阻塞窗口（见 ``music_lyric_controller`` 采样线程说明）。
 """
 
 from __future__ import annotations
@@ -23,6 +32,42 @@ _self_speaking_until = 0.0
 
 
 _meter = None
+
+# 「浏览器媒体会话参与歌词与唱歌」：由宿主每拍按配置推送（见
+# ``set_browser_media_enabled``）。默认关闭——浏览器对视频恒报音乐类型，
+# 不否决就会对着 B 站视频唱《视频标题》。
+_browser_media_enabled = False
+
+
+def set_browser_media_enabled(on: bool) -> None:
+    """推送「浏览器媒体会话是否参与歌词/唱歌」开关（宿主在轮询里按配置更新）。
+
+    刻意做成"每拍推送"而不是一次性初始化：开关在设置页可以随时改，读配置的
+    地方只有宿主（``window_alerts.check_music_sing`` 有 cfg），多存一份本地
+    副本就多一处会过期的状态。
+    """
+    global _browser_media_enabled
+    _browser_media_enabled = bool(on)
+
+
+def browser_media_enabled() -> bool:
+    """当前推送的浏览器开关值（默认 False）。"""
+    return _browser_media_enabled
+
+
+def session_vetoed() -> bool:
+    """当前 SMTC 会话是否被唱歌链路**明确否决**（视频 / 开关关时的浏览器）。
+
+    只读 ``now_playing`` 的后台探针缓存，**绝不在这里查 SMTC**：本函数在 Qt
+    主线程（唱歌定时器槽）被调用。没有判定数据时返回 False（放行）——门故障
+    不许误伤，宁可多唱一次。
+    """
+    try:
+        from . import now_playing
+
+        return now_playing.song_session_accepted(_browser_media_enabled) is False
+    except Exception:
+        return False
 
 
 def _get_meter():
@@ -51,23 +96,32 @@ def _get_meter():
 
 
 def is_music_playing() -> bool:
-    """返回系统当前是否正在输出音频（Windows；其他平台恒 False）。"""
+    """系统是否正在播放**音乐**（Windows；其他平台恒 False）。
+
+    两个条件同时成立才算：默认输出设备有声音，且当前 SMTC 会话没有被否决
+    （见 :func:`session_vetoed`）。没有会话、或会话类型是音乐/未上报时，退化成
+    只看峰值——即旧行为。
+    """
     if sys.platform != 'win32':
         return False
     try:
         meter = _get_meter()
         if meter is None:
             return False
-        return meter.GetPeakValue() > MUSIC_PEAK_THRESHOLD
+        if meter.GetPeakValue() <= MUSIC_PEAK_THRESHOLD:
+            return False
     except Exception:
         # 无 pycaw / 音频设备不可用 / COM 初始化失败时按“未播放”处理，不打扰用户
         return False
+    return not session_vetoed()
 
 
 # --- 桌宠自己的播报登记（2026-09-17 跨功能审计）--------------------------------
 # 报时/节日播报走的就是系统输出，峰值必然超过阈值；不登记的话，开启「音乐自动
 # 唱歌」时桌宠会在自己报时的那一刻切去唱歌动画。登记只是为了把这些"自己的声音"
 # 排除在音乐判定之外，语义上仍是本模块的职责（判断系统里有没有**别处**在放歌）。
+# 2026-10-11 合并上游 #230 批次：上游新增的 `session_vetoed()`（SMTC 会话否决，
+# 视频/浏览器会话不算音乐）与这套登记**互补**，两者都保留。
 
 
 def mark_self_speaking(duration_s: float | None = None) -> None:

@@ -11,7 +11,7 @@ def test_template_is_complete_and_safe():
     assert set(data["phrases"]) == set(phrase_keys())
     assert data["phrases"]["start"] == ["你好，{name}"]
     assert data["phrases"]["thinking"] == []
-    assert data["variables"]["command"]
+    assert data["variables"]["tool"]
     data2 = build_persona_template({"dialogue_phrases": {"start": "中文\n\""}})
     text = json.dumps(data2, ensure_ascii=False)
     assert json.loads(text)["phrases"]["start"] == ["中文\n\""]
@@ -39,8 +39,8 @@ def test_all_advertised_fields_reach_presentation_layer():
     from pathlib import Path
 
     from pet.persona_template import (
-        CONDITIONAL_PARAMETERS, DISPLAY_HINTS, EVENT_SOURCES, PARAMETERS,
-        UPSTREAM_FIELDS, VARIABLES,
+        CONDITIONAL_PARAMETERS, DISPLAY_HINTS, EVENT_SOURCES, LEGACY_HIDDEN_PARAMETERS,
+        PARAMETERS, UPSTREAM_FIELDS, VARIABLES,
     )
 
     root = Path(__file__).resolve().parent.parent
@@ -67,15 +67,14 @@ def test_all_advertised_fields_reach_presentation_layer():
             else:
                 dynamic.append((has_expansion, frozenset(kws)))
 
-    # 动态 key 调用点：activity（**values 展开）/ pattern（name, reasons）/ model_access（count + **conditional 展开）
-    assert (True, frozenset()) in dynamic, "activity 调用点应显式传 values 字典（含 tool/command 等）"
-    assert (False, frozenset({"name", "reasons"})) in dynamic, "pattern 动态调用点缺失"
+    # 动态 key 调用点：activity（**values 展开）/ model_access（count + **conditional 展开）
+    assert (True, frozenset()) in dynamic, "activity 调用点应显式传 values 字典（含 tool/callId 等）"
     assert (False, frozenset({"count"})) in dynamic or (True, frozenset({"count"})) in dynamic, \
         "model_access 动态调用点缺失（count + **conditional 展开）"
     # activity 调用点会读记录里的 target/ok 并按需注入，但桥接写出的 tool/call
-    # 记录从不含这两个字段（只在 tool/result / watchdog reasoning）——活动气泡
-    # 渲染时填充物是 tool/call，因此模板不宣称（写了就是永不替换的占位符）。
-    activity_fields = ("name", "tool", "label", "command", "argsKey", "callId", "step",
+    # 记录从不含这两个字段——活动气泡渲染时填充物是 tool/call，因此模板不宣称
+    # （写了就是永不替换的占位符）。脱敏口径：command/argsKey 不落盘不注入。
+    activity_fields = ("name", "tool", "label", "callId", "step",
                        "sessionName", "projectName")
     activity_unadvertised = {"target", "ok"}
     # model_access 的 key 是变量：dynamic_delivered 需包含 count + 条件参数
@@ -84,7 +83,6 @@ def test_all_advertised_fields_reach_presentation_layer():
         "activity.read": set(activity_fields), "activity.search": set(activity_fields),
         "activity.edit": set(activity_fields), "activity.run": set(activity_fields),
         "activity.default": set(activity_fields),
-        "pattern.warning": {"name", "reasons"}, "pattern.control": {"name", "reasons"},
         "model_access.one": set(model_access_fields), "model_access.many": set(model_access_fields),
     }
 
@@ -116,8 +114,7 @@ def test_all_advertised_fields_reach_presentation_layer():
     assert {"count", "errorCode", "errorMessage", "consecutiveRetryCount", "retry",
             "sessionName", "projectName"} == set(
         entries["model_access.one"]["parameters"])
-    assert set(entries["approval.command"]["parameters"]) == {
-        "name", "command", "toolName", "sessionName", "projectName", "label"}
+    assert "approval.command" not in entries, "命令明文审批文案已随脱敏减法移除"
 
     # ── 核心保证：模板宣称参数与调用点注入对齐 ──
     # 参数分两类：保证参数必须以命名 kwargs 出现（少宣称=已注入却不告知，
@@ -136,16 +133,24 @@ def test_all_advertised_fields_reach_presentation_layer():
             assert actual - conditional <= expected_guaranteed, (
                 key + ": 注入了未宣称的字段 " + str(sorted(actual - conditional - expected_guaranteed)))
         else:
-            assert set(PARAMETERS[key]) == actual, (
+            # 条件参数上游可能恒不提供（减法退役位）：宣称 ⊇ 注入 ⊇ 保证。
+            assert expected_guaranteed <= actual <= set(PARAMETERS[key]), (
                 key + ": 模板宣称 " + str(sorted(PARAMETERS[key]))
-                + " != 运行时注入 " + str(sorted(actual)))
+                + " / 运行时注入 " + str(sorted(actual))
+                + "（保证参数必须注入，注入不得超过宣称表）")
 
     # activity 不得残留从未传入的死字段；宣称的字段必须全部真的注入
-    advertised_activity = {"name", "tool", "label", "command", "argsKey", "callId",
+    advertised_activity = {"name", "tool", "label", "callId",
                            "step", "sessionName", "projectName"}
     assert advertised_activity <= set(entries["activity.read"]["parameters"])
     for dead in ("toolName", "riskScore", "pluginId", "sessionLabel", "target", "ok"):
         assert dead not in entries["activity.read"]["parameters"]
+    # command/argsKey 是减法退役兼容位：仍在宣称表（不戳破旧台词），但必须落在
+    # 条件注入集（恒不注入、渲染端自动隐藏），不得是保证参数
+    assert {"command", "argsKey"} <= set(entries["activity.read"]["parameters"])
+    assert {"command", "argsKey"} <= set(CONDITIONAL_PARAMETERS["activity.read"])
+    assert {"command", "argsKey"} <= set(LEGACY_HIDDEN_PARAMETERS)
+    assert "reasons" in LEGACY_HIDDEN_PARAMETERS
 
     # 条件参数声明非空校验：所有带 **conditional 展开的 key 必须声明条件参数
     for key in expansion_keys:
@@ -153,8 +158,8 @@ def test_all_advertised_fields_reach_presentation_layer():
             key + " 使用了 **conditional 展开，但 CONDITIONAL_PARAMETERS 未声明")
 
     # 审批/提问/限流/余额：与调用点一致
-    assert set(entries["approval.command"]["parameters"]) >= {"name", "command", "toolName",
-                                                             "sessionName", "projectName", "label"}
+    assert "approval.command" not in entries, "命令明文审批文案已随脱敏减法移除"
+    assert set(entries["approval.tool"]["parameters"]) >= {"name", "label", "toolName"}
     assert set(entries["question.one"]["parameters"]) >= {"name", "body", "sessionName"}
     assert {"count", "errorCode", "errorMessage"} <= set(entries["model_access.one"]["parameters"])
     assert entries["balance.result"]["parameters"] == ["text"]

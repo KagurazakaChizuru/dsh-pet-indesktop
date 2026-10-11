@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 
 from PySide6.QtCore import QTimer
@@ -91,6 +92,38 @@ def build_music_player_rows(dialog) -> list[SettingRow]:
         )
     )
     return rows
+
+
+def browser_media_supported() -> bool:
+    """「浏览器媒体会话参与歌词」是否在本平台可用——SMTC 是 Windows 专属。"""
+    return sys.platform == "win32"
+
+
+def browser_media_rows(dialog) -> list[SettingRow]:
+    """「浏览器媒体会话参与歌词」设置行（**仅 Windows**）。
+
+    SMTC 是 Windows 专属能力：非 Windows 上这个开关既无效也不该出现
+    （SETTINGS-CHANGE-GATES §4「永久不支持的能力不创建控件」）。控件本体也只在
+    Windows 创建（``settings_pet_controls``），所以这里以「控件在不在」为准——
+    与 ``cursor_hidden_passthrough`` 的处置一致，不会出现"控件在、行不在"的
+    游离开关（那会被孤儿开关测试拦下）。
+
+    hint 里如实写清代价：浏览器把网页视频也上报成音乐类型，开着就会对着视频
+    显示「我在唱」并取词；网页版音乐平台需要它才有歌词。
+    """
+    check = getattr(dialog, "music_browser_media_check", None)
+    if check is None or not browser_media_supported():
+        return []
+    return [
+        SettingRow(
+            "music_browser_media",
+            "浏览器媒体会话参与歌词",
+            "关闭时，浏览器（Edge、Chrome、Firefox 等）里播放的内容不会被当作正在"
+            "播放的歌曲——浏览器把网页视频也上报成音乐类型，开着会对着视频显示"
+            "「我在唱」并取词。网页版音乐平台（如网页版网易云）需要打开它才能显示歌词。",
+            check,
+        )
+    ]
 
 
 def save_music_player_settings(dialog) -> None:

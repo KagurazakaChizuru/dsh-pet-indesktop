@@ -171,7 +171,7 @@ D:\dsh-pet\
 | `pet/app.py` | `PetInstance`（单窗装配）+ `AppShell`（进程级：托盘、多窗共享、配置、可选服务启停）。语音报时服务的懒创建/启停/收口都在这里（`_chime_wanted` / `_ensure_chime_service` / `_sync_chime_service`，1107-1130 行；菜单回调 `trigger_voice_chime_now` / `toggle_voice_chime`，2307-2319 行） |
 | `pet/window.py` | `PetWindow` 组合根：透明窗口、鼠标穿透、拖拽、动画切换、气泡位、碰撞钩子。**新功能优先拆控制器，不要往这里塞**（见第三章） |
 | `pet/config.py` | `Config` 类：默认值 dict、`reload()` 白名单、迁移、`set/get/save`。语音报时 11 键默认值在 693-703 行，reload 白名单在 913-923 行 |
-| `pet/modern_settings_dialog.py` | 现代设置主对话框：域导航（`_rebuild_domain_navigation`，1591 行起）、`SettingRow` 收集机制、`_write_config` 写回（2133 行起）。控件库/AI 设置页/菜单编辑器/主题 QSS 已拆出 |
+| `pet/modern_settings_dialog.py` | 现代设置主对话框：域导航（`_rebuild_domain_navigation`，1591 行起）、`SettingRow` 收集机制、`_write_config` 写回（2405 行起）。控件库/AI 设置页/菜单编辑器/主题 QSS 已拆出 |
 | `pet/settings_widgets.py` | 设置控件库（`ModernSelect` 等），被 `modern_settings_dialog` re-export |
 | `pet/context_menus/registry.py` | 菜单动作注册表：`MenuActionSpec` + `add_action`；语音报时两项在 125-133 / 219-224 行 |
 | `pet/menu_templates/modern-default-v1.json` | 默认菜单布局树（右键菜单「工具」段含语音报时节点） |
@@ -241,7 +241,7 @@ modern_settings_dialog.py
 
 ## 三、架构红线与开发约束
 
-> 这些规则**由测试机器化守卫**，违反即本地/CI 直接红。对应测试：`tests/test_architecture.py`（220 行，7 个用例）。
+> 这些规则**由测试机器化守卫**，违反即本地/CI 直接红。对应测试：`tests/test_architecture.py`（438 行，7 个用例）。
 
 ### 3.1 行数预算（绊线，不是红线）
 
@@ -350,7 +350,7 @@ modern_settings_dialog.py
 | 文件 | 行数 | 层 | 职责 |
 |---|---|---|---|
 | `pet/voice_chime.py` | 540 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词每日排列轮换、后端尝试链、MiMo 请求体/响应解析、缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
-| `pet/voice_chime_service.py` | 803 | 服务 | 20s tick、预合成、合成链（MiMo HTTP / edge-tts 后台线程）、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪（mp3+wav）、降级 |
+| `pet/voice_chime_service.py` | 811 | 服务 | 20s tick、预合成、合成链（MiMo HTTP / edge-tts 后台线程）、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪（mp3+wav）、降级 |
 | `pet/voice_chime_settings.py` | 440 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config`；含「合成后端」6 行与按后端显隐 |
 | `pet/tts_secrets.py` | 92 | 凭据 | `tts/mimo` 的钥匙串存取（惰性 import keyring、内存兜底），不依赖 Qt / pet.chat |
 | `pet/voice_chime_quotes.py` | 237 | 数据 | 台词/歌词库：中文 120 条 / 英文 96 条（`CHINESE_QUOTES` / `ENGLISH_QUOTES`），纯数据零依赖 |
@@ -502,7 +502,7 @@ _TTSWorker             ── provider.synth(text, plan, path)；TtsUnavailable 
 ### 6.1 组织方式
 
 - `tests/` 下 125 个 `.py` 测试文件 + `tests/helpers/` 辅助模块（`foreground_holder.py`，另含 7 个 bridge 的 JS 测试）；`pytest.ini` 指定 `testpaths = tests`。
-- `tests/conftest.py`（275 行）提供 autouse fixture：**静音音频**（测试不出声）、模态框直通、`no-real-dsh`（禁止真实拉起外部 dsh）、Qt 资源收口（防 offscreen 泄漏）等。
+- `tests/conftest.py`（320 行）提供 autouse fixture：**静音音频**（测试不出声）、模态框直通、`no-real-dsh`（禁止真实拉起外部 dsh）、Qt 资源收口（防 offscreen 泄漏）等。
 - 打包与桥接验证脚本另存于 `scripts/`（如 `verify_bundle_qt.py`）、`tests/` 内的 smoke/手动校验脚本（如 `manual_ssl_proxy_check.py`，代理/证书诊断用）。
 
 ### 6.2 关键测试族
@@ -510,12 +510,12 @@ _TTSWorker             ── provider.synth(text, plan, path)；TtsUnavailable 
 | 文件 | 用例数 | 覆盖 |
 |---|---|---|
 | `tests/test_voice_chime.py`（1053 行） | 61 个 def / 参数化后 153 用例 | 11 键默认值与清洗、六种调度数学、`chime_slot` 幂等、`build_chime_text`/`build_chime_bubble_text` 解耦、台词每日排列轮换（`quote_day_order`/`chime_index_in_day`/`pick_quote`）、库长不重复护栏、自定义台词清洗、预合成状态机、缓存裁剪、edge 参数格式化与 `cache_key` |
-| `tests/test_voice_chime_service.py`（444 行） | 15 | 服务层：tick 幂等、预合成消费顺序、失败降级、缓存裁剪节流 |
-| `tests/test_config_schema.py`（209 行） | 5 | 三处登记护栏：`DEFAULTS_SNAPSHOT`、`RELOAD_WHITELIST_SNAPSHOT`、`SPECIAL_CASED_KEYS`，代表用例 `test_every_defaults_key_is_whitelisted_or_special_cased` |
-| `tests/test_architecture.py`（220 行） | 7 | 纯逻辑零 Qt、依赖方向、窗口私有面冻结、`window.py` / `modern_settings_dialog.py` 行数预算、孤儿簇守卫 |
-| `tests/test_menu_layout.py`（2108 行） | 65 | 菜单模板节点顺序、动作 resolve、populate 标签（含语音报时两项） |
-| `tests/test_desktop_pet_features.py`（3118 行） | 94 | 桌宠能力集成（含菜单标签断言） |
-| `tests/test_bundle_slim.py`（202 行） | 10 | `plan_removals` / `verify_no_live_reference` / `verify_required` / dry-run / 实际应用 / 拒绝越界 |
+| `tests/test_voice_chime_service.py`（1168 行） | 15 | 服务层：tick 幂等、预合成消费顺序、失败降级、缓存裁剪节流 |
+| `tests/test_config_schema.py`（429 行） | 5 | 三处登记护栏：`DEFAULTS_SNAPSHOT`、`RELOAD_WHITELIST_SNAPSHOT`、`SPECIAL_CASED_KEYS`，代表用例 `test_every_defaults_key_is_whitelisted_or_special_cased` |
+| `tests/test_architecture.py`（438 行） | 7 | 纯逻辑零 Qt、依赖方向、窗口私有面冻结、`window.py` / `modern_settings_dialog.py` 行数预算、孤儿簇守卫 |
+| `tests/test_menu_layout.py`（2671 行） | 65 | 菜单模板节点顺序、动作 resolve、populate 标签（含语音报时两项） |
+| `tests/test_desktop_pet_features.py`（3293 行） | 94 | 桌宠能力集成（含菜单标签断言） |
+| `tests/test_bundle_slim.py`（239 行） | 10 | `plan_removals` / `verify_no_live_reference` / `verify_required` / dry-run / 实际应用 / 拒绝越界 |
 
 ### 6.3 运行方式
 

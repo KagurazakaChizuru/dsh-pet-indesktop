@@ -312,8 +312,6 @@ def phrase_keys() -> tuple[str, ...]:
 
 
 # Pet/桥接级「公共事件」：不随具体 Agent 归属，编辑某 Agent 专属文案层时隐藏。
-# dsh.writeback.failed（写回 DSH 失败）属 Agent 操作回写，运行时按 agent_key 路由，
-# 归入 Agent 专属层，不在此集合。
 PUBLIC_DIALOGUE_EVENTS: frozenset[str] = frozenset({
     "balance.loading", "balance.result",
     "bridge.install.pending", "bridge.install.success", "bridge.install.failed",

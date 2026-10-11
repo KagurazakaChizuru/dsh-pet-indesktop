@@ -4,7 +4,7 @@
 import io
 import json
 import urllib.error
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -198,6 +198,94 @@ def test_friday_evening_next_peak_skips_weekend():
     assert next_tier == "peak"
     assert next_time.weekday() == 0  # Monday
     assert next_time.hour == 9
+
+
+# ------------------------------------------------- 法定节假日峰谷（issue #217）
+# 官方口径（DeepSeek 开放平台）：高峰 = 北京时间周一至周五（**不含中国法定
+# 节假日**）9-12 / 14-18；周末与法定节假日全天空闲。调休补班的周六/周日按
+# 官方口径仍是空闲——不是工作日高峰。
+
+
+def test_statutory_holiday_name_reports_free_days_only():
+    """festival_calendar 的节假日边界：只认放假日，补班日与表外日期返回 None。"""
+    from pet.festival_calendar import statutory_holiday_name
+
+    assert statutory_holiday_name(date(2026, 10, 1)) == "国庆节"
+    assert statutory_holiday_name(date(2026, 2, 16)) == "春节"
+    # 调休补班的周六（2026-10-10）是上班日，不属于放假日
+    assert statutory_holiday_name(date(2026, 10, 10)) is None
+    # 内嵌安排表之外（2026-10-11 起）降级为 None = 「未知」，不是「确认上班」
+    assert statutory_holiday_name(date(2027, 1, 1)) is None
+
+
+def test_statutory_holidays_are_idle_all_day():
+    """法定节假日全天空闲：工作日高峰时段（9-12 / 14-18）也判空闲。"""
+    for day in (date(2026, 10, 1), date(2026, 10, 5),
+                date(2026, 6, 19), date(2026, 2, 16)):
+        assert day.weekday() < 5, f"{day} 应是工作日，否则本用例不构成反向闸门"
+        for hour in (10, 15):
+            assert balance.deepseek_pricing_tier(
+                _bj(hour, day=day.day, month=day.month, year=day.year)
+            ) == "idle"
+    # 反向闸门：假期外的相邻工作日仍是高峰
+    assert balance.deepseek_pricing_tier(_bj(10, day=8, month=10, year=2026)) == "peak"
+    assert balance.deepseek_pricing_tier(_bj(10, day=9, month=10, year=2026)) == "peak"
+
+
+def test_makeup_workdays_on_weekend_stay_idle():
+    """调休补班的周六/周日仍空闲（官方口径，与「补班即高峰」的建议相反）。"""
+    assert date(2026, 10, 10).weekday() == 5  # 周六补班
+    assert date(2026, 9, 20).weekday() == 6   # 周日补班
+    for day in (date(2026, 10, 10), date(2026, 9, 20)):
+        for hour in (10, 15):
+            assert balance.deepseek_pricing_tier(
+                _bj(hour, day=day.day, month=day.month, year=day.year)
+            ) == "idle"
+
+
+def test_holiday_next_peak_scans_past_whole_holiday():
+    """国庆假期中（10-06 10:00）下一高峰是假期结束后的第一个工作日 09:00。
+
+    10-06（周二）/ 10-07（周三）仍是国庆假期，故 10-08（周四）09:00 才是高峰；
+    按 09/12/14/18 点边界逐点扫描才能跨过整段假期。
+    """
+    tier, when = balance._next_pricing_switch(_bj(10, day=6, month=10, year=2026))
+    assert tier == "peak"
+    assert when.date() == date(2026, 10, 8)
+    assert (when.hour, when.minute) == (9, 0)
+
+    hint = balance.deepseek_pricing_hint(_bj(10, day=6, month=10, year=2026))
+    assert "当前空闲" in hint
+    assert "下一高峰 周四 09:00" in hint
+
+
+def test_format_switch_time_same_iso_week_uses_bare_weekday():
+    """跨天文案按 ISO 周判定：同周用「周四」，跨周才用「下周一」。"""
+    # 周二 -> 周四：同一 ISO 周
+    assert balance.format_switch_time(
+        _bj(10, day=6, month=10, year=2026), _bj(9, day=8, month=10, year=2026)
+    ) == "周四 09:00"
+    # 周五 20:00 -> 下周一 09:00：跨 ISO 周，保持「下周一」
+    assert balance.format_switch_time(
+        _bj(20, day=28, month=8, year=2026), _bj(9, day=31, month=8, year=2026)
+    ) == "下周一 09:00"
+    # 周六 -> 下周一：跨周（周末不是「同周周一」）
+    assert balance.format_switch_time(
+        _bj(15, day=29, month=8, year=2026), _bj(9, day=31, month=8, year=2026)
+    ) == "下周一 09:00"
+
+
+def test_pricing_degrades_without_holiday_calendar_data():
+    """2027 起 HolidayUtil 无内嵌数据：不抛异常，退回星期规则。"""
+    # 2027-01-01 是周五，表外日期按工作日高峰判
+    assert balance.deepseek_pricing_tier(_bj(10, day=1, month=1, year=2027)) == "peak"
+    assert balance.deepseek_pricing_tier(_bj(13, day=1, month=1, year=2027)) == "idle"
+    # 周末规则与表无关
+    assert balance.deepseek_pricing_tier(_bj(10, day=2, month=1, year=2027)) == "idle"
+    # 切换扫描同样可用（不因表耗尽而抛错）
+    tier, when = balance._next_pricing_switch(_bj(10, day=1, month=1, year=2027))
+    assert tier == "idle"
+    assert when.date() == date(2027, 1, 1)
 
 
 def test_chat_session_title_roundtrip():

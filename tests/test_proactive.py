@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1077,6 +1078,153 @@ class TestPhase5ShortTermMemory:
         # 清除记忆
         mem.clear()
         assert mem.load() == []
+
+    def test_memory_never_persists_window_title(self, tmp_path):
+        """#206：docstring 与实现矛盾的收口——title 参数只作签名兼容，绝不落盘。"""
+        from pet.proactive import ProactiveMemory
+
+        mem = ProactiveMemory(tmp_path / "memory.json")
+        mem.record("Code.exe", "工作汇报机密.docx - Word", "办公或看文档")
+
+        entry = mem.latest()
+        assert entry["process"] == "Code.exe"
+        assert entry["activity"] == "办公或看文档"
+        assert "title" not in entry
+        assert "机密" not in json.dumps(mem.load(), ensure_ascii=False)
+
+    def test_memory_write_goes_through_atomic_replace_with_unique_tmp(self, tmp_path, monkeypatch):
+        """#196：落盘必须 temp（名带 PID，多实例不抢同一临时文件）+ 原子替换。"""
+        from pet import proactive_memory as pm
+
+        mem_file = tmp_path / "memory.json"
+        mem = pm.ProactiveMemory(mem_file)
+        seen: list[tuple[Path, Path]] = []
+        real = pm.atomic_replace_with_retry
+
+        def spy(temp, target, attempts=5):
+            seen.append((Path(temp), Path(target)))
+            real(temp, target, attempts)
+
+        monkeypatch.setattr(pm, "atomic_replace_with_retry", spy)
+        mem.record("Code.exe", "main.py", "写代码")
+
+        assert seen, "记忆落盘必须经原子替换（不得直写最终路径）"
+        temp, target = seen[0]
+        assert target == mem_file
+        assert temp != mem_file and temp.parent == tmp_path
+        assert temp.name.endswith(".tmp") and temp != pm.lock_path_for(mem_file), \
+            f"临时文件必须同目录且不是旁路锁文件：{temp}"
+        assert json.loads(mem_file.read_text(encoding="utf-8"))["entries"][0]["process"] == "Code.exe"
+        assert list(tmp_path.glob("*.tmp")) == [], "成功路径不得残留 .tmp"
+
+    def test_memory_write_fsyncs_before_replace(self, tmp_path, monkeypatch):
+        """#204：替换前必须 fsync——否则掉电/崩溃后 rename 已生效而内容还在页缓存。"""
+        from pet import proactive_memory as pm
+
+        synced: list[int] = []
+        real_fsync = os.fsync
+
+        def spy_fsync(fd):
+            synced.append(fd)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(pm.os, "fsync", spy_fsync)
+        pm.ProactiveMemory(tmp_path / "memory.json").record("Code.exe", "main.py", "写代码")
+
+        assert synced, "落盘必须 fsync 文件描述符后再替换"
+
+    def test_memory_write_failure_is_logged_not_swallowed(self, tmp_path, monkeypatch, caplog):
+        """#196：写盘失败不得静默吞——记 warning，且旧内容完整保留、不留 .tmp。"""
+        from pet import proactive_memory as pm
+
+        mem_file = tmp_path / "memory.json"
+        old = {"entries": [{"ts": 1.0, "process": "old.exe", "activity": "上网"}]}
+        mem_file.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+
+        def deny(temp, target, attempts=5):
+            raise OSError("replace denied")
+
+        monkeypatch.setattr(pm, "atomic_replace_with_retry", deny)
+        with caplog.at_level(logging.WARNING):
+            pm.ProactiveMemory(mem_file).record("Code.exe", "main.py", "写代码")
+
+        assert "记忆" in caplog.text or "proactive" in caplog.text.lower(), \
+            "写盘失败必须留下可发现的日志，不能 except OSError: pass"
+        assert json.loads(mem_file.read_text(encoding="utf-8")) == old, \
+            "替换失败时旧内容必须完整保留（不得半写/覆盖）"
+        assert list(tmp_path.glob("*.tmp")) == [], "失败路径同样不得残留 .tmp"
+
+    def test_memory_lock_is_shared_per_path_inside_process(self, tmp_path):
+        """#196：同进程内同一路径共用一把锁——设置页清理与主动记录是两个实例。"""
+        from pet import proactive_memory as pm
+
+        path = tmp_path / "memory.json"
+        first = pm.ProactiveMemory(path)
+        second = pm.ProactiveMemory(path)
+        other = pm.ProactiveMemory(tmp_path / "other.json")
+
+        assert pm._lock_for(path) is first._lock
+        assert pm._lock_for(path) is pm._lock_for(tmp_path / "memory.json"), \
+            "同一路径必须复用同一把锁（弱引用注册表下也要稳定）"
+        assert pm._lock_for(path) is not pm._lock_for(tmp_path / "other.json")
+        assert first is not second
+
+    def test_concurrent_records_lose_no_entries(self, tmp_path, monkeypatch):
+        """#196：并发 record 的 load→改→写必须整体互斥，不得丢写。
+
+        实测口径（本机复刻同一并发模式、去掉锁）：4×10 次里只剩 10 条，且旧
+        实现的 ``except OSError: pass`` 把 tmp 抢写/替换冲突（WinError 5）全吞掉。
+        这里用 Event 同步构造真实重叠窗口（不赌 sleep），并直接断言替换过程
+        的最大并发度为 1——互斥是断言出来的，不是靠时序巧合。
+        """
+        import threading
+
+        from pet import proactive_memory as pm
+
+        mem_file = tmp_path / "memory.json"
+        writers = [pm.ProactiveMemory(mem_file, max_entries=200) for _ in range(4)]
+        real = pm.atomic_replace_with_retry
+        gate = threading.Event()
+        started = threading.Event()
+        counter = threading.Lock()
+        stats = {"calls": 0, "live": 0, "max_live": 0}
+
+        def slow_replace(temp, target, attempts=5):
+            with counter:
+                stats["calls"] += 1
+                stats["live"] += 1
+                stats["max_live"] = max(stats["max_live"], stats["live"])
+            try:
+                # 第一个进入替换的线程把写窗口撑开：给其他线程足够机会抢 load
+                if not started.is_set():
+                    started.set()
+                    gate.wait(5.0)
+                real(temp, target, attempts)
+            finally:
+                with counter:
+                    stats["live"] -= 1
+
+        monkeypatch.setattr(pm, "atomic_replace_with_retry", slow_replace)
+
+        def worker(mem, tag):
+            for i in range(10):
+                mem.record(f"{tag}.exe", "t", "上网")
+
+        threads = [threading.Thread(target=worker, args=(m, f"w{i}")) for i, m in enumerate(writers)]
+        for t in threads:
+            t.start()
+            if started.is_set():
+                gate.set()  # 窗口只开第一个线程，其余必须堵在锁上
+        for t in threads:
+            t.join(30)
+        gate.set()
+        assert all(not t.is_alive() for t in threads), "并发 record 不得死锁"
+
+        assert stats["calls"] == 40, f"每次 record 恰好一次替换，实得 {stats['calls']}"
+        assert stats["max_live"] == 1, \
+            f"读→改→写必须整体互斥，替换并发度实得 {stats['max_live']}"
+        entries = pm.ProactiveMemory(mem_file).load()
+        assert len(entries) == 40, f"4 线程 × 10 条不得丢写，实得 {len(entries)}"
 
     def test_build_memory_context(self):
         from pet.proactive import build_memory_context

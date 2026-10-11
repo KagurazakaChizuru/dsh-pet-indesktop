@@ -2195,12 +2195,19 @@ class WebMClip(QObject):
             if self._frame_count <= 0 and self._fps > 0 and self._duration > 0:
                 self._frame_count = int(round(self._fps * self._duration))
             expect = self._w * self._h * self._bpp
-            if len(frame) == expect:
-                img = QImage(frame, self._w, self._h, self._w * self._bpp,
-                             QImage.Format.Format_RGBA8888)
-                if not img.isNull():
-                    return img.copy()
-            return None
+            if len(frame) != expect:
+                # 尺寸不符是"素材与画布不同步"的第一现场，静默 return None 会让
+                # 它完全不可诊断（对齐播放侧 _process_frame 的同款 warning，#201）。
+                logger.warning('webm 首帧长度异常 %s: got=%d expect=%d',
+                               self.path, len(frame), expect)
+                return None
+            img = QImage(frame, self._w, self._h, self._w * self._bpp,
+                         QImage.Format.Format_RGBA8888)
+            if img.isNull():
+                logger.warning('webm 首帧图像为空 %s: %dx%d',
+                               self.path, self._w, self._h)
+                return None
+            return img.copy()
         except Exception as exc:
             logger.warning('webm 首帧解码失败 %s: %s', self.path, exc)
             return None

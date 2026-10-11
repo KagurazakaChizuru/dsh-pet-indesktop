@@ -551,7 +551,6 @@ def test_about_to_quit_stops_voice_chime_service(tmp_path, monkeypatch):
     owner._on_about_to_quit()
 
     assert service.is_running() is False, "退出收口必须停掉语音报时的 tick"
-    owner._dsh_state_tracker.stop()
 
 
 # ============================================================ 共享音频通道（节日语音）

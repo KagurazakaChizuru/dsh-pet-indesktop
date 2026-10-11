@@ -80,7 +80,6 @@ from .config import (
 from .library import MovieLibrary
 from .movement import body_reach, choose_move_direction, inward_facing, move_anim_tick, move_position_at_frame, quantize_move, wander_target_y
 from .predictive_prewarm import PredictivePrewarm, pick_from_pool, roll_next
-from .report_gates import REPORT_GATE_DEFAULTS
 from . import window_placement
 from . import window_screen
 from . import window_alerts
@@ -3968,26 +3967,6 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         """公开转发：切换 Agent 状态联动子项（等价 _toggle_agent_link）。"""
         self._toggle_agent_link(agent_key, on, action)
 
-    def _set_agent_link_option(self, key: str, on: bool) -> None:
-        """联动气泡提醒子项：右键菜单的 0/1 两端快捷入口。
-
-        概率门模型下（见 pet/report_gates.py），菜单只写两端值——开=1.0 全报、
-        关=0.0 静音；细粒度概率一律回设置页滑块调。键名即概率门名，写进
-        ``agent_link.report_gates``，不再产生旧的 notify_* 平铺键。
-        菜单只按 REPORT_GATE_DEFAULTS 里的门装配，非门名键直接忽略。
-        """
-        if key not in REPORT_GATE_DEFAULTS:
-            return
-        ag_data = dict(self.cfg.get('agent_link', {}))
-        gates = dict(ag_data.get('report_gates') or {})
-        gates[key] = 1.0 if on else 0.0
-        ag_data['report_gates'] = gates
-        self.cfg.set('agent_link', ag_data)
-        self.cfg.save()
-
-    def set_agent_link_option(self, key: str, on: bool) -> None:
-        """公开转发：联动气泡提醒子项开关（等价 _set_agent_link_option）。"""
-        self._set_agent_link_option(key, on)
 
     def _rename_character(self) -> None:
         """自定义当前角色的显示名（空输入 = 恢复默认目录名）。"""

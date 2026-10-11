@@ -585,14 +585,16 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
         expected_tools.append("夸克网盘下载")
     assert [action.text() for action in tools.actions() if not action.isSeparator()] == expected_tools
     # Harness 现在是子菜单（挂在既有 harness id 上，用户老布局无需迁移）：
-    # 启动 / 重启 / 停止三件套必须齐全——「停止」是用户关掉静默常驻服务的唯一入口。
+    # 启动（双目标：dsh web 界面 / 桌面端界面）+ 重启 / 停止必须齐全——
+    # 「停止」是用户关掉静默常驻服务的唯一入口。
     harness_action = next(
         action for action in tools.actions() if action.text() == "DeepSeek Harness"
     )
     harness_menu = harness_action.menu()
     assert harness_menu is not None
     assert [action.text() for action in harness_menu.actions()] == [
-        "启动并打开页面",
+        "启动 dsh web 界面",
+        "启动桌面端界面",
         "重启服务",
         "停止服务",
     ]

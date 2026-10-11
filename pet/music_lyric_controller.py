@@ -12,6 +12,10 @@
 - 播放器上报进度（QQ 音乐）→ 直接用真实 position，暂停/拖进度条都能跟随。
 - 播放器不上报（网易云、酷狗）→ 以"观察到切歌的时刻"为基准本地累加。
 
+**不是所有会话都是歌**：实测浏览器把网页视频也上报成音乐类型，所以
+``now_playing`` 按会话类型与来源做否决（明确的视频、以及关掉开关后的浏览器
+会话），被否决的会话整条链路都不参与——不显示、不取词、不唱歌。
+
 **优先级最低**：歌词气泡必须给告警/审批/交互气泡让路，且不能把自言自语顶掉
 又立刻被顶回来。做法是暂停更新 + ``hold_bubble`` 占位（与自言自语同一个让路机制）。
 
@@ -579,6 +583,17 @@ class MusicLyricController(QObject):
         self._sampling = True
         self._sample_wake.set()
 
+    def _browser_media_enabled(self) -> bool:
+        """「浏览器媒体会话参与歌词」开关（配置缺失/脏值一律按关处理）。
+
+        在采样线程上读 cfg：Config.get 只是字典取值，与 ``_cache_limit``
+        在取词线程上读配置同一个先例。关（默认）时浏览器会话不进歌词链路。
+        """
+        try:
+            return bool(self.win.cfg.get("music_browser_media_enabled", False))
+        except Exception:
+            return False
+
     def _sample_loop(self) -> None:
         """**常驻**采样线程：等信号 → 采一次 → 回报，循环直到关闭。
 
@@ -593,7 +608,10 @@ class MusicLyricController(QObject):
             if self._sample_stop.is_set():
                 break
             try:
-                playback = now_playing.get_now_playing(self._tracked_app_id)
+                playback = now_playing.get_now_playing(
+                    self._tracked_app_id,
+                    allow_browser=self._browser_media_enabled(),
+                )
             except Exception:
                 playback = None
             try:

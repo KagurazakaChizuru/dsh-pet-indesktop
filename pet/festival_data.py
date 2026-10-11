@@ -146,7 +146,24 @@ _SOLAR_TERM_FESTIVALS: tuple[Festival, ...] = _solar_term_festivals()
 #: 全量节日表（中国节日 + 24 节气 + 西方节日）。
 FESTIVALS: tuple[Festival, ...] = _CN_FESTIVALS + _SOLAR_TERM_FESTIVALS + _WEST_FESTIVALS
 
-#: id -> Festival 索引，供文案库与槽位按 id 反查。
-FESTIVALS_BY_ID: dict[str, Festival] = {f.id: f for f in FESTIVALS}
 
-assert len(FESTIVALS_BY_ID) == len(FESTIVALS), "节日 id 必须唯一"
+def _index_festivals(entries: tuple[Festival, ...]) -> dict[str, Festival]:
+    """建 id 索引并校验 id 唯一（显式异常而不是模块级 ``assert``，#202）。
+
+    ``python -O`` / ``PYTHONOPTIMIZE=1`` 会把 assert 整句删除——那时 id 重复
+    只会让后一个节日在索引里被静默覆盖，文案库与槽位按 id 反查永远查不到它
+    （节日悄悄消失，且没有任何日志）。
+    """
+    index: dict[str, Festival] = {}
+    duplicates: list[str] = []
+    for festival in entries:
+        if festival.id in index and festival.id not in duplicates:
+            duplicates.append(festival.id)
+        index[festival.id] = festival
+    if duplicates:
+        raise ValueError(f"节日 id 必须唯一，重复：{'、'.join(duplicates)}")
+    return index
+
+
+#: id -> Festival 索引，供文案库与槽位按 id 反查。
+FESTIVALS_BY_ID: dict[str, Festival] = _index_festivals(FESTIVALS)

@@ -498,7 +498,8 @@ def test_about_to_quit_cancels_provision_for_spawned_libraries(monkeypatch):
 # ---------------------------------------------------------------- app.py 拓扑分支
 def _stub_shell_start(shell, monkeypatch):
     """把 start() 里分支点之外的进程级副作用全部换成 no-op 记录器。"""
-    monkeypatch.setattr(shell._dsh_state_tracker, "start", lambda: None)
+    # DSH 读方（共享 manager 的 DshMonitor）不得真起 worker/探活线程
+    monkeypatch.setattr(shell._shared.agent_link.monitors["dsh"], "start", lambda: False)
     monkeypatch.setattr(AppShell, "_sync_dynamic_island", lambda self: None)
 
 

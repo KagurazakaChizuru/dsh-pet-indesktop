@@ -15,7 +15,7 @@
 密码类字段（``kind="secret"``）的值只写系统钥匙串（``pet/tts_secrets``），**不落
 config.json**；行提示会显示「已保存 / 未设置」与「钥匙串可用 / 仅本次运行」。
 
-风格对齐 pet/exploration_watchdog_settings.py：自含 QWidget 页，
+自含 QWidget 页，
 提供 apply_to_config，
 由 modern_settings_dialog.py 注册为侧边栏「语音」总域下的「语音报时」分组并参与
 _write_config 保存。

@@ -421,7 +421,7 @@ DeepSeek 余额显示（气泡/小部件思路）参考了 [MeteorNOX/DeepSeek-B
    ```
 4. **数据目录**：`~/Library/Application Support/dsh-pet-standalone-<变体>/`（各变体相互独立，与 Windows 行为一致）。
 5. **开机自启**：托盘/右键菜单勾选「开机自启」（按变体生成独立 LaunchAgent）。
-6. **启动 DeepSeek Harness**：需安装 Node.js（`brew install node`）；启动器会自动探测 Homebrew/nvm 等路径并回退 `npx @deepseek-ai/dsh`。
+6. **启动 DeepSeek Harness**：右键菜单的 **DeepSeek Harness** 子菜单与托盘菜单的两个启动项都提供「启动 dsh web 界面 / 启动桌面端界面」（**桌面端当前仅 Windows 支持**，macOS 上点它只会如实提示不支持，不会静默改开网页）。需安装 Node.js（`brew install node`）；启动器会自动探测 Homebrew/nvm 等路径并回退 `npx @deepseek-ai/dsh`。
 7. **关闭 Dock 图标**：在「桌宠设置 → 常规 → 显示 Dock 图标」取消勾选后，Dock 隐藏会彻底生效——隐藏桌宠也不会把 Dock 图标临时唤回；恢复入口是菜单栏托盘图标（显示 / 隐藏、鼠标穿透、桌宠设置）。开启鼠标穿透或关闭 Dock 图标时，桌宠会气泡提示恢复位置。
 
 > Intel Mac：当前 CI 只构建 arm64；Intel 用户请从源码运行（见下），或在 Intel 机器上自行构建。
@@ -447,7 +447,7 @@ DeepSeek 余额显示（气泡/小部件思路）参考了 [MeteorNOX/DeepSeek-B
 4. **数据目录**：`~/.config/dsh-pet-standalone-<变体>/`（各变体相互独立，与 Windows/macOS 行为一致）。
 5. **开机自启**：托盘/右键菜单勾选「开机自启」（写入 `~/.config/autostart/` 的 .desktop 文件）。
 6. **点击音效**：自动使用系统 `paplay`（PulseAudio）或 `aplay`（ALSA）；两者都没有时静默跳过。
-7. **启动 DeepSeek Harness**：需安装 Node.js；启动器会自动探测 PATH 并回退 `npx @deepseek-ai/dsh`。
+7. **启动 DeepSeek Harness**：右键菜单的 **DeepSeek Harness** 子菜单与托盘菜单的两个启动项都提供「启动 dsh web 界面 / 启动桌面端界面」（**桌面端当前仅 Windows 支持**，Linux 上点它只会如实提示不支持）。需安装 Node.js；启动器会自动探测 PATH 并回退 `npx @deepseek-ai/dsh`。
 
 > 建议在 X11 桌面（GNOME/KDE/Xfce 等）上使用；托盘图标依赖桌面环境的系统托盘支持（GNOME 需安装 AppIndicator 扩展）。
 
@@ -488,7 +488,7 @@ pythonw -m pet
 - 支持角色切换；角色目录按素材自动发现，不要求把角色写死在代码中。
 - 右键菜单默认使用**新版现代菜单**（紧凑分组 + 线性图标 + 半透明表面），可跟随系统/浅色/深色主题，UI 字体/字号/密度/圆角/浅深主题色均可调；「切换菜单模板」可随时切回旧版经典菜单。
 - 新版菜单首行彩蛋入口（欧鲸鲸，可配置头像/标题/图片目录）与「快捷启动」均可配置；「生小肥鱼」会启动一只独立的新桌宠（自动避让位置、配置隔离）。
-- 右键菜单与托盘菜单提供 **DeepSeek Harness** 子菜单（启动并打开页面 / 重启服务 / 停止服务）：一键后台拉起 `dsh web`（默认端口 38080，可用环境变量 `DSH_PORT` 覆盖；注：3080 在部分 Windows 上会落入 winnat/Hyper-V 保留段导致无法监听）并自动打开浏览器；启动命令自动适配不同安装方式（PATH 上的 `dsh` → node + npm 全局包 → 官方 `npx @deepseek-ai/dsh`），macOS 同样可用（.app 环境会额外探测 Homebrew/nvm 等常见目录，需装有 Node.js）。若本机已有 dsh web 在运行（38080 或官方默认 3080），直接复用并打开现有实例，不再重复拉起。首次运行时 npx 拉取组件 + dsh 自举（可能出现 npm/pnpm 安装窗口）在网络较慢时需要几分钟属正常现象，桌宠会冒泡提示启动中；想跳过首次下载可提前手动 `npm install -g @deepseek-ai/dsh`。设置中另有「随桌宠启动 dsh 服务」开关：开启后桌宠启动即自动在后台静默拉起 dsh web（只起服务，不开浏览器、不弹窗口），之后点菜单秒开页面。**「重启/停止服务」带确认框**（列出将终止的 PID 与端口）：`--no-open` 静默常驻之后没有可关闭的控制台窗口，这两个入口就是关掉它的正规方式——不必再去任务管理器杀进程。停止按「谁在监听该端口」反查进程，并核验命令行确实是 dsh web；端口被别的程序占用时**只报告、不终止**（避免误杀），macOS 因无 `/proc` 暂不支持反查（会如实报告「读不到持有它的进程」）。退出桌宠**不会**顺带停止 dsh 服务。
+- 右键菜单提供 **DeepSeek Harness** 子菜单（启动 dsh web 界面 / 启动桌面端界面 / 重启服务 / 停止服务），托盘菜单是两个平铺启动项（启动 dsh web 界面 / 启动桌面端界面）：「启动 dsh web 界面」一键后台拉起 `dsh web`（默认端口 38080，可用环境变量 `DSH_PORT` 覆盖；注：3080 在部分 Windows 上会落入 winnat/Hyper-V 保留段导致无法监听）并自动打开浏览器；启动命令自动适配不同安装方式（PATH 上的 `dsh` → node + npm 全局包 → 官方 `npx @deepseek-ai/dsh`），macOS 同样可用（.app 环境会额外探测 Homebrew/nvm 等常见目录，需装有 Node.js）。若本机已有 dsh web 在运行（38080 或官方默认 3080），直接复用并打开现有实例，不再重复拉起。首次运行时 npx 拉取组件 + dsh 自举（可能出现 npm/pnpm 安装窗口）在网络较慢时需要几分钟属正常现象，桌宠会冒泡提示启动中；想跳过首次下载可提前手动 `npm install -g @deepseek-ai/dsh`。「启动桌面端界面」打开已安装的 **DeepSeek Harness 桌面端**（当前仅 Windows 支持）：默认安装位与注册表卸载项（DisplayName / InstallLocation / DisplayIcon 都算）都会探测，已安装就直接打开，未安装会如实报错、不会悄悄改开网页；桌面端是你自己的应用，桌宠退出**不会**关掉它。设置中另有「随桌宠启动 dsh 服务」开关与「自启目标」（只影响自启这一路，菜单点哪项就起哪项）：开启后桌宠启动即按目标拉起——目标是 dsh web 时后台静默起服务（不开浏览器、不弹窗口），目标是桌面端界面时直接打开应用；**自启还要求同时开着 DSH 联动**（联动关着时 dsh web 没有消费者，不会拉起）；**关闭开关只是不再自动拉起**，已经在跑的 dsh web 要等桌宠退出或关闭 DSH 联动时才收口（唯一例外：在桌宠拉起探测期间关掉开关，那一次刚拉起的实例会被立刻收掉）；非 Windows 上「自启目标」里的桌面端项置灰并写明原因（暂不支持 ≠ 永远不支持）。**「重启/停止服务」带确认框**（列出将终止的 PID 与端口）：`--no-open` 静默常驻之后没有可关闭的控制台窗口，这两个入口就是关掉它的正规方式——不必再去任务管理器杀进程。停止按「谁在监听该端口」反查进程，并核验命令行确实是 dsh web；端口被别的程序占用时**只报告、不终止**（避免误杀），macOS 因无 `/proc` 暂不支持反查（会如实报告「读不到持有它的进程」）。退出桌宠**不会**顺带停止你自己起的 dsh 服务（桌宠自拉起的那份由退出收口负责收掉）。
 - 托盘菜单（鼠标穿透 / 开机自启）勾选状态与设置实时同步。
 
 ### 新版设置对话框
@@ -527,9 +527,7 @@ pythonw -m pet
 ### Agent 联动（默认关闭）
 
 - 内置 DSH 桥接插件（`integrations/dsh-pet-bridge`）与 Claude hooks 安装器：感知 AI Agent 状态并切换动作，支持开始干活、过程汇报、任务完成三种气泡反馈，右键 Agent 联动子菜单可独立开关。
-- **DSH 富事件状态**：thinking（思考）/ working（干活，带工具名）/ attention（需确认）/ error / idle 多态呈现，多会话按 attention > error > working > thinking > idle 聚合，子代理不抢状态；审批与提问气泡支持多问题项（气泡内多选提交），同一 Agent 的并发审批/提问按 `interaction_id` 互不覆盖。
-- **事件汇报概率门（PR #97）**：联动气泡控制从布尔开关升级为**概率门**（0.00–1.00），8 个事件聚合类别各一个滑块（默认 `activity=0.6`、其余 `1.0`）；旧开关/百分比自动迁移，右键菜单保留 0/1 两端快捷入口。概率门只管气泡这一步，检测器与原始记录链不采样。
-- **探索循环 Watchdog 控制（PR #91）**：风险分达阈值时发常驻气泡，带「自动优化（replan）/ 终止（interrupt）/ 忽略」；控制请求最长阻塞 30s，按钮回调只收气泡 + 起后台线程、结果经 Qt 信号回主线程（GUI 不阻塞），回执按相位区分文案，会话结束自动收起控制气泡。
+- **DSH 富事件状态**：thinking（思考）/ working（干活，带工具名）/ attention（需确认）/ error / idle 多态呈现，多会话按 attention > error > working > thinking > idle 聚合，子代理不抢状态；审批与提问为**纯提示常驻气泡**（引导回 DSH 界面处理），同一 Agent 的并发审批/提问按 `interaction_id` 互不覆盖。
 - **开机即按配置装配（PR #100 / #102）**：重启后已开启的 Agent 联动与主动识屏直接生效，不再需要手动展开一次菜单或开关一次设置对话框。
 - **自定义联动 Agent**：在 `config.json` 的 `agent_link.custom_agents` 里声明任意 Agent（key / 显示名 / 事件文件路径），桌宠即对其 JSONL 事件文件做只读监听，联动行为与内置 Agent 一致——不改代码即可接入任何能写本地文件的 Agent，协议详见 `docs/AGENT_LINK_PROTOCOL.md`。
 - **一键启动 DSH**：本机已在跑 dsh web（含官方 3080）时直接复用，不再拉起第二个实例；Windows 上 node/pnpm 解析覆盖 nvm-windows/nvm/fnm/Volta/scoop 等布局（PR #97 修掉「已装 pnpm 仍装不上插件」，issue #95），也可用 `pnpm_bin` 配置键手动指定 pnpm 入口。

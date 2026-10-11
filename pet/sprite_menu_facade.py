@@ -22,7 +22,7 @@ OverlayShell + 被点 sprite + 行为控制器，使**两套建造器原样复�
     on_open_modern_settings                                   → OverlayShell.open_settings_for
     on_show_balance / on_check_update / on_open_todo_panel /
     on_voice_chime_* / on_festival_*                          → AppShell（进程级服务）
-    toggle_agent_link / set_agent_link_option                 → agent_link_manager（共享 manager）
+    toggle_agent_link                                         → agent_link_manager（共享 manager）
     toggle_proactive_enabled / set_proactive_option           → proactive_watcher（共享监视器）
     trigger_golden_spin / look_at_screen / rename_character   → 壳的 sprite 等价实现（作用被点 sprite）
     install_music_lyric / _music_lyric                        → 壳的音乐（歌词）宿主
@@ -59,7 +59,6 @@ from .context_menus.menu_styles.common import (
     install_stay_open_interaction,
 )
 from .context_menus.shared import add_action as _add_action
-from .report_gates import REPORT_GATE_DEFAULTS
 
 log = logging.getLogger(__name__)
 
@@ -613,16 +612,6 @@ class SpriteMenuFacade:
         if on:
             self._bubble(f"已开启 {agent_key.upper()} 状态联动监听～", 4000)
 
-    def set_agent_link_option(self, key: str, on: bool) -> None:
-        """联动气泡提醒子项（window.py ``_set_agent_link_option`` 等价）。"""
-        if key not in REPORT_GATE_DEFAULTS:
-            return
-        ag_data = dict(self.cfg.get("agent_link", {}) or {})
-        gates = dict(ag_data.get("report_gates") or {})
-        gates[key] = 1.0 if on else 0.0
-        ag_data["report_gates"] = gates
-        self.cfg.set("agent_link", ag_data)
-        self._save()
 
     # ---------------------------------------------------------------- 音乐（歌词）宿主
     def _music_host(self):

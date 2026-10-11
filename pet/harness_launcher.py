@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
-"""一键启动 DeepSeek Harness（dsh web，默认端口 38080）。
+"""一键启动 DeepSeek Harness（dsh web 默认端口 38080；或桌面端应用）。
+
+双目标（2026-10）：``launch_harness(..., target=)`` 接受 ``"auto" | "web" |
+"desktop"``——auto 在检测到桌面端安装（NSIS per-user 默认位或注册表卸载项的
+InstallLocation / DisplayIcon）时走桌面端，否则走 web；显式 web/desktop 直通。
+桌面端探测与自动拉起**目前仅 Windows**：非 Windows 上 auto 仍解析成 web，
+显式 desktop 回报 ``unsupported``（不 Popen 目录、也不静默改开网页）。桌面端是
+用户的主力 GUI 应用：由桌宠拉起只登记不杀（退出收口只覆盖 web 服务进程）。
+
 
 启动命令解析按可靠性级联（适配不同安装方式/不同 PATH 的电脑）：
 
@@ -62,6 +70,151 @@ def _candidate_ports(port: int = DEFAULT_PORT) -> list[int]:
         if p not in ports:
             ports.append(p)
     return ports
+
+
+
+# ------------------------------------------------------------------ 桌面端
+LAUNCH_TARGETS = ("auto", "web", "desktop")
+DESKTOP_APP_NAME = "DeepSeek Harness"
+_DESKTOP_EXE_NAME = "DeepSeek Harness.exe"
+# 桌面端自动拉起**本轮只支持 Windows**：macOS 的 .app 是目录（Popen 不了），
+# Linux 无官方包。非 Windows 一律按「不支持」处理——auto 继续走 web（上游默认
+# 行为不变），显式 desktop 明确回报 unsupported；绝不让占位路径把默认拐到 desktop。
+# 在线判定用的 19387 端口候选在 pet/dsh_state.py（那边是纯逻辑，不在这里重复）。
+DESKTOP_SUPPORTED = os.name == "nt"
+
+# 注册表卸载项路径（NSIS per-user 安装写 HKCU）
+_UNINSTALL_KEY = "Software" + chr(92) + "Microsoft" + chr(92) + "Windows" + chr(92) + "CurrentVersion" + chr(92) + "Uninstall"
+
+
+def _desktop_default_exe() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or str(
+        Path.home() / "AppData" / "Local")
+    return Path(base) / "Programs" / DESKTOP_APP_NAME / _DESKTOP_EXE_NAME
+
+
+def _display_name_matches(name) -> bool:
+    """卸载项 DisplayName 是否指桌面端。
+
+    实测值带版本后缀（``DeepSeek Harness 0.2.0-rc.2``）。只比全名会让
+    **自定义安装位**（默认位不存在时的唯一一路）永远探测不到；**受约束**放宽为
+    「全名 + 空格 + 数字开头的版本号」，避免把 ``… Helper`` 之类认成桌面端。
+    """
+    n = str(name or "").strip()
+    if n == DESKTOP_APP_NAME:
+        return True
+    if not n.startswith(DESKTOP_APP_NAME):
+        return False
+    suffix = n[len(DESKTOP_APP_NAME):]
+    return suffix.startswith(" ") and suffix.strip()[:1].isdigit()
+
+
+def _strip_icon_index(value) -> str:
+    """剥掉 DisplayIcon 尾部的图标索引并去引号。
+
+    实测值形如 ``"C:\\...\\DeepSeek Harness.exe",0``；不剥索引会拼出带 ``,0``
+    的路径，``is_file()`` 永远为假。``,`` 后面不是纯数字时原样保留（文件名
+    本身也可能含逗号，如 ``a,0.exe``）。
+    """
+    v = str(value or "").strip()
+    head, sep, tail = v.rpartition(",")
+    if sep and tail.strip().lstrip("-").isdigit():
+        return head.strip().strip('"')
+    return v.strip('"')
+
+
+def _desktop_exe_from_registry() -> Path | None:
+    """注册表卸载项兜底：兼容用户自定义安装位。"""
+    if not DESKTOP_SUPPORTED:
+        return None
+    import winreg
+
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(root, _UNINSTALL_KEY) as key:
+                count = winreg.QueryInfoKey(key)[0]
+                for i in range(count):
+                    try:
+                        sub = winreg.EnumKey(key, i)
+                        with winreg.OpenKey(key, sub) as sk:
+                            def _val(name):
+                                try:
+                                    return str(winreg.QueryValueEx(sk, name)[0])
+                                except OSError:
+                                    return ""
+                            if not _display_name_matches(_val("DisplayName")):
+                                continue
+                            location = _val("InstallLocation").strip()
+                            if location:
+                                cand = Path(location) / _DESKTOP_EXE_NAME
+                                if cand.is_file():
+                                    return cand
+                            icon = _strip_icon_index(_val("DisplayIcon"))
+                            if icon:
+                                cand = Path(icon)
+                                if cand.is_file() and cand.name.lower() == _DESKTOP_EXE_NAME.lower():
+                                    return cand
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return None
+
+
+def desktop_install_path() -> Path | None:
+    """桌面端安装路径（未安装或平台不支持返回 None）。
+
+    非 Windows 直接 None——不返回 macOS ``.app``（那是目录，Popen 不了）；
+    auto 因此仍解析成 web，显式 desktop 由上层的 ``unsupported`` 兜住。
+    """
+    if not DESKTOP_SUPPORTED:
+        return None
+    default = _desktop_default_exe()
+    if default.is_file():
+        return default
+    return _desktop_exe_from_registry()
+
+
+def desktop_processes() -> list[int]:
+    """正在运行的桌面端进程 pid 列表（只读枚举；平台不支持/读不到返回 []）。"""
+    if not DESKTOP_SUPPORTED:
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        arr = (wintypes.DWORD * 4096)()
+        needed = wintypes.DWORD(0)
+        if not ctypes.windll.psapi.EnumProcesses(
+            ctypes.byref(arr), ctypes.sizeof(arr), ctypes.byref(needed),
+        ):
+            return []
+        pids: list[int] = []
+        for pid in arr[: needed.value // 4]:
+            if not pid:
+                continue
+            image = _pid_image_path(int(pid))
+            if image and Path(image).name.lower() == _DESKTOP_EXE_NAME.lower():
+                pids.append(int(pid))
+        return pids
+    except Exception:
+        logging.debug("桌面端进程枚举失败", exc_info=True)
+        return []
+
+
+def desktop_process_running() -> bool:
+    """桌面端进程是否在跑（端口探测全 miss 时的 online 旁路判定）。"""
+    return bool(desktop_processes())
+
+
+def resolve_launch_target(target: str = "auto") -> str:
+    """auto → desktop（检测到桌面端安装）否则 web；显式 web/desktop 直通。"""
+    t = str(target or "auto").strip().lower()
+    if t not in LAUNCH_TARGETS:
+        t = "auto"
+    if t == "auto":
+        return "desktop" if desktop_install_path() is not None else "web"
+    return t
 
 
 def _wrap_cmd(command: list[str]) -> list[str]:
@@ -287,6 +440,11 @@ _LAUNCHED_CHILDREN: list[subprocess.Popen] = []
 # 命令行复核身份（防 pid 复用），句柄回收则由 _LAUNCHED_CHILDREN 负责。
 _SELF_LAUNCHED_PIDS: list[int] = []
 
+# 自拉起 pid → 目标类型（"web" / "desktop"）。desktop 是用户的主力 GUI 应用：
+# 登记只为「是谁拉的」可考，退出/联动关闭收口**绝不终止** desktop（只收 web
+# 这种纯后台服务进程）——用户自己开着的应用不该被桌宠关掉。
+_SELF_LAUNCHED_KIND: dict[int, str] = {}
+
 # 登记表与子进程列表的互斥锁（G2 并发补丁）：联动关闭的收口在 daemon 线程、
 # 自动拉起在 worker 线程、正常退出在主线程——三方可能并发读写这两个列表。
 # 粒度纪律：锁只护**列表读写瞬间**（record/forget/reap/child_for/快照/spawn 登记），
@@ -304,13 +462,14 @@ def _reap_children() -> None:
                 _LAUNCHED_CHILDREN.remove(proc)
 
 
-def _record_self_launched(pid) -> None:
+def _record_self_launched(pid, kind: str = "web") -> None:
     """登记一个自拉起的 harness pid（非正整数一律忽略：宁缺勿滥）。"""
     if not isinstance(pid, int) or pid <= 0:
         return
     with _OWNERSHIP_LOCK:
         if pid not in _SELF_LAUNCHED_PIDS:
             _SELF_LAUNCHED_PIDS.append(pid)
+        _SELF_LAUNCHED_KIND[pid] = kind
 
 
 def _forget_self_launched(pid: int) -> None:
@@ -319,6 +478,7 @@ def _forget_self_launched(pid: int) -> None:
             _SELF_LAUNCHED_PIDS.remove(int(pid))
         except ValueError:
             pass
+        _SELF_LAUNCHED_KIND.pop(int(pid), None)
 
 
 def _child_for(pid: int):
@@ -369,8 +529,24 @@ def _spawn(command: list[str]) -> None:
             _record_self_launched(getattr(proc, "pid", None))
 
 
+def _spawn_desktop(exe: Path) -> None:
+    """拉起桌面端 GUI 应用（不隐藏窗口、不接管输出——它是用户的主力应用）。
+
+    登记 pid 但 kind=desktop：退出收口只读不收（见 _SELF_LAUNCHED_KIND）。
+    """
+    _reap_children()
+    proc = subprocess.Popen(
+        [str(exe)], cwd=str(exe.parent), close_fds=True,
+        env={**os.environ, "PATH": _augmented_path()},
+    )
+    if isinstance(proc, _POPEN_TYPE):
+        with _OWNERSHIP_LOCK:
+            _LAUNCHED_CHILDREN.append(proc)
+            _record_self_launched(getattr(proc, "pid", None), kind="desktop")
+
+
 def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True,
-                   cancel_check=None) -> tuple[str, str]:
+                   cancel_check=None, target: str = "auto") -> tuple[str, str]:
     """启动 harness；open_browser=True 时确保浏览器被打开。
 
     open_browser=False（随桌宠自启动场景）：只起服务不开浏览器——已有实例
@@ -388,9 +564,36 @@ def launch_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True,
     - started   已后台启动；open_browser 且命令带 --no-open 时由桌宠等待就绪后
                 打开浏览器，否则由 dsh 自己开浏览器（桌宠不重复打开）
     - aborted   cancel_check 命中：慢探测后放弃拉起（未 spawn）
-    - not-found 未找到 dsh 命令
+    - not-found 未找到 dsh 命令 / 未检测到桌面端安装（显式 target="desktop"）
+    - unsupported 平台不支持桌面端（非 Windows；info="desktop"）
     - error     启动异常（info 为异常信息）
+
+    target="desktop"（或 auto 解析为 desktop）时走桌面端：桌面端进程已在跑
+    直接返回 already（Electron 单实例，不重复拉起）；否则启动 exe，不开浏览器、
+    不就绪等待（desktop host 自报 19387，联动读方探活自会发现）。桌面端只
+    登记不杀——pet 退出/联动关闭都不会动它。非 Windows 只支持 web：auto 仍解析
+    成 web，显式 desktop 回报 unsupported（不静默回落，也不去 Popen 一个目录）。
     """
+    resolved = resolve_launch_target(target)
+    if resolved == "desktop":
+        if not DESKTOP_SUPPORTED:
+            logging.warning(
+                "本平台不支持自动拉起 DeepSeek Harness 桌面端（仅 Windows），未拉起")
+            return "unsupported", "desktop"
+        if desktop_process_running():
+            return "already", "desktop"
+        exe = desktop_install_path()
+        if exe is None:
+            logging.warning("桌面端目标未检测到安装，且显式指定 desktop，不回落 web")
+            return "not-found", "desktop"
+        if cancel_check is not None and cancel_check():
+            return "aborted", "desktop"
+        try:
+            _spawn_desktop(exe)
+        except OSError as exc:
+            return "error", str(exc)
+        logging.info("已拉起 DeepSeek Harness 桌面端：%s", exe)
+        return "started", "desktop"
     for candidate in _candidate_ports(port):
         if is_running(candidate):
             url = f"http://127.0.0.1:{candidate}"
@@ -903,6 +1106,11 @@ def _stop_self_launched_harness_inner() -> list[int]:
             )
             _forget_self_launched(pid)
             continue
+        if _SELF_LAUNCHED_KIND.get(pid) == "desktop":
+            # 桌面端是用户的主力应用：登记只为可考，收口绝不终止。
+            # 位置在「按句柄判死」**之后**：活着的 desktop 跳过终止，但用户
+            # 已经关掉的那条登记必须销掉，否则每次退出都留一条永不消费的死 pid。
+            continue
         if not is_running_pid(pid):
             _forget_self_launched(pid)
             continue
@@ -946,11 +1154,17 @@ def restart_harness(port: int = DEFAULT_PORT, *, open_browser: bool = True) -> t
     status, info = stop_harness(port)
     if status not in ("stopped", "not-running"):
         return status, info
-    return launch_harness(port, open_browser=open_browser)
+    # 同 GUI 的「重启服务」：重启的是 web 服务进程，不跟随 harness_launch_target
+    # （跟随会让装了桌面端的机器重启出桌面端，或直接报「桌面端已在运行」）。
+    return launch_harness(port, open_browser=open_browser, target="web")
 
 
-def launch_harness_gui(parent=None, action: str = "start") -> None:
+def launch_harness_gui(parent=None, action: str = "start", target: str = "auto") -> None:
     """GUI 菜单入口：探测/确认/启动/停止全部离开 GUI 线程，结果回 GUI 线程提示。
+
+    ``target``（仅 action="start" 有意义）："auto"（默认，检测到桌面端优先）/
+    "web" / "desktop"；重启/停止只作用于 web 服务进程（desktop 是用户的主力
+    应用，桌宠绝不终止它）。
 
     命令解析可能同步执行 `npm root -g`（最长 15 秒）、进程反查在 Windows 上
     跑 PowerShell `Get-CimInstance`（最长 10 秒），放在 GUI 线程会卡住界面；
@@ -987,6 +1201,12 @@ def launch_harness_gui(parent=None, action: str = "start") -> None:
         status = result.get("status")
         info = result.get("info", "")
         if status in ("already", "started"):
+            if info == "desktop":
+                if status == "started":
+                    _bubble("正在启动 DeepSeek Harness 桌面端……")
+                else:
+                    _bubble("DeepSeek Harness 桌面端已在运行。")
+                return
             if status == "started":
                 # 首次运行 npx 拉包 + dsh 自举可能要几分钟，不给反馈用户会以为没反应
                 _bubble("正在后台启动 dsh web（首次运行需下载组件，可能要几分钟），就绪后会自动打开浏览器……")
@@ -1004,7 +1224,23 @@ def launch_harness_gui(parent=None, action: str = "start") -> None:
                 "端口被一个不是 dsh 的进程占用，为避免误杀已放弃操作。\n\n" + info,
             )
             return
+        if status == "unsupported":
+            QMessageBox.warning(
+                parent,
+                "启动 DeepSeek Harness",
+                "当前系统暂不支持自动拉起桌面端界面（本版本仅 Windows 支持）。\n"
+                "请改用「启动 dsh web 界面」。",
+            )
+            return
         if status == "not-found":
+            if info == "desktop":
+                QMessageBox.warning(
+                    parent,
+                    "启动 DeepSeek Harness",
+                    "未检测到 DeepSeek Harness 桌面端安装。\n"
+                    "可先装桌面端，或改用「启动 dsh web 界面」。",
+                )
+                return
             QMessageBox.warning(
                 parent,
                 "启动 DeepSeek Harness",
@@ -1020,8 +1256,11 @@ def launch_harness_gui(parent=None, action: str = "start") -> None:
             # 反查（PowerShell 最长 10s）在 worker 线程跑；确认框经
             # singleShot 回 GUI 线程弹出，worker 用 Event 等答复——
             # GUI 全程不被阻塞。
+            # 局部名必须避开参数 ``target``（拉起目标）：同名会让 start 分支
+            # 里的 ``target=target`` 读到未绑定的局部变量（UnboundLocalError
+            # 被下方 except 吞成 error，所有「启动」入口静默失败）。
             try:
-                target = describe_harness_process()
+                found = describe_harness_process()
             except Exception as exc:
                 result["status"], result["info"] = "error", str(exc)
                 QTimer.singleShot(0, bridge, _show)
@@ -1032,7 +1271,7 @@ def launch_harness_gui(parent=None, action: str = "start") -> None:
             def _ask() -> None:
                 try:
                     confirmed["ok"] = _confirm_harness_stop(
-                        parent, target, restart=(action == "restart"))
+                        parent, found, restart=(action == "restart"))
                 except Exception as exc:  # 父窗口销毁/对话框构造失败
                     confirmed["error"] = exc
                 finally:
@@ -1053,11 +1292,14 @@ def launch_harness_gui(parent=None, action: str = "start") -> None:
             elif action == "restart":
                 status, info = stop_harness()
                 if status in ("stopped", "not-running"):
-                    status, info = launch_harness()
+                    # 重启的是**服务**（web 进程），与 target 无关：否则机器上装了
+                    # 桌面端时，「重启服务」会去起桌面端（或在桌面端已运行时直接
+                    # 报「已在运行」），服务再也起不来。
+                    status, info = launch_harness(target="web")
                 elif status == "not-ours":
                     pass  # 端口被别人占着：不启动第二个实例，把原因报给用户
             else:
-                status, info = launch_harness()
+                status, info = launch_harness(target=target)
         except Exception as exc:  # 线程内任何异常都要反馈，不能静默
             status, info = "error", str(exc)
         result["status"], result["info"] = status, info

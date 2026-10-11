@@ -56,7 +56,6 @@ from .session_watcher import install_session_watcher
 from .decode_fanout import DecodeFanoutHub
 from .todo_reminder import TodoReminderService
 from .voice_chime_service import VoiceChimeService
-from .dsh_state import DshStateTracker
 from .persona_phrases import PhrasePicker
 
 
@@ -1159,13 +1158,6 @@ class AppShell:
         # D4：overlay 拓扑单实例进程门（由 main() 抢到后传入；legacy 拓扑恒为
         # None）。释放挂在会话结束路径（_on_session_end）与 main() 的 finally。
         self._overlay_gate = overlay_gate
-        self._dsh_state_tracker = DshStateTracker(config.dir)
-        # 订阅 DSH 统一状态（d04fc10 曾接线，post-merge 重构时丢失，本分支恢复）：
-        # 收敛出的 thinking → 联动管线补 legacy 没有的思考气泡/对话开始反应；
-        # offline → 收掉已失效的常驻审批/问题气泡。真人消息经 user_message
-        # 信号做与状态边沿竞态解耦的稳定触发。
-        self._dsh_state_tracker.state_changed.connect(self._on_dsh_state_changed)
-        self._dsh_state_tracker.user_message.connect(self._on_dsh_user_message)
         self._balance_timer = QTimer()
         self._balance_timer.timeout.connect(self.show_balance)
         self._update_bridge = None
@@ -1233,6 +1225,11 @@ class AppShell:
         from .multi_window_shared import SharedSubsystems
 
         self._shared = SharedSubsystems(self)  # 4.4b：常开化（T6）
+        # 订阅 DSH 统一状态（单读方合并后由共享 Agent 联动管理器转发；收敛逻辑
+        # 是 pet/dsh_state.py 的纯函数，读方是 DshMonitor 自己）：
+        # thinking/attention 注入与 offline 交互收口在管理器内部完成，这里只
+        # 驱动灵动岛的 agent 活跃指示。
+        self._shared.agent_link.dsh_state_changed.connect(self._on_dsh_state_changed)
         _LIVE_SHELLS.add(self)
 
     @property
@@ -1530,34 +1527,17 @@ class AppShell:
         # 故必须连带同步通道生命周期（关掉节日语音后若报时也关，通道应释放）。
         self._sync_chime_service()
 
-    # ------------------------------------------------------------ DSH 状态跟踪
+    # ------------------------------------------------------------ DSH 联动门
     def _dsh_tracker_wanted(self) -> bool:
-        """DSH 状态跟踪器的功能门：``agent_link.dsh``（默认关）。
+        """DSH 联动的功能门：``agent_link.dsh``（默认关）。
 
-        跟踪器读的是 DSH 桥接插件写的事件文件、探的是 DSH 端口，输出经
-        ``_on_dsh_state_changed`` / ``_on_dsh_user_message`` 只喂 DSH 联动管线
-        （``notify_dsh_state`` 在 DSH 监视器未运行时直接 no-op）；桥接插件本身也
-        只在开启 DSH 联动时安装（``DshMonitor.install_bridge``，关联动即卸载）。
-        联动没开时它 3s 一轮探端口、1.2s 一轮读桥目录，全是空转。
+        联动开启时桥接插件才安装（``DshMonitor.install_bridge``，关联动即卸载）、
+        DshMonitor（桥目录唯一读方：信号分派 + dsh_state 收敛器共用一份解析）
+        才由 ``AgentLinkManager.apply_config`` 拉起；联动没开时它 3s 探端口、
+        1.5s 读桥目录全是空转。本方法是该门的单一口径，harness 自启/收口也复用它。
         """
         agent_cfg = self.config.get("agent_link", {})
         return bool(agent_cfg.get("dsh", False)) if isinstance(agent_cfg, dict) else False
-
-    def _sync_dsh_state_tracker(self) -> None:
-        """按功能门启停 DSH 状态跟踪器（幂等；启动与设置保存链共用）。
-
-        门开 → ``start()``（幂等，已在跑则 no-op）；门关 → ``stop()``（停两张表
-        + 作废在途探测）。开关变动经 ``_apply_external_config_change`` 到达
-        （设置页保存走它；右键菜单改 ``agent_link.dsh`` 落盘后由 config watcher
-        收敛到同一入口）。
-        """
-        tracker = getattr(self, "_dsh_state_tracker", None)
-        if tracker is None:
-            return
-        if self._dsh_tracker_wanted():
-            tracker.start()
-        else:
-            tracker.stop()
 
     # ------------------------------------------------------------ 设置进程隔离
     def _apply_external_config_change(self) -> None:
@@ -1583,8 +1563,8 @@ class AppShell:
         self._sync_chime_service()
         self._sync_festival_service()
         # 外部配置变更也可能改了 agent_link.dsh（右键菜单开关落盘后同样收敛到
-        # 这里）→ DSH 状态跟踪器按功能门同步启停。
-        self._sync_dsh_state_tracker()
+        # 这里）→ 各窗 refresh_pet_settings 链里的 manager.apply_config 会按
+        # 同一功能门启停 DshMonitor（桥目录唯一读方）。
         # 联动被关掉 → 桌宠自拉起的 dsh web 立即收口：它唯一的消费者就是这条
         # 联动管线，关掉后留着只是常驻内存。顺序放在跟踪器停表之后（先停探测再
         # 停服务，免得跟踪器在服务消失的那一刻又报一轮 offline）；只动自拉起
@@ -1932,9 +1912,6 @@ class AppShell:
         if not self._on_about_to_quit_connected:
             self.app.aboutToQuit.connect(self._on_about_to_quit)
             self._on_about_to_quit_connected = True
-        # DSH 状态跟踪器按功能门懒启（agent_link.dsh，默认关）：它的全部输出只
-        # 喂 DSH 联动管线，联动没开时 3s 端口探测 + 1.2s 桥目录轮询纯空转。
-        self._sync_dsh_state_tracker()
         character_id = str(self.config.get('character', catalog.DEFAULT_CHARACTER))
         logging.info('当前形象: %s', character_id)
         # 拓扑分流（T5/4.1a）：PET_RENDER_TOPOLOGY=overlay（dev flag，唯一
@@ -2112,15 +2089,21 @@ class AppShell:
             self.instance._create_ui(character_id)
 
     def _maybe_autostart_harness(self) -> None:
-        """「随桌宠启动 dsh 服务」：主窗就绪后拉起 dsh web（只起服务，全程静默）。
+        """「随桌宠启动 dsh 服务」：主窗就绪后按 ``harness_launch_target`` 拉起。
 
-        机器级语义：仅主窗就绪时调度一次（进程内新窗不重复触发）；本机已有
-        实例（含官方默认 3080）则跳过。静默 = CREATE_NO_WINDOW 隐藏控制台 +
-        launch_harness(open_browser=False) 不开浏览器，无任何弹窗。
+        目标是 dsh web 时全程静默（CREATE_NO_WINDOW 隐藏控制台 +
+        open_browser=False，不开浏览器、无弹窗）；目标是桌面端界面时直接打开
+        桌面端应用（用户的主力应用，桌宠退出**不会**关它）。
+
+        「本机已有实例」的判定交给 ``launch_harness`` 自己做：它同时会看 web
+        端口候选与桌面端单实例；在这里按 web 端口提前 return，会把用户选的
+        桌面端/auto 目标一起挡掉（桌面端根本不上那个端口）。
+
+        机器级语义：仅主窗就绪时调度一次（进程内新窗不重复触发）。
 
         门控见 ``_harness_autostart_wanted``（本批收紧：DSH 联动没开不拉）。
-        注：``launch_harness`` 本身不带门——菜单「启动并打开页面」是用户明示
-        动作，必须照常可用。
+        注：``launch_harness`` 本身不带门——菜单「启动 dsh web 界面 / 启动桌面端
+        界面」是用户明示动作，必须照常可用。
         """
         if not self._harness_autostart_wanted():
             return
@@ -2135,15 +2118,16 @@ class AppShell:
                     return
                 if not self._harness_autostart_wanted():
                     return
-                if any(harness_mod.is_running(p) for p in harness_mod._candidate_ports()):
-                    return
-                if not self._harness_autostart_wanted() or getattr(self, "_quitting", False):
-                    return
                 harness_mod.launch_harness(
                     open_browser=False,
+                    target=str(self.config.get("harness_launch_target", "auto")),
+                    # 探测期间一切「用户已经不想要了」的状态都要能中止拉起：
+                    # 退出/会话结束之外，还要算上开关或联动被关——desktop 目标下
+                    # 这一步的代价是弹出一个用户刚说不想要的 GUI 窗口。
                     cancel_check=lambda: (
                         getattr(self, "_quitting", False)
                         or getattr(self, "_session_end_done", False)
+                        or not self._harness_autostart_wanted()
                     ),
                 )
                 if getattr(self, "_session_end_done", False):
@@ -2167,13 +2151,13 @@ class AppShell:
            这个单一口径）。
 
         第 3 条是本批的收紧。dsh web 的真实消费者只有 DSH 联动这一条管线：
-        桥接插件只在开启联动时安装（关闭时卸载）、``DshMonitor`` 只在联动开启时
-        运行、``DshStateTracker`` 也按同一个门前述停表——联动没开时它没有任何
+        桥接插件只在开启联动时安装（关闭时卸载）、``DshMonitor``（桥目录唯一
+        读方，状态收敛也并入了它）只在联动开启时运行——联动没开时它没有任何
         消费者，只是一个常驻的 node.exe（实机 41.9MB）。旧口径只看前两条，
         于是"联动全关 + 开了自启"的用户白烧一份内存。
 
         复用 ``_dsh_tracker_wanted`` 而不是就地再读一遍 config：同一个功能门在两处
-        各自实现，早晚会漂移（跟踪器跟联动走、服务不跟）。
+        各自实现，早晚会漂移（监视器跟联动走、服务不跟）。
         """
         if not self.enable_chat:
             return False
@@ -2215,48 +2199,14 @@ class AppShell:
             logging.exception("停止自拉起的 dsh 服务失败")
             return []
 
-    # ------------------------------------------------------------ DSH 状态接线
-    def _dsh_link_manager(self):
-        """当前主窗的 Agent 联动管理器（无窗/未创建时为 None）。
-
-        overlay 拓扑经 ``self.win`` 拿到 sprite 壳，返回的是壳持有的**同一个**
-        共享 agent_link（AppShell.start() 注入的那份），DSH 离线收口照常生效。
-        """
-        win = self.win
-        if win is None:
-            return None
-        return getattr(win, "agent_link_manager", None)
-
     def _on_dsh_state_changed(self, from_state: str, to_state: str) -> None:
-        """订阅 DSH 统一状态变化（d04fc10 原设计，post-merge 丢失后恢复）。
-
-        - offline：DSH 断开/重启，审批/问题等阻塞交互必然失效，收掉常驻气泡；
-        - thinking：legacy AgentStatus 基线只有 working/idle（bridge 设计），
-          thinking 由 dsh_state 收敛后经联动管线补思考气泡/动画——对话开始的
-          稳定触发点之一（与真人消息双保险，呈现管线自带同态去重）。
+        """订阅 DSH 统一状态变化（共享 Agent 联动管理器转发；收敛器是纯逻辑，
+        读方是 DshMonitor 自身）。AppShell 侧只剩灵动岛的 agent 活跃指示——
+        thinking/attention 注入联动管线与 offline 收口常驻气泡都在管理器内部完成。
         """
         island = getattr(self, "island", None)
         if island is not None and shiboken6.isValid(island):
             island.set_agent_active(to_state in ("working", "thinking"))
-        if to_state == "offline":
-            alm = self._dsh_link_manager()
-            if alm is not None and hasattr(alm, "dismiss_all_interactions"):
-                alm.dismiss_all_interactions()
-            return
-        if to_state == "thinking":
-            alm = self._dsh_link_manager()
-            if alm is not None:
-                alm.notify_dsh_state("thinking")
-
-    def _on_dsh_user_message(self, session_id: str, text: str) -> None:
-        """真人消息 = 对话开始：与状态边沿竞态解耦的稳定触发点。
-
-        sourceKind 过滤已在 dsh_state 完成——只有真人输入（含旧版桥接记录
-        无字段的兼容）发本信号；agent.inject() 注入上下文不会到这里。
-        """
-        alm = self._dsh_link_manager()
-        if alm is not None:
-            alm.notify_dsh_state("thinking")
 
     # ------------------------------------------------------------ 退出收口
     def _on_about_to_quit(self) -> None:
@@ -2371,10 +2321,6 @@ class AppShell:
         # 节日提醒同为进程级懒服务，退出必须一并停（理由同 voice_chime_service）。
         if self.festival_service is not None:
             self.festival_service.stop()
-        try:
-            self._dsh_state_tracker.stop()
-        except Exception:
-            logging.exception("退出时停止 DSH 状态跟踪器失败")
         # 退出收口：停掉本进程自拉起的 dsh web（父进程退出不带走 CREATE_NO_WINDOW
         # 的子进程，实机确认桌宠退出后 node 仍活着——只能由宿主自己收）。
         # 只杀自拉起登记表里且命令行复核通过的那个：用户手动起的实例不受影响。
@@ -3630,7 +3576,8 @@ class AppShell:
         menu.addSeparator()
         if self.enable_chat:
             menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
-            menu.addAction('启动 DeepSeek Harness', lambda: launch_harness_gui(win))
+            menu.addAction('启动 dsh web 界面', lambda: launch_harness_gui(win, target="web"))
+            menu.addAction('启动桌面端界面', lambda: launch_harness_gui(win, target="desktop"))
         else:
             # 纯桌宠版本不提供本地 DSH 启动入口，只保留网页版入口
             menu.addAction('打开网页版 DeepSeek', open_deepseek_web)
