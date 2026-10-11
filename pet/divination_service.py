@@ -16,9 +16,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import random
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 
 from .divination import (
     DEFAULT_DIVINATION_CONFIG,
@@ -27,10 +30,64 @@ from .divination import (
     normalize_divination_config,
     speech_text,
     speech_title,
+    total_sticks,
 )
 from .divination_quotes import ANIMATION_CANDIDATES
 
 logger = logging.getLogger(__name__)
+
+#: 本机抽签记录的文件名（放 config 目录，**不进仓库**）。
+_HISTORY_NAME = "divination-history.jsonl"
+
+
+def history_file(config_dir) -> Path | None:
+    """抽签记录文件路径（拿不到 config 目录时返回 ``None``）。"""
+    if not config_dir:
+        return None
+    return Path(config_dir) / _HISTORY_NAME
+
+
+def last_record(config_dir) -> dict | None:
+    """读记录里的最后一条（设置页「最近抽到」用——设置跑在独立进程，只能走文件）。"""
+    path = history_file(config_dir)
+    if path is None or not path.exists():
+        return None
+    try:
+        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+            if line.strip():
+                return json.loads(line)
+    except Exception:
+        logger.exception("抽签记录读取失败")
+    return None
+
+
+def desktop_dir() -> Path | None:
+    """她的真桌面目录。
+
+    优先读注册表 ``User Shell Folders`` 的 Desktop（她这台被 360 搬到了 `H:\\360MoveData\\...`，
+    `~\\Desktop` 只是个空壳），拿不到再退 `~\\Desktop`。
+    """
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "Desktop")
+            path = Path(os.path.expandvars(str(value)))
+            if path.is_dir():
+                return path
+    except Exception:
+        pass
+    fallback = Path.home() / "Desktop"
+    return fallback if fallback.is_dir() else None
+
+
+def _fallback_sound() -> Path | None:
+    """内置摇签音效（`assets/sounds/start.wav`）——`resolve_builtin_sound` 认不出来时的兜底。"""
+    path = Path(__file__).resolve().parent.parent / "assets" / "sounds" / "start.wav"
+    return path if path.exists() else None
 
 
 class DivinationService:
@@ -41,6 +98,8 @@ class DivinationService:
     def __init__(self, app) -> None:
         self._app = app
         self._cfg: dict = dict(DEFAULT_DIVINATION_CONFIG)
+        # 第四轮：一轮之内不重复抽到同一支（抽满整副自动开新一轮）。
+        self._drawn: set[int] = set()
 
     # ------------------------------------------------------------ 配置
     def apply_config(self) -> None:
@@ -49,6 +108,10 @@ class DivinationService:
 
     def config(self) -> dict:
         return dict(self._cfg)
+
+    def drawn_this_round(self) -> int:
+        """本轮已抽到的支数（用例与调试用）。"""
+        return len(self._drawn)
 
     # ------------------------------------------------------------ 对外入口
     def draw_now(self, rng: random.Random | None = None, *, speak: bool | None = None,
@@ -62,13 +125,83 @@ class DivinationService:
         """
         self.apply_config()
         today = day or date.today()
-        stick = draw(rng)
+        if len(self._drawn) >= total_sticks():   # 整副抽完 → 开新一轮
+            self._drawn.clear()
+        stick = draw(rng, exclude=self._drawn)
+        self._drawn.add(int(stick["no"]))
         self._animate()
+        self._sound()
         self._bubble(bubble_text(stick, today), stick)
         want_speak = self._cfg.get("speak", True) if speak is None else speak
         if want_speak:
             self._speak(speech_text(stick, today))
+        self._record(stick)
+        if str(stick.get("level")) == "上上":
+            self._save_card(stick)
         return stick
+
+    # ------------------------------------------------------------ 摇签音效
+    def _sound(self) -> None:
+        """摇签的这一下给个声响（复用点击音效的播放器与音量，不新增通道）。
+
+        受「摇签动作」开关与「点击音效」总开关/音量约束——她本来就用小黄鸭那套音效包，
+        风格一致；任一不可用就安静跳过。
+        """
+        if not self._cfg.get("animation", True):
+            return
+        config = getattr(self._app, "config", None)
+        getter = getattr(config, "get", None)
+        if callable(getter) and not bool(getter("click_sound_enabled", True)):
+            return
+        try:
+            from . import click_sound
+
+            source = click_sound.resolve_builtin_sound("start") or _fallback_sound()
+            if source is None:
+                return
+            volume = float(getter("click_sound_volume", 1.0)) if callable(getter) else 1.0
+            click_sound.play_click_sound(source, volume=volume)
+        except Exception:
+            logger.exception("抽签音效播放失败")
+
+    # ------------------------------------------------------------ 抽签记录
+    def _record(self, stick: dict) -> None:
+        """把这一签追加到本机记录（`<config.dir>/divination-history.jsonl`，best-effort）。
+
+        记录只在本机、进不了仓库；设置页「最近抽到」读同一个文件（设置跑在独立进程里，
+        所以走文件而不是内存）。
+        """
+        path = history_file(self._history_dir())
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps({
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "no": int(stick["no"]),
+                "level": str(stick["level"]),
+            }, ensure_ascii=False)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except Exception:
+            logger.exception("抽签记录写入失败")
+
+    def _history_dir(self):
+        config = getattr(self._app, "config", None)
+        return getattr(config, "dir", None)
+
+    # ------------------------------------------------------------ 上上签卡
+    def _save_card(self, stick: dict) -> None:
+        """抽到上上时落一张签卡到她的真桌面（best-effort，失败只记日志）。"""
+        try:
+            from .divination_card import render_card
+
+            target_dir = desktop_dir()
+            if target_dir is None:
+                return
+            render_card(stick, target_dir / f"签卡-第{int(stick['no'])}签-{date.today().isoformat()}.png")
+        except Exception:
+            logger.exception("上上签卡生成失败")
 
     # ------------------------------------------------------------ 摇签动作
     def _animate(self) -> None:

@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
-"""设置页「互动 · 抽签」域的控件与行（本模块构建，``modern_settings_dialog`` 只留接线）。
+"""设置页「趣味 · 抽签」域的控件与行（本模块构建，``modern_settings_dialog`` 只留接线）。
 
 与 ``settings_file_interpret`` 同口径：
 
 * 控件在 :func:`create_divination_controls` 里建好并挂到对话框属性上
-  （``dialog.divination_speak_check`` / ``dialog.divination_animation_check``），
-  初值从 config 读；
-* 行在 :func:`build_divination_rows` 里构建，由 ``settings_interaction`` 挂进
-  「互动」域的「抽签」标签；
+  （两个开关 + 今日穿色预览 + 最近抽到预览），初值/内容从 config 与记录文件读；
+* 行在 :func:`build_divination_rows` / :func:`build_daily_color_rows` 里构建，
+  由 :func:`build_divination_page` 组装成「趣味」域整页（两节）；
 * 落盘在 :func:`save_divination_settings` 里做，被 ``_write_config`` 调用一行。
 
 **只有两个开关、没有任何个人信息**——这是它与已归档的占星功能最大的区别
@@ -20,12 +19,21 @@ from datetime import date
 
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from . import almanac
+from . import almanac, divination_service
 from .settings_widgets import SettingRow, SettingsSection, ToggleSwitch
 
 
+def last_draw_text(config_dir) -> str:
+    """「最近抽到」的展示文本（读本机记录文件的最后一条）。"""
+    record = divination_service.last_record(config_dir)
+    if not record:
+        return "还没抽过。抽一支之后这里会记一笔（只存本机）。"
+    stamp = str(record.get("ts", "")).replace("T", " ")
+    return f"第 {record.get('no', '?')} 签 · {record.get('level', '?')}　（{stamp}）"
+
+
 def create_divination_controls(dialog) -> None:
-    """建两个开关与「今日穿色」预览标签并挂到对话框上（幂等：重复调用不重建）。"""
+    """建开关与两个预览标签并挂到对话框上（幂等：重复调用不重建）。"""
     if getattr(dialog, "divination_speak_check", None) is None:
         dialog.divination_speak_check = ToggleSwitch(dialog)
     if getattr(dialog, "divination_animation_check", None) is None:
@@ -35,6 +43,11 @@ def create_divination_controls(dialog) -> None:
         label.setObjectName("divinationColorPreview")
         label.setWordWrap(True)
         dialog.divination_color_label = label
+    if getattr(dialog, "divination_last_label", None) is None:
+        label = QLabel(dialog)
+        label.setObjectName("divinationLastDraw")
+        label.setWordWrap(True)
+        dialog.divination_last_label = label
     config = getattr(dialog, "config", None)
     getter = getattr(config, "get", None)
     speak = True if not callable(getter) else bool(getter("divination_speak", True))
@@ -43,6 +56,7 @@ def create_divination_controls(dialog) -> None:
     dialog.divination_animation_check.setChecked(animation)
     # 预览随打开设置的那一天刷新（同日多次打开内容一致）。
     dialog.divination_color_label.setText(almanac.detail_line(date.today()))
+    dialog.divination_last_label.setText(last_draw_text(getattr(config, "dir", None)))
 
 
 def build_divination_rows(dialog) -> list[SettingRow]:
@@ -58,9 +72,16 @@ def build_divination_rows(dialog) -> list[SettingRow]:
         SettingRow(
             "divination_animation",
             "摇签动作",
-            "抽签时请角色动一下（在当前角色的动作池里挑一个合适的；"
+            "抽签时请角色动一下，并配上一下摇签音效（音量与总开关跟随「点击与音效」那一套；"
             "动作池里没有合适的动作就安静跳过，不会出错）。",
             dialog.divination_animation_check,
+        ),
+        SettingRow(
+            "divination_last_draw",
+            "最近抽到",
+            "只记在本机（`divination-history.jsonl`），不进仓库。抽到「上上」时会另落一张签卡到桌面。",
+            dialog.divination_last_label,
+            stacked=True,
         ),
     ]
 
@@ -80,7 +101,18 @@ def build_daily_color_rows(dialog) -> list[SettingRow]:
 
 
 def build_divination_page(dialog) -> QWidget:
-    """「趣味」域整页：两节——抽签 / 今日穿色（挂到域导航，见 ``_rebuild_domain_navigation``）。"""
+    """「趣味」域整页：两节——抽签 / 今日穿色（挂到域导航，见 ``_rebuild_domain_navigation``）。
+
+    每次重建页面都把两个预览刷新一遍（黄历行按当天、最近抽到按记录文件最后一条）。
+    """
+    config = getattr(dialog, "config", None)
+    config_dir = getattr(config, "dir", None)
+    label = getattr(dialog, "divination_color_label", None)
+    if label is not None:
+        label.setText(almanac.detail_line(date.today()))
+    last = getattr(dialog, "divination_last_label", None)
+    if last is not None:
+        last.setText(last_draw_text(config_dir))
     content = QWidget(dialog)
     layout = QVBoxLayout(content)
     layout.setContentsMargins(0, 0, 0, 0)

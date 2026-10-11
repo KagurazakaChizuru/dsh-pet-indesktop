@@ -51,17 +51,32 @@ def _pools() -> dict[str, tuple[dict, ...]]:
     return {level: tuple(items) for level, items in pools.items()}
 
 
-def draw(rng: random.Random | None = None) -> dict:
+def draw(rng: random.Random | None = None, exclude: object = ()) -> dict:
     """抽一支签：先按权重定吉凶，再在该档里均匀取一支。
 
     ``rng`` 可注入（用例用 ``random.Random(seed)`` 断言确定结果）；不传就走系统熵。
+
+    ``exclude`` ＝**这一轮已经抽到过的签号**（第四轮加：她反馈"完善"缺的一环——连着抽几把
+    撞到同一支体验差）。排除后某一档空了，该档就不参与加权；整副签都抽完了，
+    ``exclude`` 自动作废（开新一轮），调用方不用自己判。
     """
     picker = rng if rng is not None else random.Random()
+    drawn = {int(no) for no in exclude} if exclude else set()
     pools = _pools()
+    if drawn:
+        filtered = {level: tuple(s for s in items if int(s["no"]) not in drawn)
+                    for level, items in pools.items()}
+        if any(filtered.values()):
+            pools = filtered
     levels = [level for level in quotes.LEVELS if pools.get(level)]
     weights = [quotes.LEVEL_WEIGHTS.get(level, 1) for level in levels]
     level = picker.choices(levels, weights=weights, k=1)[0]
     return dict(picker.choice(pools[level]))
+
+
+def total_sticks() -> int:
+    """签库总数（服务层用它判断一轮是否抽完）。"""
+    return len(quotes.STICKS)
 
 
 def stick_title(stick: dict) -> str:

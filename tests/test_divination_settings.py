@@ -24,7 +24,7 @@ EXPECTED_SIDEBAR = [
     "常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新",
 ]
 DOMAIN_TITLE = "趣味"
-ROWS = ("divination_speak", "divination_animation", "divination_daily_color")
+ROWS = ("divination_speak", "divination_animation", "divination_last_draw", "divination_daily_color")
 
 
 def _qapp():
@@ -73,6 +73,25 @@ def test_fun_domain_has_two_sections_and_three_rows(dialog):
         row = _row(dialog, key)
         assert page.isAncestorOf(row), f"{key} 必须落在「趣味」域页里"
         assert row.isVisibleTo(page) is True, f"{key} 在「趣味」域里不可见"
+
+
+def test_last_draw_preview_reads_the_local_record(dialog):
+    """「最近抽到」是只读预览：没抽过时给一句说明，有记录时显示签号与时间。"""
+    from pet.modern_settings_dialog import QLabel
+
+    preview = dialog.findChild(QLabel, "divinationLastDraw")
+    assert preview is not None, "缺少「最近抽到」预览标签"
+    assert "还没抽过" in preview.text(), preview.text()
+
+    # 造一条记录再重建页面 → 预览应显示它（记录文件就在这个 tmp 配置目录里）
+    history = dialog.config.dir / "divination-history.jsonl"
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text('{"ts": "2026-10-10T22:00:00", "no": 25, "level": "上上"}\n', encoding="utf-8")
+    dialog._rebuild_domain_navigation()
+    labels = [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())]
+    page = dialog.pages.widget(labels.index(DOMAIN_TITLE))
+    refreshed = page.findChild(QLabel, "divinationLastDraw")
+    assert refreshed is not None and "第 25 签 · 上上" in refreshed.text()
 
 
 def test_daily_color_preview_shows_today(dialog):

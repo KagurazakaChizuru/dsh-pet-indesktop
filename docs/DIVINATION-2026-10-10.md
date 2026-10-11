@@ -133,21 +133,41 @@ dsh-pet 设置里的位置：**侧栏一级域「趣味」**（在「文件识�
 
 改 `pet/divination_quotes.py` 的 `STICKS`：
 
-* **只追加，不改号**：号一旦发出去就是"她抽到过的那支"，改内容等于改历史；
+* **只追加，不改号**：号一旦发出去就是"她抽到过的那支"，改内容等于改历史（2026-10-10 第四轮
+  从 24 扩到 **48** 就是这么加的：新增 25–48，旧 1–24 一字未动）；
 * 每支必须有：`no`（连续编号）/ `level`（四档之一）/ `poem`（**两句**）/ `plain`（**≤14 字**）/
   `good` / `bad`；
-* 加档位或改权重：改 `LEVELS` / `LEVEL_WEIGHTS`（`tests/test_divination.py` 会按档位数量与
-  分布断言，改完同步那个用例）；
-* 想扩到 64/100 签：纯加数据，代码不用动；
+* 加档位或改权重：改 `LEVELS` / `LEVEL_WEIGHTS`（`tests/test_divination.py` 按档位数量与
+  分布断言，改完同步那个用例；当前 48 支＝上上 4 / 上 8 / 中平 26 / 下 10）；
 * **白话解别与宜忌重复**（第 16 签曾写成「看长线，别贪小利」而宜忌正是「看长线/抢小利」，
   已改成「这件事值得再等一轮」——同一句说两遍就是拖沓）。
+
+## 七之二、第四轮：一轮不重复 / 记录 / 摇签音效 / 上上签卡（2026-10-10）
+
+她一句「抽签功能现在还是不完善」之后，按清单补了四件（外加签库扩到 48）：
+
+1. **一轮之内不重复**：`draw(rng, exclude=…)` 排除已抽过的签号（某档排空则该档不参与加权；
+   整副抽完自动开新一轮）。服务层 `DivinationService._drawn` 记本轮集合，`drawn_this_round()`
+   可查——这是"连抽几把撞到同一支"的直接解法。
+2. **本机抽签记录**：每签追加一行到 `<config.dir>/divination-history.jsonl`
+   （`{ts, no, level}`，best-effort，失败只记日志）；设置页新增只读行 **「最近抽到」**
+   （`settingRow_divination_last_draw` / 控件 `divinationLastDraw`）——设置跑在独立进程，
+   所以读**文件最后一条**（`divination_service.last_record`）。
+3. **摇签音效**：复用点击音效的播放器与音量（`click_sound.play_click_sound` + 内置
+   `assets/sounds/start.wav`），受「摇签动作」开关与点击音效总开关/音量约束，
+   **不新增通道、不新增配置键**。
+4. **上上签卡**：抽到「上上」（4%）时用 PIL 落一张签卡 PNG 到她的**真桌面**——
+   `divination_service.desktop_dir()` 读注册表 `User Shell Folders\Desktop`
+   （`~\Desktop` 在她机器上是个空壳），渲染失败只记日志、绝不影响抽签。
+   `pet/divination_card.py` 是纯 PIL 渲染器（零 Qt）。
 
 ## 八、测试与验证入口
 
 ```powershell
-D:\dsh-pet\.venv\Scripts\python.exe -m pytest -q tests/test_divination.py tests/test_almanac.py tests/test_menu_layout.py tests/test_settings_interaction_tabs.py tests/test_config_schema.py
+D:\dsh-pet\.venv\Scripts\python.exe -m pytest -q tests/test_divination.py tests/test_almanac.py tests/test_divination_settings.py tests/test_menu_layout.py
 D:\dsh-pet\.venv\Scripts\python.exe -m ruff check .
 ```
 
 红线（用例守着）：签诗/白话/宜忌里**不许出现感叹号**与医疗/疾病/寿命/怀孕类词；
-白话解单条 ≤14 字；气泡恒五行；穿色短句 ≤16 字、语音句 ≤18 字；纯逻辑模块零 Qt。
+白话解单条 ≤14 字；气泡恒五行；穿色短句 ≤16 字、语音句 ≤18 字；纯逻辑模块零 Qt；
+**一轮 48 把不许重复**；记录文件写在 config 目录（测试里用 tmp、桌面被 monkeypatch）。

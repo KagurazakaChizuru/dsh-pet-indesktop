@@ -25,10 +25,11 @@ from pet import divination, divination_quotes as quotes
 # --------------------------------------------------------------------------- #
 
 def test_stick_library_shape() -> None:
-    """24 支签、编号 1..24 唯一、每支字段齐全且签诗两句。"""
-    assert len(quotes.STICKS) == 24
+    """48 支签、编号 1..48 唯一、每支字段齐全且签诗两句。"""
+    assert len(quotes.STICKS) == 48
     numbers = [stick["no"] for stick in quotes.STICKS]
-    assert numbers == list(range(1, 25)), "编号必须是连续的 1..24"
+    assert numbers == list(range(1, 49)), "编号必须是连续的 1..48"
+    assert divination.total_sticks() == 48
     for stick in quotes.STICKS:
         assert stick["level"] in quotes.LEVELS, stick
         assert len(stick["poem"]) == 2, f"第 {stick['no']} 签要有两句签诗"
@@ -38,14 +39,36 @@ def test_stick_library_shape() -> None:
 
 
 def test_level_distribution_matches_reference() -> None:
-    """四档数量：上上 2 / 上 5 / 中平 12 / 下 5（稀有度是抽签的乐趣所在）。"""
+    """四档数量：上上 4 / 上 8 / 中平 26 / 下 10（24 支时代是 2/5/12/5，第四轮扩签后重算）。"""
     counts: dict[str, int] = {level: 0 for level in quotes.LEVELS}
     for stick in quotes.STICKS:
         counts[stick["level"]] += 1
-    assert counts == {"上上": 2, "上": 5, "中平": 12, "下": 5}
+    assert counts == {"上上": 4, "上": 8, "中平": 26, "下": 10}
     assert set(quotes.LEVEL_WEIGHTS) == set(quotes.LEVELS)
     assert quotes.LEVEL_WEIGHTS["上上"] < quotes.LEVEL_WEIGHTS["上"]
     assert quotes.LEVEL_WEIGHTS["中平"] == max(quotes.LEVEL_WEIGHTS.values())
+
+
+def test_draw_skips_excluded_sticks() -> None:
+    """``exclude`` 里的签号不会再被抽到；整副抽完时 exclude 自动作废（开新一轮）。"""
+    rng = random.Random(11)
+    drawn: set[int] = set()
+    for _ in range(48):
+        stick = divination.draw(rng, exclude=drawn)
+        number = int(stick["no"])
+        assert number not in drawn, f"第 {number} 签被重复抽到"
+        drawn.add(number)
+    assert drawn == set(range(1, 49)), "一轮应该刚好把 48 支抽完"
+    again = divination.draw(rng, exclude=drawn)      # 整副抽完 → 新一轮
+    assert int(again["no"]) in range(1, 49)
+
+
+def test_draw_with_partial_exclude_keeps_the_pool_usable() -> None:
+    """只排除一小部分时仍然能抽（且不会抽到被排除的）。"""
+    excluded = {1, 2, 3}
+    for seed in range(20):
+        stick = divination.draw(random.Random(seed), exclude=excluded)
+        assert int(stick["no"]) not in excluded
 
 
 def test_plain_text_is_short() -> None:
@@ -176,7 +199,7 @@ def test_service_works_without_a_window(monkeypatch) -> None:
 
     service = DivinationService(App())
     stick = service.draw_now(random.Random(5))
-    assert stick["no"] in range(1, 25)
+    assert stick["no"] in range(1, 49)
     # 桌面通知的标题＝签头（"第 5 签 · 中平"），正文＝气泡四行
     assert notified and notified[0][0] == f"第 {stick['no']} 签 · {stick['level']}"
     assert spoken and spoken[0].startswith(f"第 {stick['no']} 签")
@@ -206,3 +229,41 @@ def test_service_obeys_speak_switch() -> None:
     service.draw_now(random.Random(6))
     assert not spoken
     assert notified
+
+
+def test_service_round_has_no_repeats_and_records_history(tmp_path, monkeypatch) -> None:
+    """一轮 48 把不重复；每把都写进本机记录；上上签卡落到（测试的）桌面目录。"""
+    pytest.importorskip("PySide6")
+    from pet import divination_service
+    from pet.divination_service import DivinationService, last_record
+
+    monkeypatch.setattr(divination_service, "desktop_dir", lambda: tmp_path)
+
+    class Cfg(dict):
+        dir = tmp_path
+
+    class App:
+        win = None
+        config = Cfg({"divination_speak": False, "divination_animation": False})
+
+        def system_notify(self, title, message):
+            pass
+
+    service = DivinationService(App())
+    seen: set[int] = set()
+    for _ in range(48):
+        stick = service.draw_now(random.Random(len(seen)))
+        number = int(stick["no"])
+        assert number not in seen, f"服务层出现重复：第 {number} 签"
+        seen.add(number)
+    assert len(seen) == 48 and service.drawn_this_round() == 48
+
+    history = tmp_path / "divination-history.jsonl"
+    assert history.exists(), "抽签记录文件没写出来"
+    assert len(history.read_text(encoding="utf-8").strip().splitlines()) == 48
+    record = last_record(tmp_path)
+    assert record and int(record["no"]) in range(1, 49) and record["level"] in ("上上", "上", "中平", "下")
+
+    # 上上会落签卡（测试里桌面被 monkeypatch 到 tmp_path，别污染她真桌面）
+    cards = list(tmp_path.glob("签卡-*.png"))
+    assert cards, "抽满一轮应该至少抽到过上上并落一张签卡"

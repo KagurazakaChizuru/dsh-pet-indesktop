@@ -149,7 +149,7 @@ import 16 ms，一次性）；③ **没有新的系统调用/网络/磁盘/线�
 | 静态检查 | `python -m ruff check .` | **All checks passed!** |
 | 聚焦 | `pytest -q tests/test_divination.py tests/test_menu_layout.py tests/test_settings_interaction_tabs.py tests/test_config_schema.py tests/test_architecture.py tests/test_desktop_pet_features.py` | **213 passed** |
 | 架构红线 | 同上（含 `tests/test_architecture.py`） | 通过（纯逻辑零 Qt、退役层、预算 2403） |
-| 全量 | `python -m pytest -q` | **4418 passed / 14 skipped / 0 failed**（462.58s；含第二轮 `tests/test_almanac.py` 与第三轮 `tests/test_divination_settings.py`） |
+| 全量 | `python -m pytest -q` | **4422 passed / 14 skipped / 0 failed**（435.87s；含第二/三/四轮的 `test_almanac.py`、`test_divination_settings.py` 与第四轮去重/记录/签卡用例） |
 | 冻结包抽检 | 扒 PYZ + 读包内菜单模板 | 四个模块 + `draw_lot` 节点 + 三标签都在 |
 
 **全量**用 `PYTHONIOENCODING=gbk` 跑：这样同时**避开**已知环境 flake
@@ -284,3 +284,51 @@ live 目录里的 `ffmpeg-win-x86_64-v7.1.exe` **又一次被外部进程占用*
 **"只有两个开关，不值得新开域"是我的判断，不是机主的口径。** 她认的是"归属要清楚"——
 趣味类的东西就该在「趣味」里，哪怕只有两行。以后再遇到"新功能放哪"，**先按她的分类直觉走**
 （她早前也说过设置要「大类→小类」），别用"成本最小"替她做信息架构决定。
+
+---
+
+## 十二、第四轮：一轮不重复 / 抽签记录 / 摇签音效 / 上上签卡 / 签库扩到 48（2026-10-10）
+
+机主反馈原话：「**抽签功能现在还是不完善**」——不再等她圈选，按我自己给过的那份清单直接补。
+
+### 修改文件说明（第四轮）
+
+| 文件 | 增删 | 改动意图 |
+|---|---|---|
+| `pet/divination_quotes.py` | 改 | 签库 **24 → 48**（新增 25–48；档位分布 上上 +2 / 上 +3 / 中平 +14 / 下 +5；**旧 1–24 一字未动**） |
+| `pet/divination.py` | 改 | `draw(rng, exclude=…)` 排除本轮已抽过的签号（某档排空则该档不参与加权；整副抽完自动开新一轮）+ `total_sticks()` |
+| `pet/divination_service.py` | 改 | 本轮去重集合 `_drawn` 与 `drawn_this_round()`；`_record()` 写 `<config.dir>/divination-history.jsonl`；`_sound()` 复用点击音效放摇签声；`_save_card()` 上上落签卡；模块级 `history_file()` / `last_record()` / `desktop_dir()`（读注册表真桌面） |
+| `pet/divination_card.py` | **新增** | 纯 PIL 签卡渲染（零 Qt），760×420 深底金边 |
+| `pet/divination_settings.py` | 改 | 新增只读行「最近抽到」（控件 `divinationLastDraw`）；页面重建时刷新两个预览；摇签动作 hint 改成「跟随『点击与音效』那一套」——**避开设置搜索「点击音效」的域归属断言**（上一轮同类坑的原样复现） |
+| `tests/test_divination.py` | 改 | 48 支与分布快照、`exclude` 连排 48 把刚好抽完、服务层一轮不重复 + 记录文件 48 行 + 上上签卡落盘（`desktop_dir` monkeypatch 到 tmp） |
+| `tests/test_divination_settings.py` | 改 | 行清单加 `divination_last_draw`；新增「最近抽到」预览用例（空态文案 + 造记录后重建页面可见） |
+
+### 性能分析（第四轮）
+
+新增路径全在「点一次菜单」时发生且各有闸门：去重是集合运算；记录是**一行 append**（best-effort，
+失败不抛）；音效走**既有**点击音效播放器（不新建通道、不加配置键）；签卡只在 4% 的上上时渲染
+（PIL 一张 760×420 实测几十毫秒，非热路径）。`draw()` 从 5.2 µs 起（多一层排除推导仍在微秒级）。
+稳态仍**无定时器、无新的常驻 IO**。
+
+### 实机运行记录（第四轮）
+
+```
+── 连抽 6 把（同一 rng 序列，验证不重复）──
+第 39 签，中平。联系一下老朋友。宜 发条消息，忌 装作忘了。今日宜穿朱红，避青绿。
+第 24 签，下。话出口前想一遍。宜 少说两句，忌 群里争对错。今日宜穿朱红，避青绿。
+第 18 签，中平。今天的小摩擦，别放大。宜 先忍一步，忌 当面顶。今日宜穿朱红，避青绿。
+第 40 签，中平。钱的事算清楚。宜 对一遍账，忌 大概就行。今日宜穿朱红，避青绿。
+第 22 签，下。今天别乱花钱。宜 记一笔账，忌 冲动下单。今日宜穿朱红，避青绿。
+第 33 签，中平。别老掀盖看。宜 耐心等，忌 反复确认。今日宜穿朱红，避青绿。
+本轮已抽: [18, 22, 24, 33, 39, 40]        ← 6 把 6 支，无重复
+── 上上签卡渲染 ──  签卡-第1签.png  26727 字节
+── 路径解析 ──  desktop_dir: H:\360MoveData\Users\KAZA\Desktop   ← 注册表真桌面
+             签库总数: 48
+```
+
+顺带一次**跨日交叉验证**：上面每把的颜色行都是「宜穿朱红，避青绿」——按日柱推是**戊午日**
+（戊属土 → 生土者火＝朱红、克土者木＝青绿），与上一轮对「丁巳日 → 青绿/藏青」的说明一致，
+说明黄历那套随日期切换是对的。
+
+门禁：`ruff` 全绿；聚焦 130 passed；全量见第六节更新后的数字。构建与部署仍走第十节的备用 dist
+口径（live 目录被游戏录制器占着），部署后经扒 PYZ 与包内设置模块抽检、桌宠重启。
