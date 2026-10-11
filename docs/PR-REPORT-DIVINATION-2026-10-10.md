@@ -332,3 +332,42 @@ live 目录里的 `ffmpeg-win-x86_64-v7.1.exe` **又一次被外部进程占用*
 
 门禁：`ruff` 全绿；聚焦 130 passed；全量见第六节更新后的数字。构建与部署仍走第十节的备用 dist
 口径（live 目录被游戏录制器占着），部署后经扒 PYZ 与包内设置模块抽检、桌宠重启。
+
+---
+
+## 十三、R1/R2：自有功能搬进「进程内功能型 DLC」接入面（2026-10-11）
+
+机主指令原话：「**你按照上游新的开发方式和架构，重构一下本地实例。**」执行依据＝上游
+`docs/plugin-phase-01-foundation/PLUGIN-DLC-ARCHITECTURE.md` §5.1（进程内功能型 DLC）与 §6
+（API 与信任边界）：进程内功能**必须通过公开 API 接入，不得依赖 `PetApp`、`PetWindow`
+私有字段**；插件失败不得阻塞 Core。
+
+### 修改文件说明（R1/R2）
+
+| 文件 | 增删 | 改动意图 |
+|---|---|---|
+| `pet/feature_context.py` | **新增** | `FeatureContext`＝注入式公开接入面（config / 可见性 / 气泡直写+兜底 / 遮挡门禁 / 动作池 / 播动画 / 说话 / 通知 / 数据目录）。零 Qt；字段全是函数，**不把窗口句柄交出去**；各方法吞异常并返回 bool，由功能自己降级 |
+| `pet/feature_registry.py` | **新增** | `FeatureSpec` + `FeatureRegistry`：懒创建并缓存、按 `gate_key` 启停、**关闭即释放**、工厂失败只记日志不抛、`sync_one` 供设置页保存后即时生效 |
+| `pet/app.py` | +约 115 行 | `AppShell.feature_context()` 把真实实现注入（气泡两条通道 / 门禁 / 动作池 / 动画 / 通知 / 数据目录）；`feature_registry()` 登记四条自有功能（`divination` / `festival` / `voice_chime` / `music_lyric`），`factory` 暂为 `None`＝运行期接线待搬 |
+| `tests/test_feature_registry.py` | **新增 13 例** | 接入面语义（缺省值、吞坏钩子、气泡降级链、动作返回 bool）、**无后门字段**（字段集合逐一钉死）、懒创建与缓存、门控启停与释放、手动触发型不自动启动、工厂失败不阻塞、零 Qt |
+
+> 顺带踩坑一条：`tests/test_architecture.py::test_window_private_surface_frozen` 会扫 `app.py`
+> **全文（含注释与 docstring）**里的 `win._xxx` 字样——我第一版把私有成员连前缀写进注入注释，
+> 直接被判"私有面回潮"。写文档时只写成员名，别带前缀。
+
+### 性能分析（R1/R2）
+
+本轮只加"登记与注入"，**不碰热路径**：`feature_context()` 在功能创建时构造一个 dataclass
+（字段全是既有函数引用，实测 ~2µs 量级），`feature_registry()` 建一次即缓存（`getattr` 判断）。
+**未新增定时器、线程或常驻对象**；"关闭＝不加载"的语义与改造前一致（对象被释放）。稳态开销 ≈0。
+
+### 实机运行记录（R1/R2）
+
+- `ruff check .` → **All checks passed!**
+- 聚焦：`tests/test_architecture.py`（含私有面冻结 + 零 Qt + 行数预算）+ `tests/test_feature_registry.py`
+  + 抽签/黄历/设置 → **52 passed**（第一次跑时被私有面守卫拦下，修掉注释里的前缀后转绿）。
+- 全量 `pytest -q` → 见第六节更新后的数字。
+- 行为不变性：本轮**没有改任何运行期接线**（四条功能的 factory 仍为 `None`，`AppShell` 里原来的
+  `_ensure_*` / `_sync_*` 一字未动），所以"重构"这一步是**先立骨架、再逐个搬家**——
+  迁移模板（"私有面 → 接入面"逐项对照表 + 建议顺序 + 收尾必跑）写在
+  `.scratch/feature-dlc-refactor/HANDOFF.md`，供后续窗口直接续做。

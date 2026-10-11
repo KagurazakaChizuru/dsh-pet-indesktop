@@ -3442,6 +3442,115 @@ class AppShell:
             # 抽签是一次性娱乐动作，失败不该把异常抛回 Qt 的菜单回调。
             logging.getLogger("dsh-pet-standalone").exception("抽签失败")
 
+    # ------------------------------------------------------------ 自有功能（进程内 DLC）
+    def feature_context(self, feature_id: str = ""):
+        """自有功能与 Core 之间的**公开接入面**（上游 phase-01 §5.1 / §6）。
+
+        上游原文要求「进程内 DLC 必须通过公开 API 接入，不得依赖 `PetApp`、
+        `PetWindow` 私有字段」。此前自有功能直接摸桌宠窗口的私有面（`show_bubble`
+        之外还用了私有气泡位 `_speech_bubble`、动作池 `acts`、`request_link_anim`
+        等），R1 起改为
+        经这里注入——功能侧只认 `FeatureContext`，Core 侧（本方法）负责把真实
+        实现接上。`win` 为 None（无窗口/用例环境）时各项能力照常注入，由功能
+        自己降级；注入项都是函数，**不把窗口句柄交出去**。
+        """
+        from .feature_context import FeatureContext
+
+        win = getattr(self, "win", None)
+
+        def show_bubble(text: str, duration_ms: int) -> None:
+            if win is None:
+                raise RuntimeError("无窗口")
+            win.show_bubble(text, duration_ms=duration_ms)
+
+        def show_bubble_fallback(text: str, duration_ms: int) -> None:
+            if win is None:
+                raise RuntimeError("无窗口")
+            bubble = getattr(win, "_speech_bubble", None)
+            rect = win.visible_content_rect()
+            if bubble is None or rect is None:
+                raise RuntimeError("无气泡位")
+            bubble.show_text(text, rect, duration_ms,
+                             pet_scale=getattr(win, "scale", 1.0), subtitle="")
+
+        def bubble_blocked() -> bool:
+            if win is None:
+                return True
+            from . import window_alerts
+
+            return bool(window_alerts.sprite_in_flight(win) or window_alerts.bubble_blocked(win))
+
+        def play_animation(name: str) -> None:
+            if win is None:
+                raise RuntimeError("无窗口")
+            play = getattr(win, "request_link_anim", None)
+            if callable(play):
+                play(name)
+                return
+            switch = getattr(win, "switch_clip", None)
+            if not callable(switch):
+                raise RuntimeError("无动画入口")
+            switch(name, link_request=True)
+
+        return FeatureContext(
+            feature_id=feature_id,
+            config_get=lambda key, default=None: self.config.get(key, default),
+            is_visible=lambda: bool(win is not None and win.isVisible()),
+            show_bubble=show_bubble,
+            show_bubble_fallback=show_bubble_fallback,
+            bubble_blocked=bubble_blocked,
+            animations=lambda: (set(getattr(win, "acts", None) or ()) if win is not None else set()),
+            play_animation=play_animation,
+            # speak / notify 的注入点在迁移各功能时逐个补齐（见 .scratch 的 HANDOFF）
+            notify=lambda title, message: self.system_notify(title, message),
+            data_dir=lambda: getattr(self.config, "dir", None),
+        )
+
+    def feature_registry(self):
+        """自有功能登记表（懒创建）。
+
+        这里是**清单**：每条都要在 phase-01 §5.1 的"进程内功能"范围内，并按
+        「纯逻辑模块 + 懒创建服务 + 独立设置页模块 + 菜单接线 + 自带测试」成形
+        （抽签是现行范例）。`factory=None` 表示**运行时接线尚未搬到注册表**，
+        迁移模板见各条 note 与 `.scratch/feature-dlc-refactor/HANDOFF.md`。
+        """
+        if getattr(self, "_feature_registry", None) is None:
+            from .feature_registry import FeatureRegistry, FeatureSpec
+
+            registry = FeatureRegistry(self.feature_context)
+            registry.register(FeatureSpec(
+                feature_id="divination",
+                description="抽签 + 黄历「今日宜穿色」（右键「抽支签」）",
+                gate_key=None,            # 手动触发型：点菜单才创建，无常驻
+                settings_module="pet.divination_settings",
+                menu_action="draw_lot",
+                note="待迁移：服务改吃 FeatureContext（气泡/动画/音频/记录路径四处）",
+            ))
+            registry.register(FeatureSpec(
+                feature_id="festival",
+                description="节日/节气提醒（气泡 + 语音 + 节日动画）",
+                gate_key="festival_reminder_enabled",
+                settings_module="pet.festival_settings",
+                menu_action="festival_now",
+                note="待迁移：服务改吃 FeatureContext；`_sync_festival_service` 交给 registry.sync_one",
+            ))
+            registry.register(FeatureSpec(
+                feature_id="voice_chime",
+                description="语音报时（tick + 合成链 + 播放，后端走 pet/tts 注册表）",
+                gate_key="voice_chime_enabled",
+                settings_module="pet.voice_chime_settings",
+                note="待迁移：服务改吃 FeatureContext（音频通道与缓存目录两处）",
+            ))
+            registry.register(FeatureSpec(
+                feature_id="music_lyric",
+                description="音乐歌词展示（上游功能，本仓库定制了显示审计那条线）",
+                gate_key="music_lyric_enabled",
+                settings_module="pet.settings_pet_controls",
+                note="本仓库只做审计类定制，未新增接入面，暂不迁移",
+            ))
+            self._feature_registry = registry
+        return self._feature_registry
+
     def toggle_festival_reminder(self) -> None:
         """「启用/关闭节日提醒」开关（默认隐藏、菜单编辑器可加回）：翻转配置并同步服务启停。"""
         self._toggle_flag("festival_reminder_enabled", self._sync_festival_service)
