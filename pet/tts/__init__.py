@@ -22,7 +22,7 @@ from .base import (
     secret_fields,
     unregister,
 )
-from . import edge, mimo  # noqa: F401 —— import 即注册（edge 在前 = 默认后备）
+from . import edge, mimo, sapi  # noqa: F401 —— import 即注册（edge 在前 = 默认后备；sapi 为离线本地后端）
 
 __all__ = [
     "FIELD_KINDS",
@@ -38,6 +38,7 @@ __all__ = [
     "provider_ids",
     "providers",
     "register",
+    "sapi",
     "secret_fields",
     "unregister",
 ]

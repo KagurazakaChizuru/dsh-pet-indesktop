@@ -141,6 +141,8 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "voice_chime_mimo_model",
         "voice_chime_mimo_style",
         "voice_chime_mimo_voice",
+        "voice_chime_sapi_rate",
+        "voice_chime_sapi_voice",
         "voice_chime_pitch",
         "voice_chime_rate",
         "voice_chime_schedule",
