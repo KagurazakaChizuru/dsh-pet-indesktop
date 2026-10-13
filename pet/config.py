@@ -844,6 +844,8 @@ class Config:
             "voice_chime_mimo_style": "",  # 风格指令（自然语言，留空用模型默认）
         "voice_chime_sapi_voice": "",  # SAPI5 本地音色（留空＝自动挑中文音色）
         "voice_chime_sapi_rate": 0,  # SAPI5 语速 −10..10（0 为系统默认）
+        "voice_chime_doubao_speaker": "zh_female_peiqi_uranus_bigtts",  # 豆包 2.0 音色
+        "voice_chime_doubao_pitch": 15,  # 豆包本地变调百分比（0–30）
             # 节日提醒（农历/24 节气/西方节日；命中当日用气泡告知并附氛围匹配文案）。
             # 总开关默认关闭：属"主动打扰"型功能，升级后不应突然冒出来，由用户显式开启。
             "festival_reminder_enabled": False,  # 节日提醒总开关
@@ -1111,6 +1113,8 @@ class Config:
             "voice_chime_mimo_voice",
             "voice_chime_mimo_style",
             "voice_chime_sapi_voice",
+            "voice_chime_doubao_pitch",
+            "voice_chime_doubao_speaker",
             "voice_chime_sapi_rate",
             "festival_reminder_enabled",
             "festival_reminder_cn",
