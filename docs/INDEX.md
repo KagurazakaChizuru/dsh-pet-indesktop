@@ -135,6 +135,7 @@
 
 | 文档 | 一句话内容 | 何时必读 |
 |---|---|---|
+| [PR-REPORT-DIVINATION-DAILY-2026-10-13.md](PR-REPORT-DIVINATION-DAILY-2026-10-13.md) | 抽签第五轮：**每天一支今日签**（按日期确定性取号 splitmix64——同日恒定／跨天贴权重且无 A/B 交替；配额以 `divination-history.jsonl` 最后一条日期为准，重启也算数）+ **48 支签文整体重写**（该轮的四句五言形制随后被甲方案取代：现为两句七言、无宜忌，见 PR-REPORT-DIVINATION-JIA-2026-10-13.md；签号/档位/权重全不变、无新增配置键）；含 `timeit` 实测（取号 13.1µs/次 对旧真随机 6.7µs、读 60 行记录 517µs/次）与切片全量门禁记录 | 改 `pet/divination*.py`、扩/改签库文案、动「抽支签」的语义，或要判「今天这一签是怎么定的」时必读 |
 | [PR-REPORT-VOICE-SETTINGS-TIDY-2026-10-13.md](PR-REPORT-VOICE-SETTINGS-TIDY-2026-10-13.md) | 语音设置页整理（折叠 + 文案人话化）+ 默认后端改 edge | 2026-10-13 |
 | [`PR-REPORT-LOCAL-TTS-SAPI-2026-10-12.md`](PR-REPORT-LOCAL-TTS-SAPI-2026-10-12.md) | 本地语音合成后端（SAPI5 离线）：edge-tts 被服务端 403（7.2.8 已是 PyPI 最新、本机时钟仅偏 −0.6s ⇒ 不是我们能修的），故按 `pet/tts` 注册表加 `pet/tts/sapi.py`——comtypes **晚绑定**（`GetModule('sapi.dll')` 会报 TYPE_E_CANTLOADLIBRARY）+ `SpFileStream` 直接写 wav；**实测首句 111ms / 复句 19ms**（走 provider 链 166/112ms），零网络零 Key；新键 `voice_chime_sapi_voice`/`rate` 三处登记；机主后端已从 edge 切到 sapi（保留 fallback）。含完整排查数字与「未验到的一格」。 | 改 `pet/tts/*`、加/换合成后端、排查「报时没声音 / 合成失败 / 延迟高」时必读；也是「接入一个新 TTS ＝ 写一个模块 + 登记一行」的第二个完整范例（第一个是 MiMo）。 |
 | [`PR-REPORT-DIVINATION-2026-10-10.md`](PR-REPORT-DIVINATION-2026-10-10.md) | 抽签（右键「抽支签」）：24 支签库 + 加权真随机（可注入复现）+ 一次性播报（复用既有音频通道）+ 摇签动作 + 设置页「互动 · 抽签」两个开关；含 `timeit` 实测（draw 5.2µs、冷启动 import 16.3ms、无定时器/无新 IO）与**被锁文件逼出来的"备用 dist 构建 + robocopy /MIR /XF"部署口径**（游戏录制器占着 live 目录里的 ffmpeg，`COLLECT` 半清空目录）。 | 改 `pet/divination*.py`、扩签库、加/改菜单入口，或**再遇"构建时目标目录有文件被占用"**时必读。 |

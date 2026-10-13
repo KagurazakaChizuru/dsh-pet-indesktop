@@ -65,7 +65,7 @@ def build_divination_rows(dialog) -> list[SettingRow]:
         SettingRow(
             "divination_speak",
             "抽签语音朗读",
-            "抽到签时用语音报时的音色念出来（签号、吉凶、白话解、宜忌，"
+            "抽到签时用语音报时的音色念出来（签号、吉凶、典故签题、两句签诗、解曰，"
             "以及今日宜穿的黄历色）；与报时共用同一条音频通道，不会叠音。",
             dialog.divination_speak_check,
         ),
@@ -93,7 +93,7 @@ def build_daily_color_rows(dialog) -> list[SettingRow]:
             "divination_daily_color",
             "今日宜穿色",
             "按当日日柱天干的五行推（黄历）：宜穿＝生我者，避＝克我者。"
-            "右键「抽支签」时气泡第五行与语音末尾会带上这一句；每天自动更新。",
+            "右键「抽支签」时气泡末行与语音末尾会带上这一句；每天自动更新。",
             dialog.divination_color_label,
             stacked=True,  # 长文本占满一行宽度（否则被挤在右侧窄栏里折成四行）
         ),

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""抽签服务：**抽 → 摇签动作 → 气泡 → 语音**（GUI 线程）。
+"""抽签服务：**定今日签 → 摇签动作 → 气泡 → 语音**（GUI 线程）。
 
 为什么独立成一个服务
 --------------------
@@ -8,8 +8,13 @@
 ② 气泡（与节日提醒同一套门禁与降级链）；③ 音频通道（``AppShell.ensure_audio_channel``，
 进程内唯一音频出口，结构上保证不叠音）。
 
-与已归档的占星功能（`.scratch/fortune-astrology`）相比，这里**没有定时器、没有
-日期种子、没有任何个人信息**：签是抽的，抽完就完。
+第五轮（她 2026-10-13：「抽签每天只能抽一次」）起改口径：**一天一支今日签**，
+签号由当天日期确定性推出（见 ``pet.divination.daily_draw``），当天再点只重复显示
+同一支；"今天抽过没有"以本机记录文件最后一条的日期为准，所以换进程/重启也算数。
+仍然**没有定时器、没有任何个人信息**：没有任何一条记录离开本机。
+
+与已归档的占星功能（`.scratch/fortune-astrology`）相比，这里不吃生日/出生地，
+吃的只有一个"今天是几号"。
 
 分层同 ``festival_service``：**顶层不 import Qt**（惰性引入），Qt 只出现在窗口能力里。
 """
@@ -23,14 +28,17 @@ import random
 from datetime import date, datetime
 from pathlib import Path
 
+from . import divination_quotes as quotes
 from .divination import (
     DEFAULT_DIVINATION_CONFIG,
+    RECENT_DAYS,
     bubble_text,
+    daily_draw,
     draw,
     normalize_divination_config,
+    recent_days,
     speech_text,
     speech_title,
-    total_sticks,
 )
 from .divination_quotes import ANIMATION_CANDIDATES
 
@@ -38,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 #: 本机抽签记录的文件名（放 config 目录，**不进仓库**）。
 _HISTORY_NAME = "divination-history.jsonl"
+
+#: 同一天再点「抽支签」时气泡上补的一句（第五轮每日一签）。
+_REPEAT_NOTE = "今天已经抽过啦，还是这一支"
 
 
 def history_file(config_dir) -> Path | None:
@@ -47,18 +58,74 @@ def history_file(config_dir) -> Path | None:
     return Path(config_dir) / _HISTORY_NAME
 
 
-def last_record(config_dir) -> dict | None:
-    """读记录里的最后一条（设置页「最近抽到」用——设置跑在独立进程，只能走文件）。"""
+def records(config_dir) -> list[dict]:
+    """读全部抽签记录（时间正序）；坏行跳过，读不到就返回空表。"""
     path = history_file(config_dir)
     if path is None or not path.exists():
-        return None
+        return []
+    out: list[dict] = []
     try:
-        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
-            if line.strip():
-                return json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict):
+                out.append(item)
     except Exception:
         logger.exception("抽签记录读取失败")
-    return None
+        return []
+    return out
+
+
+def record_day(item: dict):
+    """记录里的本机自然日（``2026-10-13T09:12:00`` → ``date``）；认不出返回 ``None``。
+
+    老格式与新格式只差 ``ts``，这条解析对两边都成立——**已有记录不用迁移**。
+    """
+    stamp = str(item.get("ts", ""))
+    try:
+        return datetime.fromisoformat(stamp).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def recent_numbers(config_dir, day, days) -> set[int]:
+    """最近 ``days`` 天（不含 ``day`` 当天）抽过的签号——「一轮不重复」的跨天形态。"""
+    wanted = {item for item in recent_days(day, days)}
+    found: set[int] = set()
+    for item in records(config_dir):
+        if record_day(item) in wanted:
+            try:
+                found.add(int(item.get("no")))
+            except (TypeError, ValueError):
+                continue
+    return found
+
+
+def last_record(config_dir) -> dict | None:
+    """读记录里的最后一条（设置页「最近抽到」用——设置跑在独立进程，只能走文件）。"""
+    items = records(config_dir)
+    return items[-1] if items else None
+
+
+def _merge_record(item: dict) -> dict:
+    """把记录里的签号/吉凶补回完整签（记录只存 ``ts/no/level``，念不出来）。
+
+    签库是常量且"只追加不改号"，所以按号回查一定命中；万一那一号不在签库里
+    （手工改过签库），退回记录本身——宁可少念两句，也不要在点击路径上抛。
+    """
+    try:
+        number = int(item.get("no"))
+    except (TypeError, ValueError):
+        return dict(item)
+    for stick in quotes.STICKS:
+        if int(stick["no"]) == number:
+            return {**dict(stick), "ts": item.get("ts")}
+    logger.warning("记录里的第 %s 签不在签库里，只按记录显示", item.get("no"))
+    return dict(item)
 
 
 def desktop_dir() -> Path | None:
@@ -98,8 +165,10 @@ class DivinationService:
     def __init__(self, app) -> None:
         self._app = app
         self._cfg: dict = dict(DEFAULT_DIVINATION_CONFIG)
-        # 第四轮：一轮之内不重复抽到同一支（抽满整副自动开新一轮）。
-        self._drawn: set[int] = set()
+        # 第五轮（她 2026-10-13：「抽签每天只能抽一次」）：「今日签」按日期确定取号，
+        # 配额以**本机记录文件**为准（换进程/重启都算数），这两个字段只是当天缓存。
+        self._last_day: date | None = None
+        self._last_stick: dict | None = None
 
     # ------------------------------------------------------------ 配置
     def apply_config(self) -> None:
@@ -110,35 +179,62 @@ class DivinationService:
         return dict(self._cfg)
 
     def drawn_this_round(self) -> int:
-        """本轮已抽到的支数（用例与调试用）。"""
-        return len(self._drawn)
+        """第五轮起不再有"一轮"概念（一天一支），保留此方法只为兼容调试调用。"""
+        return 0
+
+    def drawn_today(self) -> dict | None:
+        """今天已经抽过的那支（内存里有就返回；没有返回 ``None``）。"""
+        return dict(self._last_stick) if self._last_stick else None
 
     # ------------------------------------------------------------ 对外入口
     def draw_now(self, rng: random.Random | None = None, *, speak: bool | None = None,
                  day: date | None = None) -> dict:
-        """抽一支签并播出去（右键菜单「抽支签」的入口）。
+        """抽「今日签」并播出去（右键菜单「抽支签」的入口）。
 
         与语音报时的 ``say_now``、节日提醒的 ``remind_now`` 同约定：**无视总开关**，
         用户主动发起即执行。返回抽到的那支签（用例据此断言，不依赖窗口行为）。
 
-        ``day`` 只影响「今日宜穿色」那一行（黄历按日柱算；签名本身与日期无关）。
+        **每天一支**（她 2026-10-13 的口径）：当天第一次＝今日签（正式的那支，
+        写记录、上上才落签卡）；当天再点＝显示**同一支** + 一句"今天已经抽过啦"，
+        不重新摇签、不重复记账、不重复落卡。次日按本机自然日换新签。
+        ``day`` 可注入（用例跨日）；它同时决定"今日"的判定、记录时间戳与签卡文件名。
+        ``rng`` 在每日一签下用不到（取号由日期决定），保留只为不破坏既有调用点。
         """
         self.apply_config()
         today = day or date.today()
-        if len(self._drawn) >= total_sticks():   # 整副抽完 → 开新一轮
-            self._drawn.clear()
-        stick = draw(rng, exclude=self._drawn)
-        self._drawn.add(int(stick["no"]))
+        is_new, stick, repeated = self._daily(today)
         self._animate()
         self._sound()
-        self._bubble(bubble_text(stick, today), stick)
+        note = _REPEAT_NOTE if repeated else ""
+        self._bubble(bubble_text(stick, today, note=note), stick)
         want_speak = self._cfg.get("speak", True) if speak is None else speak
         if want_speak:
             self._speak(speech_text(stick, today))
-        self._record(stick)
-        if str(stick.get("level")) == "上上":
-            self._save_card(stick)
+        if is_new:
+            self._record(stick, today)
+            if str(stick.get("level")) == "上上":
+                self._save_card(stick, today)
         return stick
+
+    # ------------------------------------------------------------ 今日签（配额）
+    def _daily(self, today: date) -> tuple[bool, dict, bool]:
+        """定今天的签：``(是否新抽, 签, 是否重复点)``。
+
+        判定顺序：① 内存缓存（同一天的第二次点击，连文件都不用读）；② 本机记录最后
+        一条的日期（跨进程/重启也算数，且**不依赖签库里还有那支**——记录里的号直接
+        拿来显示）；③ 都没有才按日期取新签——取号时避开最近 ``RECENT_DAYS`` 天抽过的。
+        """
+        config_dir = self._history_dir()
+        history = records(config_dir)
+        if history:
+            last_day = record_day(history[-1])
+            if last_day is not None and self._last_day != last_day:
+                self._last_day, self._last_stick = last_day, _merge_record(history[-1])
+        if self._last_day == today and self._last_stick:
+            return False, dict(self._last_stick), True
+        stick = daily_draw(today, recent=recent_numbers(config_dir, today, RECENT_DAYS))
+        self._last_day, self._last_stick = today, dict(stick)
+        return True, stick, False
 
     # ------------------------------------------------------------ 摇签音效
     def _sound(self) -> None:
@@ -165,19 +261,23 @@ class DivinationService:
             logger.exception("抽签音效播放失败")
 
     # ------------------------------------------------------------ 抽签记录
-    def _record(self, stick: dict) -> None:
+    def _record(self, stick: dict, day: date | None = None) -> None:
         """把这一签追加到本机记录（`<config.dir>/divination-history.jsonl`，best-effort）。
 
         记录只在本机、进不了仓库；设置页「最近抽到」读同一个文件（设置跑在独立进程里，
-        所以走文件而不是内存）。
+        所以走文件而不是内存）。**每天只追加一条**（当日再点不写第二条），
+        字段仍是 ``ts/no/level`` 三个——老记录不用迁移。
+        ``ts`` 的日期部分就是服务层判定"今天抽过没有"的依据（换进程也算数），
+        所以 ``day``（用例注入的"今天"）要写进去，不能写真实系统日期。
         """
         path = history_file(self._history_dir())
         if path is None:
             return
+        today = day or date.today()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             line = json.dumps({
-                "ts": datetime.now().isoformat(timespec="seconds"),
+                "ts": datetime.combine(today, datetime.now().time()).isoformat(timespec="seconds"),
                 "no": int(stick["no"]),
                 "level": str(stick["level"]),
             }, ensure_ascii=False)
@@ -191,7 +291,7 @@ class DivinationService:
         return getattr(config, "dir", None)
 
     # ------------------------------------------------------------ 上上签卡
-    def _save_card(self, stick: dict) -> None:
+    def _save_card(self, stick: dict, day: date | None = None) -> None:
         """抽到上上时落一张签卡到她的真桌面（best-effort，失败只记日志）。"""
         try:
             from .divination_card import render_card
@@ -199,7 +299,8 @@ class DivinationService:
             target_dir = desktop_dir()
             if target_dir is None:
                 return
-            render_card(stick, target_dir / f"签卡-第{int(stick['no'])}签-{date.today().isoformat()}.png")
+            stamp = (day or date.today()).isoformat()
+            render_card(stick, target_dir / f"签卡-第{int(stick['no'])}签-{stamp}.png")
         except Exception:
             logger.exception("上上签卡生成失败")
 
@@ -300,7 +401,11 @@ class DivinationService:
 
     # ------------------------------------------------------------ 设置页预览
     def preview_text(self, rng: random.Random | None = None) -> str:
-        """设置页/用例预览用：抽一支并返回气泡文本（不碰窗口）。"""
+        """设置页/用例预览用：抽一支并返回气泡文本（不碰窗口）。
+
+        预览**刻意走真随机**（不走 :func:`pet.divination.daily_draw`）：它只是给设置页
+        看文案长什么样，不该占掉当天的今日签，也不该写记录。
+        """
         self.apply_config()
         stick = draw(rng)
         return bubble_text(stick)

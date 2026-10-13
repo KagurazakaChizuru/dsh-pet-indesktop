@@ -1,5 +1,12 @@
 # 抽签（右键「抽支签」，2026-10-10）
 
+> **后记（2026-10-13）**：本文是**起草那轮**的设计记录，其中"24 支签 / 签诗七言两句 /
+> 宜忌"已被后续两轮取代——第五轮扩到 48 支并改成每天一支（
+> [`PR-REPORT-DIVINATION-DAILY-2026-10-13.md`](PR-REPORT-DIVINATION-DAILY-2026-10-13.md)），
+> 第六轮签文定稿为**甲方案**（四字典故签题 + 两句七言 + 解曰 ≤14 字、**无宜忌**，
+> [`PR-REPORT-DIVINATION-JIA-2026-10-13.md`](PR-REPORT-DIVINATION-JIA-2026-10-13.md)）。
+> 仍成立的是：分层（纯逻辑/服务/设置）、加权抽签、气泡与音频通道口径、菜单与配置登记点。
+
 > **基线**：集成分支 `feat/media-window-fallback`，`d56cce1`（2026-10-04 合并上游 `beaa8f5`）
 > **日期**：2026-10-10　**实测用例数**：`tests/test_divination.py` 11 例
 > **关联**：[`PR-REPORT-DIVINATION-2026-10-10.md`](PR-REPORT-DIVINATION-2026-10-10.md)（交付证据）、
