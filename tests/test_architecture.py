@@ -230,6 +230,13 @@ MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2404
 # 「浏览器媒体会话参与歌词」接线与本仓库「趣味」域接线叠加，按文件约定只随实测
 # 校准，不为达标压行。
 MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2405
+# 2026-10-13 校准到 2409：节日提醒页整理——「语音」域不再按「一组行」收节日提醒，
+# 改为一行 `self.festival_page.build_domain_page(voice)`（整页含分组标题在
+# pet/festival_settings*.py 里构建）＋域构建后一行 `refresh_backend_rows()`，并给
+# 本域的组合加注释说明为什么不能收行。**净增的是接线与注释，不是页面本体**：
+# 分组、折叠、文案全在新模块，本文件只留两行调用。实测 2409；按文件约定只随实测
+# 校准，不为达标压行（拆分仍是待办）。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2409
 
 
 def _read(name: str) -> str:

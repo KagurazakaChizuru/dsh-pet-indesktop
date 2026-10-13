@@ -1877,8 +1877,9 @@ class ModernSettingsDialog(QDialog):
         claimed.update(proactive_rows)
         voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
         claimed.update(voice_chime_rows)
-        festival_rows = list(self.festival_page.findChildren(SettingRow))
-        claimed.update(festival_rows)
+        # 节日提醒不在域构建前登记：它的行由 build_domain_page 现造卡片收走（见下方
+        # 「语音」域的注释），构建期它们还没有 parent，findChildren 取不到，也就不会
+        # 掉进「待分类（开发期）」。
         dialogue_rows = claim_prefix("dialogue_")
         automation = page_content(
             [
@@ -1936,19 +1937,26 @@ class ModernSettingsDialog(QDialog):
         automation_layout.insertWidget(1, agent_box)
 
         # 「语音」总域（2026-09-17 定稿口径）：只收鱼开口说话（TTS）类设置——
-        # 语音报时整组 + 节日提醒 12 行（原「自动化与联动」域，带 speak/TTS 播报
+        # 语音报时整组 + 节日提醒整组（原「自动化与联动」域，带 speak/TTS 播报
         # 能力）。音效类回各自功能分组：点击音效 4 行回「互动 · 点击反馈」、
         # 碰撞音效 2 行回「桌宠」碰撞组；Agent 提示音效（agent_sound_*）留在
-        # Agent 联动折叠框内不动。
-        voice = page_content(
-            [
-                ("语音报时", voice_chime_rows),
-                ("节日提醒", festival_rows),
-            ]
-        )
+        # Agent 联动折叠框内不动。节日提醒整组（分组标题 + 折叠编排）由
+        # festival_settings 自己建卡交给本域：本域不能按「一组行」收它——页面容器
+        # 会散架、四段分组标题会跟着丢（见 docs/SETTINGS-CHANGE-GATES.md 节日提醒
+        # 准入记录）。故这里不用 page_content，自己起一层容器。
+        voice = QWidget(self)
+        voice_layout = QVBoxLayout(voice)
+        voice_layout.setContentsMargins(0, 0, 0, 0)
+        voice_layout.setSpacing(18)
+        if voice_chime_rows:
+            voice_layout.addWidget(SettingsSection("语音报时", voice_chime_rows, voice))
+        voice_layout.addWidget(self.festival_page.build_domain_page(voice))
+        voice_layout.addStretch(1)
         # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
         # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
         self.voice_chime_page.refresh_backend_rows()
+        # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
+        self.festival_page.refresh_backend_rows()
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。

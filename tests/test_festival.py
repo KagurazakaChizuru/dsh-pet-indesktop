@@ -764,10 +764,14 @@ def _page(tmp_path):
 
 
 def test_settings_page_has_preview_row_with_button(tmp_path):
-    from pet.modern_settings_dialog import SettingRow
+    """试听行与按钮必须存在。
 
+    2026-10-13 整理后本页不再自己挂行（行整体被「语音」域的平卡收走，容器会散架），
+    所以行从页面登记的折叠编排里取；域里的真实形态由
+    tests/test_festival_settings_layout.py 在真实对话框上覆盖。
+    """
     page = _page(tmp_path)
-    rows = {r.objectName() for r in page.findChildren(SettingRow)}
+    rows = {r.objectName() for r in page._festival_panel.rows()}
     assert "settingRow_festival_preview" in rows
     assert page.preview_btn.text() == "立即试听"
 

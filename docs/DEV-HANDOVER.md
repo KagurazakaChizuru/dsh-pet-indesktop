@@ -115,34 +115,35 @@ D:\dsh-pet\
 ├── requirements.txt / pyproject.toml / pytest.ini
 ├── run.bat                       # 本地源码启动脚本
 ├── dsh-pet-standalone-webm-chat.spec   # PyInstaller 规格（onedir）
-├── pet\                          # 应用源码（128 个 .py，含子包）
+├── pet\                          # 应用源码（170 个 .py，含子包）
 │   ├── __main__.py               # 入口：python -m pet
-│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3424 行）
-│   ├── window.py                 # 桌宠主窗口（组合根，4659 行，预算 4659）
-│   ├── config.py                 # 配置读取/清洗/迁移/持久化（1565 行）
+│   ├── app.py                    # AppShell / PetInstance：进程级与每窗装配（3927 行）
+│   ├── window.py                 # 桌宠主窗口（组合根，4489 行，预算 4510）
+│   ├── config.py                 # 配置读取/清洗/迁移/持久化（1722 行）
 │   ├── config_domains.py         # 配置域 facade（chat/agent_link/proactive/collision/menu）
-│   ├── modern_settings_dialog.py # 现代设置主对话框（2360 行，预算 2360）
+│   ├── modern_settings_dialog.py # 现代设置主对话框（2409 行，预算 2409）
 │   ├── settings_widgets.py       # 设置控件库（ToggleSwitch / SettingRow / ModernSelect …）
-│   ├── speech_bubble.py          # 气泡绘制与交互（1491 行）
-│   ├── speech_bubble_text.py     # 气泡分页/定位纯函数（408 行）
-│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（540 行，零 Qt / 零 edge_tts）
-│   ├── voice_chime_service.py    # ★ 语音报时服务层（803 行，tick + 合成链 + 播放）
-│   ├── voice_chime_settings.py   # ★ 语音报时设置页（440 行，含合成后端 6 行）
+│   ├── speech_bubble.py          # 气泡绘制与交互（1581 行）
+│   ├── speech_bubble_text.py     # 气泡分页/定位纯函数（413 行）
+│   ├── voice_chime.py            # ★ 语音报时纯逻辑层（543 行，零 Qt / 零 edge_tts）
+│   ├── voice_chime_service.py    # ★ 语音报时服务层（811 行，tick + 合成链 + 播放）
+│   ├── voice_chime_settings.py   # ★ 语音报时设置页（467 行，含合成后端折叠编排）
 │   ├── tts_secrets.py            # ★ 合成凭据存取（92 行；钥匙串优先、内存兜底）
 │   ├── voice_chime_quotes.py     # ★ 台词/歌词纯数据库（237 行，中文 120 / 英文 96 条）
-│   ├── festival.py               # ★ 节日提醒纯逻辑层（395 行，零 Qt）
-│   ├── festival_data.py          # ★ 节日定义表 + 动态生日节日（158 行）
+│   ├── festival.py               # ★ 节日提醒纯逻辑层（389 行，零 Qt）
+│   ├── festival_data.py          # ★ 节日定义表 + 动态生日节日（169 行）
 │   ├── festival_animations.py    # ★ 节日 -> 动画映射（226 行，零第三方依赖；三级降级）
-│   ├── festival_service.py       # ★ 节日提醒服务层（279 行，30s tick + 气泡/语音/动画）
-│   ├── festival_settings.py      # ★ 节日提醒设置页（379 行；13 个配置键行 + 试听行）
+│   ├── festival_service.py       # ★ 节日提醒服务层（297 行，30s tick + 气泡/语音/动画）
+│   ├── festival_settings.py      # ★ 节日提醒设置页（422 行；13 个配置键行 + 文案 + 折叠登记）
+│   ├── festival_settings_panel.py # ★ 节日提醒页的域卡片与折叠编排（178 行；分组标题 + 少用项折叠）
 │   ├── context_menus\            # 右键菜单（registry.py 动作注册 + legacy/modern/fun_entry）
 │   ├── menu_templates\           # 菜单布局 JSON（modern-default-v1.json 为默认模板）
 │   ├── chat\                     # AI 对话子系统（Chat 版打包变体）
 │   └── persona_presets\          # 角色台词预设
 ├── scripts\                      # 构建/校验脚本（build_onedir.ps1、slim_bundle.py 等 20 个）
 ├── packaging\                    # PyInstaller 入口 + Inno Setup 脚本（dsh-pet.iss）
-├── tests\                        # 129 个 py 测试文件 + tests\helpers\ 辅助模块 + 7 个 bridge js 测试
-├── docs\                         # 46 篇工程文档（含本文件）
+├── tests\                        # 270 个 py 测试文件（含子目录）+ tests\helpers\ 辅助模块 + 7 个 bridge js 测试
+├── docs\                         # 110 篇 md（含本文件；含 docs\agents\、docs\adr\ 等子目录）
 ├── assets\                       # 动画素材、图标
 └── dist-onedir\                  # 构建产物：dsh-pet-standalone-webm-chat\（目录）+ portable zip（146.53 MB，2026-09-16 18:06 生成）
 ```
@@ -168,12 +169,12 @@ D:\dsh-pet\
 | 文件 | 职责要点 |
 |---|---|
 | `pet/__main__.py` | 入口，构造 `PetApp` 并进入 Qt 事件循环 |
-| `pet/app.py` | `PetInstance`（单窗装配）+ `AppShell`（进程级：托盘、多窗共享、配置、可选服务启停）。语音报时服务的懒创建/启停/收口都在这里（`_chime_wanted` / `_ensure_chime_service` / `_sync_chime_service`，1107-1130 行；菜单回调 `trigger_voice_chime_now` / `toggle_voice_chime`，2307-2319 行） |
+| `pet/app.py` | `PetInstance`（单窗装配）+ `AppShell`（进程级：托盘、多窗共享、配置、可选服务启停）。语音报时服务的懒创建/启停/收口都在这里（`_chime_wanted` 1362 行起 / `_ensure_chime_service` 1371 行起 / `_sync_chime_service` 1477 行起；菜单回调 `trigger_voice_chime_now` 3394 行起 / `toggle_voice_chime` 3413 行起） |
 | `pet/window.py` | `PetWindow` 组合根：透明窗口、鼠标穿透、拖拽、动画切换、气泡位、碰撞钩子。**新功能优先拆控制器，不要往这里塞**（见第三章） |
-| `pet/config.py` | `Config` 类：默认值 dict、`reload()` 白名单、迁移、`set/get/save`。语音报时 11 键默认值在 693-703 行，reload 白名单在 913-923 行 |
-| `pet/modern_settings_dialog.py` | 现代设置主对话框：域导航（`_rebuild_domain_navigation`，1591 行起）、`SettingRow` 收集机制、`_write_config` 写回（2405 行起）。控件库/AI 设置页/菜单编辑器/主题 QSS 已拆出 |
+| `pet/config.py` | `Config` 类：默认值 dict、`reload()` 白名单、迁移、`set/get/save`。语音报时 11 键默认值在 835-845 行，reload 白名单在 1096-1115 行 |
+| `pet/modern_settings_dialog.py` | 现代设置主对话框：域导航（`_rebuild_domain_navigation`，1704 行起）、`SettingRow` 收集机制、`_write_config` 写回（2084 行起）。控件库/AI 设置页/菜单编辑器/主题 QSS 已拆出 |
 | `pet/settings_widgets.py` | 设置控件库（`ModernSelect` 等），被 `modern_settings_dialog` re-export |
-| `pet/context_menus/registry.py` | 菜单动作注册表：`MenuActionSpec` + `add_action`；语音报时两项在 125-133 / 219-224 行 |
+| `pet/context_menus/registry.py` | 菜单动作注册表：`MenuActionSpec` + `add_action`；语音报时两项的菜单归属在 98 行，`MenuActionSpec` 在 327-332 行（行号随重构漂移，按符号名搜） |
 | `pet/menu_templates/modern-default-v1.json` | 默认菜单布局树（右键菜单「工具」段含语音报时节点） |
 | `pet/speech_bubble.py` / `speech_bubble_text.py` | 气泡绘制/交互 与 分页定位纯函数（报时气泡复用该通道） |
 | `pet/chat/*` | AI 对话子系统（独立打包变体启用），`modern_settings_dialog` 顶层禁止 import 它 |
@@ -267,8 +268,8 @@ modern_settings_dialog.py
 
 新增一个顶层配置键（如 `voice_chime_*`）必须**同时**改三处，漏一处 `tests/test_config_schema.py` 立刻红：
 
-1. `pet/config.py` → 默认值 dict（语音报时在 693-703 行）；
-2. `pet/config.py` → `reload()` 白名单元组（语音报时在 913-923 行）；
+1. `pet/config.py` → 默认值 dict（语音报时在 835-845 行）；
+2. `pet/config.py` → `reload()` 白名单元组（语音报时在 1096-1115 行）；
 3. `tests/test_config_schema.py` → `DEFAULTS_SNAPSHOT` 与 `RELOAD_WHITELIST_SNAPSHOT` 快照集合（护栏用例：`test_every_defaults_key_is_whitelisted_or_special_cased` 等；特殊键走 `SPECIAL_CASED_KEYS`）。
 
 `pet/config_domains.py` 只做「取子键 / 聚合成域 dict」的编排，**不允许写第二份清洗逻辑**。

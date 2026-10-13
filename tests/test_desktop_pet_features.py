@@ -1401,8 +1401,10 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
         "模型与连接", "视觉能力",
         # 「趣味」域（2026-10-10）：抽签 + 今日穿色两节
         "抽签", "今日穿色",
-        # 「语音」总域只收 TTS 类设置（2026-09-17 定稿口径）：语音报时 + 节日提醒
-        "语音报时", "节日提醒",
+        # 「语音」总域只收 TTS 类设置（2026-09-17 定稿口径）：语音报时 + 节日提醒。
+        # 节日提醒 2026-10-13 整理后按心智拆成四段（+ 少用项折叠卡），不再是单卡
+        # 「节日提醒」——整块由 pet/festival_settings*.py 自建后交给本域。
+        "语音报时", "何时提醒", "提醒哪些日子", "怎么提醒", "你的生日", "少用项",
     }.issubset(set(section_titles))
     advanced_titles = [
         button.text()

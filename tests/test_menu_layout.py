@@ -1031,20 +1031,31 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
         # 标题（settingRow_tts_credentials）是 2026-10-13 加的纯展示行，不是设置，
         # 故不计入这个数字（它们同样必须落进「语音」域，见 test_voice_chime_settings_layout）。
         assert len(chime_rows) == 23, "语音报时整组 23 行都必须在「语音」域"
-        # 节日提醒 14 行 = 上游 12 行 + 本分支的「节日动画」「我的生日」两行
-        # （承接 #127 第二轮迭代；合并 origin/main 后按实测校准）。
-        assert len(festival_rows) == 14, "节日提醒整组 14 行必须整体移入「语音」域"
+        # 节日提醒 15 行 = 上游 12 行 + 「节日动画」「我的生日」两行（#127 第二轮）
+        # + 2026-10-13 整理新增的折叠头行 settingRow_festival_fold_rare（纯展示行、
+        # 不是设置：把自定义文案与试听折起来的头，与语音页的折叠头同一口径）。
+        assert len(festival_rows) == 15, "节日提醒整组 15 行必须整体移入「语音」域"
         for item in chime_rows + festival_rows:
             assert voice_page.isAncestorOf(item), f"{item.objectName()} 必须在「语音」域"
             assert not automation_page.isAncestorOf(item), (
                 f"{item.objectName()} 仍残留在「自动化与联动」域"
             )
 
+        # 2026-10-13 节日提醒页整理：「节日提醒」不再是一张单卡，拆成按心智分的四段
+        # （何时提醒 / 提醒哪些日子 / 怎么提醒 / 你的生日）＋少用项折叠卡；整块
+        # （分组标题 + 行）由 pet/festival_settings*.py 自建，本域只放一个页面。
         section_titles = [
             label.text()
             for label in voice_page.findChildren(settings_mod.QLabel, "sectionTitle")
         ]
-        assert section_titles == ["语音报时", "节日提醒"]
+        assert section_titles == [
+            "语音报时",
+            "何时提醒",
+            "提醒哪些日子",
+            "怎么提醒",
+            "你的生日",
+            "少用项",
+        ]
 
         # 音效类三组都不在「语音」域（各自回原功能分组，行本身仍照常存在）。
         for setting_id in (
