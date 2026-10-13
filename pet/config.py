@@ -844,6 +844,9 @@ class Config:
             "voice_chime_mimo_style": "",  # 风格指令（自然语言，留空用模型默认）
         "voice_chime_sapi_voice": "",  # SAPI5 本地音色（留空＝自动挑中文音色）
         "voice_chime_sapi_rate": 0,  # SAPI5 语速 −10..10（0 为系统默认）
+        "voice_chime_xfyun_appid": "",  # 讯飞 APPID（Key/Secret 进钥匙串）
+        "voice_chime_xfyun_voice": "xiaoyan",  # 讯飞发音人 vcn
+        "voice_chime_xfyun_speed": 50,  # 讯飞语速 0..100（50 默认）
             # 节日提醒（农历/24 节气/西方节日；命中当日用气泡告知并附氛围匹配文案）。
             # 总开关默认关闭：属"主动打扰"型功能，升级后不应突然冒出来，由用户显式开启。
             "festival_reminder_enabled": False,  # 节日提醒总开关
@@ -1112,6 +1115,9 @@ class Config:
             "voice_chime_mimo_style",
             "voice_chime_sapi_voice",
             "voice_chime_sapi_rate",
+            "voice_chime_xfyun_appid",
+            "voice_chime_xfyun_speed",
+            "voice_chime_xfyun_voice",
             "festival_reminder_enabled",
             "festival_reminder_cn",
             "festival_reminder_solar_terms",

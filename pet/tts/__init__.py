@@ -22,7 +22,8 @@ from .base import (
     secret_fields,
     unregister,
 )
-from . import edge, mimo, sapi  # noqa: F401 —— import 即注册（edge 在前 = 默认后备；sapi 为离线本地后端）
+from . import edge, mimo, sapi  # noqa: F401
+from . import xfyun  # noqa: F401 —— 讯飞（在线，签名鉴权） —— import 即注册（edge 在前 = 默认后备；sapi 为离线本地后端）
 
 __all__ = [
     "FIELD_KINDS",
@@ -39,6 +40,8 @@ __all__ = [
     "providers",
     "register",
     "sapi",
+    "unregister",
+    "xfyun",
     "secret_fields",
     "unregister",
 ]
