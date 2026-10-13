@@ -54,13 +54,13 @@ def test_clash_follows_the_documented_rule() -> None:
 # --------------------------------------------------------------------------- #
 
 def test_wear_colors_for_a_known_day() -> None:
-    """丁巳日：日干丁属火 → 宜穿（生我）木色青绿、次吉火色朱红、避（克我）水色藏青。"""
+    """丁巳日：日干丁属火 → 宜穿（生我）木色绿、次吉火色红、避（克我）水色蓝。"""
     info = almanac.wear_colors(date(2026, 10, 10))
     assert info["ganzhi"] == "丁巳"
     assert info["element"] == "火"
-    assert info["main"] == "青绿" and info["main_element"] == "木"
-    assert info["second"] == "朱红"
-    assert info["avoid"] == "藏青" and info["avoid_element"] == "水"
+    assert info["main"] == "绿" and info["main_element"] == "木"
+    assert info["second"] == "红"
+    assert info["avoid"] == "蓝" and info["avoid_element"] == "水"
     assert info["clash_zodiac"] == "猪" and info["clash_direction"] == "东"
 
 
@@ -71,7 +71,7 @@ def test_every_element_maps_to_a_color_once() -> None:
         name, specific = almanac.ELEMENT_COLORS[element]
         assert name and specific
         seen[gan] = name
-    assert set(seen.values()) == {"青绿", "朱红", "姜黄", "象牙白", "藏青"}
+    assert set(seen.values()) == {"绿", "红", "黄", "白", "蓝"}
     # 生日干的那个五行必须是「母行」：火←木、木←水、水←金、金←土、土←火
     assert almanac._mother_of("火") == "木"
     assert almanac._mother_of("木") == "水"
@@ -92,7 +92,7 @@ def test_year_of_days_all_produce_a_full_line() -> None:
     for offset in range(366):
         day = start + timedelta(days=offset)
         info = almanac.wear_colors(day)
-        assert info["main"] in {"青绿", "朱红", "姜黄", "象牙白", "藏青"}
+        assert info["main"] in {"绿", "红", "黄", "白", "蓝"}
         assert info["avoid"] != info["main"], f"{day} 的宜穿与忌穿撞了"
         assert almanac.short_line(day) and almanac.speech_line(day)
 

@@ -197,14 +197,14 @@ def test_draw_covers_every_level_and_is_weighted() -> None:
 def test_bubble_is_five_short_lines() -> None:
     """气泡固定五行：签头（含签题）/ 七言上句 / 七言下句 / 解曰 / 今日宜穿色（黄历按日柱算）。"""
     stick = divination.draw(random.Random(1))
-    day = date(2026, 10, 10)  # 丁巳日：宜穿青绿、避藏青（两个公开来源交叉验证过）
+    day = date(2026, 10, 10)  # 丁巳日：宜穿绿、避蓝（两个公开来源交叉验证过）
     lines = divination.bubble_text(stick, day).splitlines()
     assert len(lines) == 5, lines
     assert lines[0] == f"第 {stick['no']} 签 · {stick['level']} · {stick['title']}"
     assert lines[1] == stick["poem"][0]
     assert lines[2] == stick["poem"][1]
     assert lines[3] == stick["plain"]
-    assert lines[4] == "今日宜穿 青绿 · 避 藏青"
+    assert lines[4] == "今日宜穿 绿 · 避 蓝"
 
 
 def test_every_stick_keeps_the_five_line_bubble() -> None:
@@ -227,7 +227,7 @@ def test_bubble_note_sits_before_the_color_line() -> None:
     assert len(lines) == 6, lines
     assert lines[:4] == divination.bubble_text(stick, day).splitlines()[:4]
     assert lines[4] == "今天已经抽过啦"
-    assert lines[5] == "今日宜穿 青绿 · 避 藏青"
+    assert lines[5] == "今日宜穿 绿 · 避 蓝"
 
 
 def test_speech_text_is_one_breath() -> None:
@@ -238,7 +238,7 @@ def test_speech_text_is_one_breath() -> None:
     assert f"{stick['title']}。" in text
     assert "".join(stick["poem"]) in text
     assert stick["plain"] in text
-    assert text.endswith("今日宜穿青绿，避藏青。")
+    assert text.endswith("今日宜穿绿，避蓝。")
     assert "\n" not in text
 
 
