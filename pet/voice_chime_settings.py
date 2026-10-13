@@ -12,8 +12,13 @@
 参数行都由 ``pet/tts`` 注册表里的 ``TtsProvider.fields`` 生成（控件类型、标题、提示、
 依赖隐藏全在 provider 里声明）。接入新 TTS 只需新增 provider 模块，本文件不用改。
 
-密码类字段（``kind="secret"``）的值只写系统钥匙串（``pet/tts_secrets``），**不落
-config.json**；行提示会显示「已保存 / 未设置」与「钥匙串可用 / 仅本次运行」。
+**参数区按后端折叠**（2026-10-13 整理）：当前后端的字段平铺在最上面，其余后端各占一个
+可展开的折叠头（标题＝后端短名＋「（未启用）」，默认收起）。行序与显隐的编排在
+``pet/voice_chime_tts_panel.py``——它在「语音」域把行搬进平卡之后仍然成立（详见该模块文档）。
+
+密码类字段（``kind="secret"``）单独进「要你自己去拿的凭据」组：值只写系统钥匙串
+（``pet/tts_secrets``），**不落 config.json**；行提示只说「已保存 / 还没设置」与
+「仅本次运行」，存放位置由组标题那句统一交代。
 
 自含 QWidget 页，
 提供 apply_to_config，
@@ -53,6 +58,12 @@ from .voice_chime import (
     clean_flag,
     clean_schedule,
     clean_volume,
+)
+from .voice_chime_tts_panel import (
+    CREDENTIAL_HINT,
+    CREDENTIAL_TITLE,
+    TtsBackendPanel,
+    notice_row,
 )
 
 
@@ -105,11 +116,22 @@ class VoiceChimeSettingsPage(QWidget):
         )
 
         provider_rows: list[SettingRow] = []
+        # 后端参数行按后端分块交给折叠编排：当前后端平铺在最上面，其余后端各自折叠
+        # （行会被「语音」域搬进一张平卡，所以折叠只能落在行上——见 voice_chime_tts_panel）。
+        self._tts_panel = TtsBackendPanel()
         for provider in tts.providers():
+            provider_rows.append(self._tts_panel.add_provider(provider))
             for spec in provider.fields:
                 row = self._build_field_row(provider, spec)
                 self._field_rows[(provider.id, spec.name)] = row
+                self._tts_panel.add_field_row(
+                    provider.id, row, name=spec.name, secret=spec.kind == "secret"
+                )
                 provider_rows.append(row)
+        self.credential_group_row = notice_row(
+            "tts_credentials", CREDENTIAL_TITLE, CREDENTIAL_HINT
+        )
+        self._tts_panel.set_credential_header(self.credential_group_row)
         self._bind_provider_aliases()
 
         # ---- 语音（与后端无关的部分）----
@@ -156,9 +178,9 @@ class VoiceChimeSettingsPage(QWidget):
             SettingsSection(
                 "基础设置",
                 [
-                    SettingRow("voice_chime_enabled", "启用语音报时", "开启后按下方调度规则定时语音报时，并附台词/歌词（每天整套换新，日内按序取不同条目）。", self.enabled_check),
-                    SettingRow("voice_chime_schedule", "报时频率", "整点 / 每30分钟 / 每15分钟 / 每5分钟 / 每分钟 / 自定义时间点。", self.schedule_select),
-                    SettingRow("voice_chime_custom_times", "自定义时间点", "仅「自定义时间点」模式生效；HH:MM 逗号分隔，如 08:30, 12:00。", self.custom_edit),
+                    SettingRow("voice_chime_enabled", "启用语音报时", "到点念一句时间。", self.enabled_check),
+                    SettingRow("voice_chime_schedule", "报时频率", "多久报一次。", self.schedule_select),
+                    SettingRow("voice_chime_custom_times", "自定义时间点", "选了「自定义时间点」才生效。", self.custom_edit),
                 ],
                 self,
             )
@@ -171,17 +193,17 @@ class VoiceChimeSettingsPage(QWidget):
                     SettingRow(
                         "voice_chime_tts_backend",
                         "语音引擎",
-                        "用哪家在线语音合成；该引擎自己的参数行在下方（切换引擎时跟着换）。",
+                        "报时用哪套语音，它的参数就在下面。",
                         self.backend_select,
                     ),
                     SettingRow(
                         "voice_chime_tts_fallback",
                         "失败自动回退",
-                        "主引擎合成失败（没配 Key / 网络不通 / 接口报错）时自动改用后备引擎，"
-                        "都不可用才只显示气泡不出声。",
+                        "这套不行就换下一套，都不行只出气泡。",
                         self.fallback_check,
                     ),
                     *provider_rows,
+                    self.credential_group_row,
                 ],
                 self,
             )
@@ -191,10 +213,10 @@ class VoiceChimeSettingsPage(QWidget):
             SettingsSection(
                 "语音",
                 [
-                    SettingRow("voice_chime_volume", "音量", "报时播放音量（0-100）。", self.volume_spin),
-                    SettingRow("voice_chime_show_bubble", "报时气泡", "报时时在桌宠头顶显示气泡文字（含台词/歌词）。", self.bubble_check),
-                    SettingRow("voice_chime_show_quote", "台词/歌词", "报时时附带台词/歌词（每天整套换新，当天内每次报时按序取不同条目）；关闭后仅播报时间文本。", self.quote_check),
-                    SettingRow("voice_chime_preview", "立即试听", "按当前配置立即播报一句“报时文本 + 台词/歌词”，无需等待报时点。", self.preview_btn),
+                    SettingRow("voice_chime_volume", "音量", "报时的声音大小。", self.volume_spin),
+                    SettingRow("voice_chime_show_bubble", "报时气泡", "报时时在头顶显示文字。", self.bubble_check),
+                    SettingRow("voice_chime_show_quote", "台词/歌词", "顺带念一句台词，每天整套换新。", self.quote_check),
+                    SettingRow("voice_chime_preview", "立即试听", "马上按当前配置念一句。", self.preview_btn),
                 ],
                 self,
             )
@@ -207,18 +229,14 @@ class VoiceChimeSettingsPage(QWidget):
                     SettingRow(
                         "voice_chime_custom_quotes_zh",
                         "自定义台词/歌词（中文）",
-                        "每行一条，与内置中文库的关系：填了就整体替换内置库参与轮换"
-                        "（每天整套换新，当天内每次报时按序取不同条目）；"
-                        "留空则自动回退内置中文台词库。中文音色报时时使用这里的内容。",
+                        "每行一条；填了替换内置，中文音色用。",
                         self.custom_zh_edit,
                         stacked=True,
                     ),
                     SettingRow(
                         "voice_chime_custom_quotes_en",
                         "自定义台词/歌词（英文）",
-                        "每行一条，规则同上（每天整套换新，当天内每次报时按序取不同条目）；"
-                        "留空则自动回退内置英文台词库，与中文库各自独立轮换。"
-                        "非中文音色报时时使用这里的内容。",
+                        "每行一条；填了替换内置，英文音色用。",
                         self.custom_en_edit,
                         stacked=True,
                     ),
@@ -246,9 +264,10 @@ class VoiceChimeSettingsPage(QWidget):
             select = ModernSelect(self, width=230)
             for value, label in spec.options:
                 select.addItem(label, value)
-            if select.findData(current) < 0 and spec.allow_custom:
+            if str(current or "") and select.findData(current) < 0 and spec.allow_custom:
                 # 配置值不在清单里（手改配置、或清单里那项已被厂家下架）：
                 # 明确标出来，别让用户以为它还是有效选项（provider 的提示会说清后果）。
+                # 空值不算「不在清单里」：那是「留空＝自动挑」的合法默认（SAPI 本地音色）。
                 select.addItem(f"不在清单里：{current}", current)
             select.setCurrentData(current)
             select.currentIndexChanged.connect(self._refresh_backend_controls)
@@ -340,21 +359,25 @@ class VoiceChimeSettingsPage(QWidget):
         self.custom_edit.setEnabled(is_custom)
 
     def _refresh_backend_controls(self) -> None:
-        """按当前后端显隐参数行：只留选中后端的字段，并处理字段间依赖。"""
+        """按当前后端编排参数行：当前后端平铺，其余后端折叠，字段间依赖照旧。"""
         backend = clean_backend(self.backend_select.currentData() or DEFAULT_BACKEND)
+        visible: dict[str, dict[str, bool]] = {}
         for provider in tts.providers():
-            active = provider.id == backend
             values = self._current_field_values(provider)
+            row_visible: dict[str, bool] = {}
             for spec in provider.fields:
-                row = self._field_rows.get((provider.id, spec.name))
-                if row is None:
-                    continue
-                visible = active
-                if visible and spec.hidden_when is not None:
+                show = True
+                if spec.hidden_when is not None:
                     dep_name, dep_value = spec.hidden_when
-                    visible = values.get(dep_name) != dep_value
-                row.setVisible(visible)
+                    show = values.get(dep_name) != dep_value
+                row_visible[spec.name] = show
+            visible[provider.id] = row_visible
+        self._tts_panel.apply(backend, visible)
         self._refresh_secret_hints()
+
+    def refresh_backend_rows(self) -> None:
+        """行被「语音」域搬进平卡后重新编排一次折叠与行序（域构建完由对话框调用）。"""
+        self._refresh_backend_controls()
 
     def _current_field_values(self, provider) -> dict:
         """读当前控件值（已按 provider 规则清洗），供依赖显隐判断。"""
@@ -389,15 +412,19 @@ class VoiceChimeSettingsPage(QWidget):
         self._refresh_secret_hints()
 
     def _refresh_secret_hints(self) -> None:
+        """凭据行只说状态：存在哪由凭据组标题那句统一交代，行里不再重复。"""
         for provider in tts.providers():
             for spec in tts.secret_fields(provider):
                 row = self._field_rows.get((provider.id, spec.name))
                 if row is None:
                     continue
-                saved = bool(tts_secrets.get(spec.secret_ref))
-                state = "已保存" if saved else "未设置"
-                where = "系统钥匙串" if tts_secrets.available() else "本次运行（钥匙串不可用）"
-                row.hint_label.setText(f"{spec.hint}\n凭据：{state}（{where}）")
+                row.hint_label.setText(f"{spec.hint} · {self._secret_state(spec)}")
+
+    @staticmethod
+    def _secret_state(spec: tts.TtsField) -> str:
+        if not tts_secrets.get(spec.secret_ref):
+            return "还没设置"
+        return "已保存" if tts_secrets.available() else "已保存（仅本次运行）"
 
     # ------------------------------------------------------------ 配置读写
     def apply_to_config(self) -> None:

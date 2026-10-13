@@ -150,6 +150,7 @@ from .settings_widgets import (
     SettingsSection,
     _CurrentPageStack,
     SettingsTabContainer,
+    reveal_settings_row,
     _SettingsPageShell,
     _line_edit,
     QuickLaunchItemRow,
@@ -1945,6 +1946,9 @@ class ModernSettingsDialog(QDialog):
                 ("节日提醒", festival_rows),
             ]
         )
+        # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
+        # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
+        self.voice_chime_page.refresh_backend_rows()
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
@@ -2018,15 +2022,7 @@ class ModernSettingsDialog(QDialog):
                 break
         self.sidebar.setCurrentRow(page_index)
         page = self.pages.widget(page_index)
-        ancestor = row.parentWidget()
-        while ancestor is not None and ancestor is not page:
-            if isinstance(ancestor, CollapsibleGroup):
-                # 命中折叠框内的行：先自动展开，否则搜索结果存在但看不见。
-                ancestor.set_expanded(True)
-            if isinstance(ancestor, SettingsTabContainer):
-                ancestor.activate_for_descendant(row)
-                break
-            ancestor = ancestor.parentWidget()
+        reveal_settings_row(row, page)
         scroll = page.findChild(QScrollArea, "settingsScroll")
         if scroll is not None:
             scroll.ensureWidgetVisible(row, 0, 24)

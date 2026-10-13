@@ -211,7 +211,7 @@ def test_service_cfg_matches_contract_shape_at_construction(tmp_path, monkeypatc
 def test_missing_edge_tts_degrades_to_bubble_without_synthesis(tmp_path, monkeypatch):
     """edge-tts 缺失（且后端就是 edge）：只气泡提示，不起合成线程。"""
     service, app, cfg = _service(tmp_path, monkeypatch, tts_available=False)
-    cfg.set("voice_chime_tts_backend", "edge")  # 钉住后端：默认后端已改为小米 MiMo
+    cfg.set("voice_chime_tts_backend", "edge")  # 钉住后端（默认已是 edge；这里防配置漂移）
     service.apply_config()
     service.say_now("整点报时")
 

@@ -101,8 +101,11 @@ BACKEND_EDGE = _edge_provider.PROVIDER.id
 BACKEND_MIMO = _mimo_provider.PROVIDER.id
 BACKENDS: tuple[str, ...] = tts.provider_ids()
 BACKEND_LABELS = tts.labels()
-# 默认走小米（用户点名要的），失败时按 voice_chime_tts_fallback 回退带 is_fallback 的后端。
-DEFAULT_BACKEND = BACKEND_MIMO
+# 默认走 edge（2026-10-13 改，原为小米 MiMo）：它免凭据，陌生人开箱即有声；mimo / doubao
+# 要用户自备 API Key，拿它们当默认等于新装即静音。失败时按 voice_chime_tts_fallback
+# 回退带 is_fallback 的后端。config.py 的 DEFAULTS 与本常量必须一致——它是「配置缺键/
+# 值非法」时的落点，两者分叉会让「默认」出现两种含义。
+DEFAULT_BACKEND = BACKEND_EDGE
 DEFAULT_TTS_FALLBACK = True
 
 #: 2026-09-22 实测已从微软在线音色表下线的音色（老清单里的 10 款）。只用于把

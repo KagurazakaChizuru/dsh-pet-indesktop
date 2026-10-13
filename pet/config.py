@@ -835,9 +835,14 @@ class Config:
             "voice_chime_show_quote": True,  # 台词/歌词开关
             "voice_chime_custom_quotes_zh": "",  # 自定义中文台词/歌词（一行一条，留空回退内置库）
             "voice_chime_custom_quotes_en": "",  # 自定义英文台词/歌词（一行一条，留空回退内置库）
-            # 合成后端：mimo（小米 MiMo TTS，OpenAI 兼容接口，API Key 存系统钥匙串）
-            # 或 edge（edge-tts，免 Key）；主后端失败时按 fallback 自动回退另一个。
-            "voice_chime_tts_backend": "mimo",  # mimo / edge
+            # 合成后端：edge（edge-tts，免 Key）/ mimo（小米 MiMo TTS，OpenAI 兼容接口，
+            # API Key 存系统钥匙串）/ sapi（Windows 本地语音）/ doubao（豆包 2.0）；
+            # 主后端失败时按 fallback 自动回退另一个。
+            # 默认 edge（2026-10-13 改，原为 mimo）：面向公众发包时，陌生人装上就要能听见
+            # 声音——mimo / doubao 都要用户自备 API Key，拿它们当默认等于新装即静音；
+            # edge 不需要任何凭据，且失败照走既有自动回退。只改仓库默认值，不动任何人
+            # 本机 config.json 里的显式取值。
+            "voice_chime_tts_backend": "edge",  # edge / mimo / sapi / doubao
             "voice_chime_tts_fallback": True,  # 主后端失败自动回退 edge
             "voice_chime_mimo_model": "mimo-v2.5-tts",  # 或 mimo-v2.5-tts-voicedesign
             "voice_chime_mimo_voice": "冰糖",  # 内置音色 id（中文名即 id）

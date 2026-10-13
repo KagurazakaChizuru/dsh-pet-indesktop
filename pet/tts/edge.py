@@ -229,18 +229,17 @@ class EdgeTtsProvider(TtsProvider):
     fields = (
         TtsField(
             "voice", "voice_chime_voice", "音色",
-            "微软在线音色（无需 API Key）。清单随微软增删维护；"
-            "选到已下线的音色会自动改用默认音色「晓晓」并记入日志。",
+            "微软在线音色，不用配 Key。",
             kind="select", default=DEFAULT_VOICE, options=VOICE_OPTIONS,
         ),
         TtsField(
             "rate", "voice_chime_rate", "语速",
-            "语速偏移百分比：0 为正常，正数更快，负数更慢。",
+            "0 正常，正数更快，负数更慢。",
             kind="number", default=DEFAULT_RATE, minimum=-100, maximum=100, suffix=" %",
         ),
         TtsField(
             "pitch", "voice_chime_pitch", "音调",
-            "音调偏移（Hz）：0 为正常，正数更尖锐，负数更低沉。",
+            "0 正常，正数更尖，负数更低。",
             kind="number", default=DEFAULT_PITCH, minimum=-50, maximum=50, suffix=" Hz",
         ),
     )

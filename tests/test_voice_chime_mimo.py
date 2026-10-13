@@ -65,10 +65,11 @@ def _qapp():
 # ============================================================ 纯逻辑
 
 
-def test_default_backend_is_mimo_with_shipped_voices():
-    """默认后端是小米 MiMo（用户点名要的），内置音色表非空且含默认音色。"""
-    assert DEFAULT_BACKEND == BACKEND_MIMO
-    assert default_chime_config()["voice_chime_tts_backend"] == BACKEND_MIMO
+def test_default_backend_is_edge_with_shipped_mimo_voices():
+    """默认后端是 edge-tts（2026-10-13 改，原为 mimo：面向公众发包时陌生人没有 API Key）；
+    MiMo 仍是可选后端，内置音色表非空且含默认音色。"""
+    assert DEFAULT_BACKEND == BACKEND_EDGE
+    assert default_chime_config()["voice_chime_tts_backend"] == BACKEND_EDGE
     ids = {value for value, _label in MIMO_VOICE_OPTIONS}
     assert len(ids) == 8, "官方内置音色 8 款（中文 4 + 英文 4）"
     assert DEFAULT_MIMO_VOICE in ids

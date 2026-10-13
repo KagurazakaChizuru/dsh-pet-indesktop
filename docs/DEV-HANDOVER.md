@@ -328,7 +328,7 @@ modern_settings_dialog.py
 | `voice_chime_show_quote` | 台词/歌词开关 | `True` | `clean_flag` |
 | `voice_chime_custom_quotes_zh` | 自定义中文台词/歌词（一行一条） | `""` | `clean_custom_quotes`：按行拆分、去控制字符、单条截断 120 字、去重保序；空则回退内置中文库 |
 | `voice_chime_custom_quotes_en` | 自定义英文台词/歌词（一行一条） | `""` | 同上；空则回退内置英文库 |
-| `voice_chime_tts_backend` | 合成后端 | `"mimo"`（小米 MiMo） | `clean_backend`：`mimo` / `edge`，非法回落 `mimo` |
+| `voice_chime_tts_backend` | 合成后端 | `"edge"`（edge-tts，免凭据；2026-10-13 由 `"mimo"` 改） | `clean_backend`：注册表里的 provider id（`edge` / `mimo` / `sapi` / `doubao`），非法回落 `edge` |
 | `voice_chime_tts_fallback` | 主后端失败时自动回退 edge | `True` | `clean_flag` |
 | `voice_chime_mimo_model` | MiMo 模型 | `"mimo-v2.5-tts"` | `clean_mimo_model`：内置音色 / `mimo-v2.5-tts-voicedesign`（音色设计） |
 | `voice_chime_mimo_voice` | MiMo 内置音色 | `"冰糖"` | `clean_mimo_voice`：中文 冰糖/茉莉/苏打/白桦，英文 Mia/Chloe/Milo/Dean |
@@ -345,13 +345,14 @@ modern_settings_dialog.py
 
 ## 五、语音报时功能（本项目主要定制点）
 
-涉及五个文件（四个自有 + 一个新增的凭据模块）：
+涉及六个文件（五个自有 + 一个新增的凭据模块）：
 
 | 文件 | 行数 | 层 | 职责 |
 |---|---|---|---|
-| `pet/voice_chime.py` | 540 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词每日排列轮换、后端尝试链、MiMo 请求体/响应解析、缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
+| `pet/voice_chime.py` | 543 | 纯逻辑 | 配置清洗、调度判定、槽位幂等、报时/气泡文本、台词每日排列轮换、后端尝试链、MiMo 请求体/响应解析、缓存键。**零 Qt、零 edge_tts**，可脱离 GUI 直接单测 |
 | `pet/voice_chime_service.py` | 811 | 服务 | 20s tick、预合成、合成链（MiMo HTTP / edge-tts 后台线程）、`_AudioBridge` 信号桥、`QMediaPlayer` 播放、气泡落地、缓存裁剪（mp3+wav）、降级 |
-| `pet/voice_chime_settings.py` | 440 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config`；含「合成后端」6 行与按后端显隐 |
+| `pet/voice_chime_settings.py` | 467 | UI | 设置页（全部控件包 `SettingRow`），`apply_to_config`；合成后端参数区按后端折叠（编排在 `pet/voice_chime_tts_panel.py`），文案只写人话 |
+| `pet/voice_chime_tts_panel.py` | 237 | UI | 「合成后端」参数区的折叠与行序：当前后端平铺在最上面、其余后端各占一行折叠头（行会被「语音」域搬进平卡，所以折叠落在行上而不是容器嵌套） |
 | `pet/tts_secrets.py` | 92 | 凭据 | `tts/mimo` 的钥匙串存取（惰性 import keyring、内存兜底），不依赖 Qt / pet.chat |
 | `pet/voice_chime_quotes.py` | 237 | 数据 | 台词/歌词库：中文 120 条 / 英文 96 条（`CHINESE_QUOTES` / `ENGLISH_QUOTES`），纯数据零依赖 |
 
@@ -475,7 +476,9 @@ _TTSWorker             ── provider.synth(text, plan, path)；TtsUnavailable 
 ```
 
 - **尝试链**：`[主后端] + fallback_ids()`（自身声明 `is_fallback=True` 的后端），
-  `voice_chime_tts_fallback` 可关。默认 `mimo` 主、`edge` 备。
+  `voice_chime_tts_fallback` 可关。默认 `edge` 主（2026-10-13 改，原为 `mimo`：面向公众
+  发包时陌生人没有 API Key，默认后端必须免凭据）。目前只有 `edge` 声明 `is_fallback`，
+  所以默认 edge 时链上只有它自己——失败仍是既有语义（只出气泡），回退机制本身没动。
 - **合成前自检**（`preflight`，GUI 线程、**不联网**）：把「配置里已不成立的东西」换成
   能用的并给用户一句话说明。实例：微软 2026-09 下架了 10 款中文音色（晓涵等），配上它们
   只会得到 `NoAudioReceived`——用户看到的是「声音没了」；现在会自动改用默认音色并提示。

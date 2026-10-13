@@ -10,6 +10,8 @@
 
 API Key 存系统钥匙串（``pet/tts_secrets``，ref ``tts/mimo``）：本模块只声明
 ``kind="secret"`` 字段，不碰 keyring——服务层读出后注入 ``values``。
+Key 在小米开放平台（``platform.xiaomimimo.com``）生成：这句只留在这里，
+设置页不讲课（机主 2026-10-13：「各种信息太复杂了……写得更人性化和简洁一点」）。
 """
 
 from __future__ import annotations
@@ -125,28 +127,26 @@ class MimoTtsProvider(TtsProvider):
     unavailable_message = MISSING_MESSAGE
     fields = (
         TtsField(
-            "model", "voice_chime_mimo_model", "MiMo 模型",
-            "内置音色：直接选音色；音色设计：用「风格指令」里的文字描述生成音色（无需样本）。",
+            "model", "voice_chime_mimo_model", "音色来源",
+            "内置音色，或按文字描述现造。",
             kind="select", default=DEFAULT_MIMO_MODEL, options=MIMO_MODELS,
         ),
         TtsField(
-            "voice", "voice_chime_mimo_voice", "MiMo 音色",
-            "小米内置音色（中文：冰糖 / 茉莉 / 苏打 / 白桦；英文：Mia / Chloe / Milo / Dean）。",
+            "voice", "voice_chime_mimo_voice", "音色",
+            "小米自带音色，中英文都有。",
             kind="select", default=DEFAULT_MIMO_VOICE, options=MIMO_VOICE_OPTIONS,
             hidden_when=("model", MIMO_MODEL_VOICE_DESIGN),
         ),
         TtsField(
             "style", "voice_chime_mimo_style", "风格指令",
-            "可选：用自然语言描述语气/情绪/节奏（如「温柔但有点疲惫」「脆生生的小女孩童声」）。"
-            "选「音色设计」模型时这里是必填的音色描述，写具体一点效果更好。",
+            "一句话描述语气，音色设计必填。",
             kind="multiline", default=DEFAULT_MIMO_STYLE, max_length=MIMO_STYLE_MAX_LEN,
             min_height=88,
-            placeholder="如：轻快、带点笑意，语速稍快（留空按模型默认）",
+            placeholder="如：轻快、带点笑意（留空按默认）",
         ),
         TtsField(
-            "api_key", "voice_chime_mimo_api_key", "MiMo API Key",
-            "在 platform.xiaomimimo.com 生成；只存系统钥匙串，不写进配置文件。"
-            "留空表示不改动已保存的 Key。",
+            "api_key", "voice_chime_mimo_api_key", "API Key",
+            "去小米开放平台生成。",
             kind="secret", default="", secret_ref=SECRET_REF,
         ),
     )

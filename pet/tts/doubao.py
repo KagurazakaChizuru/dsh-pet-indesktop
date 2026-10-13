@@ -13,6 +13,10 @@ body: {"user":{"uid":…},"req_params":{"text":…,"speaker":"<2.0 音色>",
 响应是 SSE：成功码 `code=0` / `20000000`，音频是**逐片 base64**（要全部拼接）；
 `55000000`＝音色与 resource 不匹配（2.0 音色名字里带 `uranus`）。
 
+「API Key」在火山控制台「豆包语音 → API Key 管理」里生成（那串 UUID）。上面这些
+（接口地址、资源号、错误码、控制台路径）只留在这里：设置页自 2026-10-13 起只写人话，
+技术细节一律不上界面（机主原话：「现在语音界面的各种信息太复杂了」）。
+
 **音调**：2.0 接口不吃音调参数（`pitch_rate`/`pitch`/`pitch_ratio` 实测均被忽略），
 所以音调在本地用 ffmpeg 变调（`asetrate` + `aresample` + `atempo`，**时长不变**）。
 """
@@ -33,7 +37,9 @@ from pathlib import Path
 from .base import TtsField, TtsProvider, TtsUnavailable, register
 
 PROVIDER_ID = "doubao"
-LABEL = "豆包语音 2.0（火山引擎）"
+#: 展示名里的括号是「选它要付什么代价」，和 edge（免 Key）/ MiMo（需 API Key）对齐：
+#: 厂家名（火山引擎）在这里没用——用户要的是「点下去会不会让我填东西」。
+LABEL = "豆包语音 2.0（需 API Key）"
 ENDPOINT = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"
 RESOURCE_ID = "seed-tts-2.0"
 SAMPLE_RATE = 24000
@@ -64,21 +70,18 @@ class DoubaoTtsProvider(TtsProvider):
     fields = (
         TtsField(
             "voice", "voice_chime_doubao_speaker", "音色",
-            "2.0 音色（名字里带 uranus）；配错会得到 55000000「音色与资源不匹配」。"
-            "完整音色表见 ark-skills 的 voices.md。",
+            "豆包 2.0 音色。",
             kind="select", default="zh_female_peiqi_uranus_bigtts", options=VOICE_OPTIONS,
             allow_custom=True,
         ),
         TtsField(
-            "pitch", "voice_chime_doubao_pitch", "音调（本地变调）",
-            "0–30（%）。2.0 接口不支持音调，这里在本地用 ffmpeg 变调、**时长不变**"
-            "——机主实测 15% 合适；调太高会有金属感。",
+            "pitch", "voice_chime_doubao_pitch", "音调",
+            "0 到 30，调太高会有金属感。",
             kind="number", default=15, minimum=0, maximum=30, suffix="%",
         ),
         TtsField(
             "api_key", "voice_chime_doubao_api_key", "API Key",
-            "火山控制台「豆包语音 → API Key 管理」里那串 UUID。只存系统钥匙串；"
-            "留空表示不改动已保存的值。",
+            "去火山控制台生成。",
             kind="secret", default="", secret_ref=SECRET_REF,
         ),
     )

@@ -114,14 +114,17 @@ class SapiTtsProvider(TtsProvider):
     unavailable_message = MISSING_MESSAGE
     fields = (
         TtsField(
-            "voice", "voice_chime_sapi_voice", "本地音色",
-            "系统已安装的 SAPI5 语音（中文一般为 Microsoft Huihui Desktop）。"
-            "留空＝自动挑中文音色；换了语音包可手填描述。",
-            kind="select", default="", options=installed_voices(), allow_custom=True,
+            "voice", "voice_chime_sapi_voice", "音色",
+            "系统里已经装好的声音。",
+            kind="select", default="",
+            # 空值＝自动挑中文音色：把它作为一个明确的选项写出来，别让用户对着
+            # 「不在清单里：」这种空值占位猜（设置页只在值非空时才标「不在清单里」）。
+            options=(("", "自动挑（推荐）"),) + installed_voices(),
+            allow_custom=True,
         ),
         TtsField(
             "rate", "voice_chime_sapi_rate", "语速",
-            "−10（最慢）到 10（最快），0 为系统默认。本机实测默认语速约 2.7 秒读一句话。",
+            "−10 最慢到 10 最快，0 默认。",
             kind="number", default=0, minimum=-10, maximum=10,
         ),
     )
