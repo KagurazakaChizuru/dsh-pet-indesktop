@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -185,7 +186,13 @@ def _ffmpeg() -> str | None:
 
 
 def _write_with_pitch(audio: bytes, pitch_pct: int, out_path: Path) -> None:
-    """本地变调（保时长）：asetrate 抬基频 → aresample 还原采样率 → atempo 拉回时长。"""
+    """本地变调（保时长）：asetrate 抬基频 → aresample 还原采样率 → atempo 拉回时长。
+
+    ``pitch_pct <= 0`` 直接写原音、**不起子进程**（少一次无意义的窗口与开销）。
+    """
+    if pitch_pct <= 0:
+        out_path.write_bytes(audio)
+        return
     ffmpeg = _ffmpeg()
     if not ffmpeg:
         out_path.write_bytes(audio)          # 没有 ffmpeg 就退回原音，不静默失败
@@ -201,6 +208,8 @@ def _write_with_pitch(audio: bytes, pitch_pct: int, out_path: Path) -> None:
             [ffmpeg, "-y", "-loglevel", "quiet", "-i", str(source),
              "-af", filter_chain, "-b:a", "128k", str(out_path)],
             check=True, timeout=TIMEOUT_S,
+            # 绝不弹控制台黑窗：机主对"又弹一个窗口"有明文红线（同 agent_link / harness_launcher 的写法）
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
         )
     except Exception:
         out_path.write_bytes(audio)          # 变调失败不阻断播报
