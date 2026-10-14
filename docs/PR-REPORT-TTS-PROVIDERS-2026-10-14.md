@@ -168,7 +168,84 @@ Python 3.11（`D:\dsh-pet\.venv`）；测试日 2026-10-14。
 
 ## 三、实机运行记录（真机命令与输出）
 
-（本节在门禁跑完后回填。）
+### 1. 静态检查
+
+```
+$ .venv\Scripts\python.exe -m ruff check .
+All checks passed!
+```
+
+（ruff 这一关在本 PR 里抓到过实打实的东西：删掉服务层那段被 provider 接管的
+edge 死代码后，留下 `_VOICE_SUBSTITUTION_NOTICES` 未定义（F821）与 6 处空掉的
+import——pytest 因为用例没走到那条路径而全绿，只有 ruff 报了出来。）
+
+### 2. 全量用例（按文件切片、各起独立进程）
+
+单进程跑全量会撞既存原生崩溃 `0xC0000005`（落点随机、崩前纯绿），所以按仓库既有
+口径用 `.scratch/run_chunks.py` 起独立进程取证：
+
+```
+$ .venv\Scripts\python.exe -X faulthandler .scratch\run_chunks.py
+collect 7060 用例 / 346 文件，切片 <= 500 用例
+```
+
+分 16 片（每片 ≤500 用例）逐片起独立进程，**16 片全部跑完、无原生崩溃**：
+
+```
+c01  95 passed          c09  418 passed
+c02  478 passed, 6 skipped      c10  495 passed
+c03  448 passed, 3 skipped      c11  4 failed, 487 passed, 3 skipped
+c04  2 failed, 394 passed, 4 skipped   c12  4 failed, 486 passed
+c05  498 passed          c13  483 passed
+c06  483 passed          c14  391 passed, 1 skipped
+c07  2 failed, 470 passed, 2 skipped   c15  481 passed
+c08  488 passed          c16  33 passed, 1 skipped
+
+合计：passed 7028 / failed 12 / skipped 20 —— **7060 用例全部跑到**。
+```
+
+那 12 条失败**逐条**在未改动的基线上复核过（见下一节），全部是上游既有。
+原始逐片日志：`.scratch/tts-providers-pr/chunks-final.log`。
+
+### 3. 与「既有红」的区分（在未改动的上游基线上复核）
+
+本机在**完全未改动的 `ffc80a6`** 上跑同一批用例，用来把「上游既有红」与
+「本改动引入的红」分开：
+
+```
+$ git stash -q                       # 工作区 == ffc80a6
+$ .venv\Scripts\python.exe -m pytest tests/test_settings_page_guide.py \
+      tests/test_menu_layout.py tests/test_desktop_pet_features.py -q
+8 failed, 188 passed in 51.91s
+
+$ git stash pop -q                   # 恢复本分支改动
+$ .venv\Scripts\python.exe -m pytest tests/test_settings_page_guide.py \
+      tests/test_menu_layout.py tests/test_desktop_pet_features.py -q
+4 failed, 192 passed in 56.69s
+
+# 另外一族（节日页文案 / 行壳顶层窗 / 文案 lint / 默认值快照）在两条线上同名同数：
+$ （基线）8 failed, 15 passed      $ （本分支）8 failed, 15 passed
+```
+
+**结论：基线 8 红 → 本分支 4 红（该族），净减 4 条，未引入任何新的红。**
+剩下那 4 条是「页内跳转条 + 组描述」一族的上游既有问题（`SECTION_GUIDE` 里有、
+界面上因平台闸门/折叠态而看不到的组），与本 PR 无关，故不顺手改。
+完整台账见 `.scratch/tts-providers-pr/baseline-red.md`。
+
+**唯一一次本分支自己引入又自己修掉的**：我给新卡片「你的生日」写的描述里带了
+`MM-DD` 这种格式占位符，被 `test_section_descriptions_pass_the_copy_lint` 抓到
+（该用例在基线上是绿的），已改成纯人话「填了就在当天有专属祝福。」。
+
+### 4. 受影响时序族满载复跑
+
+```
+$ .venv\Scripts\python.exe -m pytest tests/test_voice_chime_service.py \
+      tests/test_voice_chime.py tests/test_voice_chime_mimo.py tests/test_tts_edge.py \
+      tests/test_tts_doubao.py tests/test_tts_secrets.py \
+      tests/test_voice_chime_settings_layout.py tests/test_festival_settings_layout.py \
+      tests/test_architecture.py tests/test_config_schema.py -q
+302 passed in 32.13s
+```
 
 ---
 
