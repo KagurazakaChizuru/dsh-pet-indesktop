@@ -1766,7 +1766,11 @@ class VoiceChimeService:
             if not self._cache_dir.is_dir():
                 return
             files = sorted(
-                (p for p in self._cache_dir.glob("*.mp3")),
+                # 各后端的产物都要算进上限：edge 出 mp3、MiMo 出 wav；
+                # 只 glob mp3 会让 wav 缓存无上限地涨下去（新增产物格式时
+                # 这里与 _sweep_orphan_temp_files 都要跟着认）。
+                (p for p in self._cache_dir.iterdir()
+                 if p.suffix.lower() in (".mp3", ".wav") and p.is_file()),
                 key=lambda p: p.stat().st_mtime,
             )
             for old in files[: max(0, len(files) - self.MAX_CACHE_FILES)]:

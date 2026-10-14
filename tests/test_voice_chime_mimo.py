@@ -466,7 +466,8 @@ def test_settings_page_clear_button_removes_saved_key(tmp_path, monkeypatch):
     monkeypatch.setattr(tts_secrets, "set", lambda ref, value: True)
 
     page = VoiceChimeSettingsPage(Config(base=tmp_path))
-    clear_btn = page.mimo_key_row.findChild(QPushButton)
+    # 按对象名取「清除」：行里还有「改回默认」按钮，按类型 findChild 会先抓到它。
+    clear_btn = page.mimo_key_row.findChild(QPushButton, "ttsSecretClear")
     assert clear_btn is not None, "密钥行必须带清除按钮"
     clear_btn.click()
     page.apply_to_config()
