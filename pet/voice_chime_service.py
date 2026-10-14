@@ -95,6 +95,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import tts, tts_secrets
 from .voice_chime import (
     DEFAULT_VOICE,
     VOICE_OPTIONS,
@@ -103,10 +104,9 @@ from .voice_chime import (
     cache_key,
     chime_slot,
     clean_voice,
-    edge_pitch_arg,
-    edge_rate_arg,
     next_chime_in_seconds,
     normalize_chime_config,
+    synth_attempts,
     voice_label,
 )
 
@@ -153,9 +153,14 @@ def _remaining_unlock_ms(seconds: float) -> int:
         return _UNLOCK_INTERVAL_MS
 
 
-# 合成线程里 edge_tts 导入失败时的回调错误码：GUI 侧据此走 _notify_missing_tts
-# 降级（"请 pip install edge-tts"），而不是笼统的"合成失败"。
-EDGE_TTS_MISSING = "edge-tts-missing"
+# 「缺东西」错误码：由 provider 自己声明（与 TtsProvider.availability_code 同源），
+# 服务层据此给可操作的降级提示，而不是笼统的「合成失败」。保留常量名是为了既有
+# 调用点与测试不必跟着改。
+EDGE_TTS_MISSING = tts.edge.AVAILABILITY_CODE
+MIMO_KEY_MISSING = tts.mimo.AVAILABILITY_CODE
+
+# 同一条 provider 自检提示每个进程只弹一次（如「音色已下架，已改用晓晓」）
+_ANNOUNCED_NOTES: set[str] = set()
 
 #: 合成中间产物的文件名后缀。最终缓存路径永远是 ``<key>.mp3``，半截产物只可能叫
 #: ``<key>.<唯一标识>.part``——清扫只需按这个模式匹配，不必按修改时间猜。
@@ -355,85 +360,98 @@ def _sweep_orphan_temp_files(cache_dir: Path) -> None:
 
 
 class _TTSWorker(threading.Thread):
-    """后台线程：edge-tts 合成 mp3 后经回调返回。
+    """后台线程：按尝试链逐个合成，第一个成功的写盘并回调返回。
+
+    ``attempts`` 是本模块外的纯逻辑产物（``voice_chime.synth_attempts``），已排好
+    主/备顺序；``paths`` 与之等长——每个后端各自的缓存路径（扩展名由 provider 的
+    合成计划给出：edge mp3、MiMo wav）。
+
+    真正的合成本体在 ``TtsProvider.synth()`` 里（provider 自己惰性导入依赖、自己
+    组请求），所以本类**不需要**知道任何后端的细节：加后端不用动这里。
+    全部失败时回调带回按顺序拼接的各后端错误（第一个是主后端，用户最该知道）。
 
     线程不直接碰 Qt 对象；完成后把结果交给 owner 提供的回调（owner 在
     GUI 线程，回调触发 queued 信号桥接）。
 
-    **落盘是原子的**：``edge_tts.save`` 边收边写，所以合成写的是同目录临时文件
-    （``*.part``），成功后 ``os.replace`` 换名到最终缓存路径。直接写最终路径时，
-    进程在合成中途退出（本线程是 daemon，随进程被斩）会留下永久截断的 mp3，
-    而 ``_cache_hit`` 只看"存在且非空"→ 天天命中它、天天播静音，还永远不再重合成。
+    **落盘是原子的**：合成写的是同目录临时文件（``*.part``），成功后 ``_publish()``
+    换名到最终缓存路径。直接写最终路径时，进程在合成中途退出（本线程是 daemon，
+    随进程被斩）会留下永久截断的文件，而 ``_cache_hit`` 只看"存在且非空"→ 天天
+    命中它、天天播静音，还永远不再重合成。这一层由**本类**统一提供：provider 只需
+    往 ``synth(text, plan, temp_path)`` 给的临时路径里写。
+
+    临时文件台账（``_register_live_temp``）同样在这里登记：台账的意义是"本次进程
+    正在写的路径不受启动清扫影响"，与哪个后端无关。
     """
 
-    def __init__(self, text: str, voice: str, rate: str, pitch: str, out_path: Path, on_done) -> None:
+    def __init__(self, text: str, attempts, paths, on_done) -> None:
         super().__init__(daemon=True)
         self._text = text
-        self._voice = voice
-        self._rate = rate
-        self._pitch = pitch
-        self._out_path = out_path
-        self._temp_path = _temp_cache_path(out_path)
+        self._attempts = tuple(attempts)
+        self._paths = tuple(paths)
         self._on_done = on_done
+        # 每个后端各自的临时路径：与 ``_paths`` 等长，合成前逐条登记进台账。
+        self._temp_paths = [_temp_cache_path(Path(path)) for path in self._paths]
 
     def run(self) -> None:  # noqa: D102
-        # 临时文件台账：登记在册的路径不受启动清扫影响（见 _sweep_orphan_temp_files）。
-        # 用 try/finally 而不是散在各条 return 前：任何异常路径都要注销，否则台账
-        # 会随着合成次数无界增长。
-        _register_live_temp(self._temp_path)
-        try:
-            self._synthesize_to_cache()
-        finally:
-            _unregister_live_temp(self._temp_path)
-
-    def _synthesize_to_cache(self) -> None:
-        # 在线音色表顺手刷新（有网就更新缓存，失败无所谓）——只在这个后台线程里联网
-        refresh_voice_list()
-        # 主音色反复失败（下架 / 限流 / 参数被拒）时退到默认音色再试一轮
-        candidates = [self._voice]
-        if self._voice != DEFAULT_VOICE:
-            candidates.append(DEFAULT_VOICE)
         errors: list[str] = []
-        for candidate in candidates:
-            for attempt in range(1, EDGE_RETRY_TIMES + 1):
-                try:
-                    asyncio.run(self._synthesize(candidate))
-                except ImportError:
-                    # edge_tts 本该在 _synthesize 里惰性导入（见 _edge_tts_available）：
-                    # 探测通过但真导入失败（半装 / 被禁用）时也走这里，回 GUI 侧同一套
-                    # "请 pip install edge-tts" 降级，而不是笼统的合成失败。
-                    logger.warning("edge-tts 不可导入，降级为仅气泡提示")
-                    self._discard_partial()
-                    self._on_done(str(self._out_path), self._text, EDGE_TTS_MISSING)
-                    return
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"{candidate} 第{attempt}次: {type(exc).__name__}: {exc}")
-                    logger.warning("edge-tts 合成失败（%s 第%d次）：%s", candidate, attempt, exc)
-                    self._discard_partial()
-                    if attempt < EDGE_RETRY_TIMES and candidate != candidates[-1]:
-                        time.sleep(EDGE_RETRY_DELAY_S)
-                    continue
-                if _nonempty_file(self._temp_path):
-                    # 换名成功才回成功回调：换名失败等于这段音频没落进缓存，
-                    # 报成功会让到点的缓存命中路径播一个不存在的文件。
-                    if not self._publish():
-                        errors.append(f"{candidate} 第{attempt}次: 缓存换名失败")
-                        self._discard_partial()
-                        continue
-                    if candidate != self._voice:
-                        logger.warning(
-                            "音色 %s 合成失败，已改用默认音色 %s", self._voice, candidate
-                        )
-                    self._on_done(str(self._out_path), self._text, "")
-                    return
+        for index, (attempt, path) in enumerate(zip(self._attempts, self._paths)):
+            temp_path = self._temp_paths[index]
+            provider = tts.get(getattr(attempt, "provider", ""))
+            if provider is None:
+                errors.append(f"未知的合成后端：{getattr(attempt, 'provider', '')}")
+                continue
+            # 临时文件台账：登记在册的路径不受启动清扫影响（见 _sweep_orphan_temp_files）。
+            # 用 try/finally 而不是散在各条 return 前：任何异常路径都要注销，否则台账
+            # 会随着合成次数无界增长。
+            _register_live_temp(temp_path)
+            try:
+                provider.synth(self._text, attempt.plan, temp_path)
+            except tts.TtsUnavailable as exc:
+                # provider 在合成时才发现自己不可用（缺库 / 缺 Key）
+                self._discard_partial(temp_path)
+                errors.append(exc.code or provider.availability_code)
+                logger.warning("%s 当前不可用（%s），尝试下一个合成后端", provider.id, exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 —— 单个后端失败不该终止整条链
+                # 失败产物必须清掉：provider 多半是先建文件再写（edge_tts.save 就是），
+                # 半截/0 字节文件留在缓存目录会被后续 exists() 判定成"已有缓存"，
+                # 播出来是一声静音且再也不重合成。
+                self._discard_partial(temp_path)
+                errors.append(f"{type(exc).__name__}: {exc}")
+                logger.warning("%s 合成失败：%s", provider.id, exc)
+                continue
+            finally:
+                _unregister_live_temp(temp_path)
+            if not _nonempty_file(temp_path):
                 # 服务端「成功」但没给音频（0 字节）：也算失败，别留下空缓存
-                errors.append(f"{candidate} 第{attempt}次: 服务端未返回音频（空文件）")
-                self._discard_partial()
-        self._on_done(
-            str(self._out_path), self._text, "edge-tts 合成失败 → " + "；".join(errors[-4:])
-        )
+                errors.append(f"{provider.id}: 服务端未返回音频（空文件）")
+                self._discard_partial(temp_path)
+                continue
+            # 换名成功才回成功回调：换名失败等于这段音频没落进缓存，
+            # 报成功会让到点的缓存命中路径播一个不存在的文件。
+            if not self._publish(temp_path, Path(path)):
+                errors.append(f"{provider.id}: 缓存换名失败")
+                self._discard_partial(temp_path)
+                continue
+            self._on_done(str(path), self._text, "")
+            return
+        fallback_path = str(self._paths[0]) if self._paths else ""
+        self._on_done(fallback_path, self._text, "|".join(errors) or "没有可用的合成后端")
 
-    def _publish(self) -> bool:
+    @staticmethod
+    def _discard_partial(temp_path: Path) -> None:
+        """删掉本次合成留下的临时文件。
+
+        只删临时文件、**不碰最终路径**：最终路径上的东西只可能是别的合成原子换名
+        出来的完整缓存，顺手删掉会毁掉一份本来能用的缓存。
+        """
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("清理半截合成产物失败：%s", temp_path)
+
+    @staticmethod
+    def _publish(temp_path: Path, out_path: Path) -> bool:
         """把临时文件原子换名到最终缓存路径（同目录内换名 + 瞬时共享冲突重试）。
 
         这是本模块"缓存永远不半截"的全部机制：最终路径上只可能出现完整文件或
@@ -454,35 +472,11 @@ class _TTSWorker(threading.Thread):
         from .config import atomic_replace_with_retry
 
         try:
-            atomic_replace_with_retry(self._temp_path, self._out_path)
+            atomic_replace_with_retry(temp_path, out_path)
             return True
         except OSError:
-            logger.warning("语音缓存换名失败：%s", self._out_path, exc_info=True)
+            logger.warning("语音缓存换名失败：%s", out_path, exc_info=True)
             return False
-
-    def _discard_partial(self) -> None:
-        """删掉本次合成留下的临时文件。
-
-        只删临时文件、**不碰最终路径**：最终路径上的东西只可能是别的合成原子换名
-        出来的完整缓存，顺手删掉会毁掉一份本来能用的缓存。
-        """
-        try:
-            self._temp_path.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("清理半截合成产物失败：%s", self._temp_path)
-
-    async def _synthesize(self, voice: str) -> None:
-        # 惰性导入：只在真的要合成的后台线程里付这笔 import 成本。
-        import edge_tts
-
-        communicate = edge_tts.Communicate(
-            self._text,
-            voice,
-            rate=self._rate,
-            pitch=self._pitch,
-            proxy=_resolve_edge_tts_proxy(),
-        )
-        await communicate.save(str(self._temp_path))
 
 
 class _AudioBridge:
@@ -850,49 +844,33 @@ class VoiceChimeService:
             return
         if self._busy:
             return  # 合成中，下个 tick（20s 内）再试，窗口 60s 足够
-        if not _EDGE_TTS_AVAILABLE:
+        attempts = self._usable_attempts()
+        if not attempts:
             return
         sentence = build_chime_sentence(next_at, self._cfg)
         bubble = build_bubble_sentence(next_at, self._cfg)
-        voice, note = resolve_voice(self._cfg["voice"])
-        if note:
-            self._announce_voice_substitution(note)
-        key = cache_key(
-            sentence,
-            {
-                "voice": voice,
-                "rate": self._cfg["rate"],
-                "pitch": self._cfg["pitch"],
-            },
-        )
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self._cache_dir / f"{key}.mp3"
+        paths = [self._cache_path(sentence, attempt) for attempt in attempts]
         # 先占位：即便本次合成未在报时点前完成，到点也会回退即时合成。
         self._precache_slot = next_slot
         self._precache_text = sentence
         self._precache_bubble = bubble
-        self._precache_path = str(out_path) if _cache_hit(out_path) else None
-        if _cache_hit(out_path):
-            logger.info("预合成命中已有缓存：%s", out_path.name)
+        self._precache_path = next((str(p) for p in paths if _cache_hit(p)), None)
+        if self._precache_path:
+            logger.info("预合成命中已有缓存：%s", Path(self._precache_path).name)
             return
         self._busy = True
         self._busy_since = time.monotonic()
         self._synthesis_role = "precache"
         self._reararm_watchdog()
         generation = self._next_synthesis_generation()
-        # 音色必须用 ``resolve_voice`` 的**结果**：缓存 key 与即时合成（_fire）用的
-        # 都是替换后的音色，这里传配置原值会让预合成的产物落到另一个 key 上——音色
+        # 尝试序列里的音色/参数一律取 ``_usable_attempts()`` 的**结果**（provider 的
+        # ``preflight`` 已把下架音色换成可用的）：缓存 key 与即时合成（_fire）用的
+        # 都是替换后的值，这里传配置原值会让预合成的产物落到另一个 key 上——音色
         # 下架时预合成会白试两轮（配置原值在在线表里不存在），还正好踩进 45s 超时
         # 自愈的竞态，到点只好回退即时合成。
-        worker = _TTSWorker(
-            sentence,
-            voice,
-            edge_rate_arg(self._cfg["rate"]),
-            edge_pitch_arg(self._cfg["pitch"]),
-            out_path,
-            self._worker_callback(generation),
-        )
-        logger.info("预合成下一报时音频（%ds 后）：%s", next_secs, out_path.name)
+        worker = _TTSWorker(sentence, attempts, paths, self._worker_callback(generation))
+        logger.info("预合成下一报时音频（%ds 后）：%s", next_secs, paths[0].name)
         worker.start()
 
     def _consume_precache(self, slot: str) -> str | None:
@@ -917,6 +895,61 @@ class VoiceChimeService:
         self._precache_path = None
         return None
 
+    # ------------------------------------------------------------ 合成后端
+    def _secret_values(self) -> dict[str, dict[str, str]]:
+        """按 provider 声明的 secret 字段读系统钥匙串（纯逻辑层不碰凭据）。
+
+        返回 ``{provider_id: {字段名: 值}}``，注入 ``synth_attempts``；provider 若要
+        新增凭据，只需在 ``fields`` 里加一个 ``kind="secret"`` 字段，这里自动跟上。
+        """
+        secrets_map: dict[str, dict[str, str]] = {}
+        for provider in tts.providers():
+            specs = tts.secret_fields(provider)
+            if specs:
+                secrets_map[provider.id] = {
+                    spec.name: tts_secrets.get(spec.secret_ref) for spec in specs
+                }
+        return secrets_map
+
+    def _usable_attempts(self) -> tuple[tts.TtsAttempt, ...]:
+        """可用的合成尝试序列：provider 自报不可用的先摘掉，不浪费一次往返。
+
+        摘掉而不是留给 worker 去失败，是为了让「没配 Key 就自动走后备后端」不额外
+        付一次 HTTP 往返；全摘光时调用方走「只有气泡」的降级提示。
+
+        这里还会跑一遍 ``provider.preflight()``：把「配置里已不成立的东西」先换掉
+        （典型：在线音色被下架 → 换默认音色），并把说明转达给用户——否则用户只会
+        看到「声音没了」，不知道是音色本身不存在了。
+        """
+        usable: list[tts.TtsAttempt] = []
+        for attempt in synth_attempts(self._cfg, secrets=self._secret_values()):
+            provider = tts.get(attempt.provider)
+            if provider is None:
+                continue
+            values, note = provider.preflight(attempt.values)
+            if note:
+                attempt.values = values
+                attempt.plan = provider.plan(values)
+                self._announce_once(note)
+            if provider.availability(attempt.values):
+                continue
+            usable.append(attempt)
+        return tuple(usable)
+
+    def _announce_once(self, note: str) -> None:
+        """同一条提示每个进程只弹一次（避免每次报时都重复刷屏）。"""
+        if note in _ANNOUNCED_NOTES:
+            logger.debug("已提示过：%s", note)
+            return
+        _ANNOUNCED_NOTES.add(note)
+        logger.warning(note)
+        self._bubble(note)
+
+    def _cache_path(self, text: str, attempt: tts.TtsAttempt) -> Path:
+        """该后端该文本的缓存路径（扩展名由 provider 的合成计划给出）。"""
+        key = cache_key(text, self._cfg, provider_id=attempt.provider)
+        return self._cache_dir / f"{key}.{attempt.ext}"
+
     def _fire(self, sentence: str, now: datetime, bubble_text: str | None = None,
               *, show_bubble: bool = True, role: str = "play",
               respect_quiet: bool = True) -> None:
@@ -936,7 +969,8 @@ class VoiceChimeService:
         排队入口另有一道**同语义**的闸（免打扰期间不入队，免得免打扰结束后补播一条
         过期提醒），出队时仍走本方法再判一次——免打扰状态是现读的，不是入队快照。
         """
-        if not _EDGE_TTS_AVAILABLE:
+        attempts = self._usable_attempts()
+        if not attempts:
             self._notify_missing_tts()
             return
         bubble = bubble_text if bubble_text is not None else build_bubble_sentence(now, self._cfg)
@@ -947,23 +981,14 @@ class VoiceChimeService:
             if show_bubble:
                 self._bubble(bubble)
             return
-        voice, note = resolve_voice(self._cfg["voice"])
-        if note:
-            self._announce_voice_substitution(note)
-        key = cache_key(
-            sentence,
-            {
-                "voice": voice,
-                "rate": self._cfg["rate"],
-                "pitch": self._cfg["pitch"],
-            },
-        )
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        out_path = self._cache_dir / f"{key}.mp3"
+        paths = [self._cache_path(sentence, attempt) for attempt in attempts]
         # 缓存命中（含预合成已完成）直接播放，零网络延迟；合成中不阻塞缓存播放。
         # 命中要求文件非空：失败的合成会留下 0 字节文件，只判 exists() 会把它当成
         # 「已有缓存」→ 播出一声静音且再也不重新合成。
-        if _cache_hit(out_path):
+        for out_path in paths:
+            if not _cache_hit(out_path):
+                continue
             # 起播前记下这一段的免打扰口径：免打扰在它播放**期间**才生效时按它决定
             # 切不切（见 _on_quiet_state_changed）。放在这里而不是播放方法里，是为了
             # 写入口径的地方与决定"播什么"的地方同一处。
@@ -995,14 +1020,7 @@ class VoiceChimeService:
         self._stopped = False
         self._reararm_watchdog()
         generation = self._next_synthesis_generation()
-        worker = _TTSWorker(
-            sentence,
-            voice,
-            edge_rate_arg(self._cfg["rate"]),
-            edge_pitch_arg(self._cfg["pitch"]),
-            out_path,
-            self._worker_callback(generation),
-        )
+        worker = _TTSWorker(sentence, attempts, paths, self._worker_callback(generation))
         worker.start()
 
     def _reararm_watchdog(self) -> None:

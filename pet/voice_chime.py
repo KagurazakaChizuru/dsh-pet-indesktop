@@ -20,6 +20,9 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
+from . import tts
+from .tts import edge as _edge_provider
+from .tts import mimo as _mimo_provider
 from .voice_chime_quotes import CHINESE_QUOTES, ENGLISH_QUOTES
 
 # 调度模式键（设置页 ModernSelect 的 data 与此对应）。
@@ -55,6 +58,44 @@ DEFAULT_SHOW_QUOTE = True  # 台词/歌词开关
 # 乘 3 与取模 3 恰好对消 —— 批次只由「当天第几段」决定，日期被自己抵消掉，于是
 # 每天同一时刻永远是同一句（用户反馈「几乎每天都是一样的台词」即由此而来）。
 _MAX_CUSTOM_QUOTE_LEN = 120  # 自定义单条台词长度上限（超长截断，防误粘长文）
+
+# ---------------------------------------------------------------- 合成后端
+# 后端清单/标签来自注册表（pet/tts）：新增 provider 后这里自动跟着变，不需要改本文件。
+# 本模块仍是纯逻辑层：只看「后端名 + 参数 + 合成计划」，不 import 任何网络或 TTS 库——
+# 真正的合成在 provider.synth() 里，由 pet/voice_chime_service.py 的后台线程调用。
+BACKEND_EDGE = _edge_provider.PROVIDER.id
+BACKEND_MIMO = _mimo_provider.PROVIDER.id
+BACKENDS: tuple[str, ...] = tts.provider_ids()
+BACKEND_LABELS = tts.labels()
+# 默认走 edge（2026-10-13 改，原为小米 MiMo）：它免凭据，陌生人开箱即有声；mimo / doubao
+# 要用户自备 API Key，拿它们当默认等于新装即静音。失败时按 voice_chime_tts_fallback
+# 回退带 is_fallback 的后端。config.py 的 DEFAULTS 与本常量必须一致——它是「配置缺键/
+# 值非法」时的落点，两者分叉会让「默认」出现两种含义。
+DEFAULT_BACKEND = BACKEND_EDGE
+DEFAULT_TTS_FALLBACK = True
+
+# MiMo 的默认值由 provider 自己声明（设置页占位与「缺键回落」共用同一份）。
+DEFAULT_MIMO_MODEL = _mimo_provider.DEFAULT_MIMO_MODEL
+DEFAULT_MIMO_VOICE = _mimo_provider.DEFAULT_MIMO_VOICE
+DEFAULT_MIMO_STYLE = _mimo_provider.DEFAULT_MIMO_STYLE
+
+# MiMo 的历史公开符号：合成搬进 ``pet/tts/mimo.py`` 之后，这些名字仍从本模块导出，
+# 既有调用点与用例不必改 import 路径（真正的定义只有一份，不会分叉）。
+MIMO_BASE_URL = _mimo_provider.MIMO_BASE_URL
+MIMO_CHAT_PATH = _mimo_provider.MIMO_CHAT_PATH
+MIMO_MODEL = _mimo_provider.MIMO_MODEL
+MIMO_MODEL_VOICE_DESIGN = _mimo_provider.MIMO_MODEL_VOICE_DESIGN
+MIMO_MODELS = _mimo_provider.MIMO_MODELS
+MIMO_VOICE_OPTIONS = _mimo_provider.MIMO_VOICE_OPTIONS
+MIMO_STYLE_MAX_LEN = _mimo_provider.MIMO_STYLE_MAX_LEN
+MIMO_AUDIO_FORMAT = _mimo_provider.MIMO_AUDIO_FORMAT
+MIMO_TIMEOUT_S = _mimo_provider.MIMO_TIMEOUT_S
+clean_mimo_model = _mimo_provider.clean_mimo_model
+clean_mimo_voice = _mimo_provider.clean_mimo_voice
+clean_mimo_style = _mimo_provider.clean_mimo_style
+mimo_messages = _mimo_provider.mimo_messages
+mimo_payload = _mimo_provider.mimo_payload
+parse_mimo_audio = _mimo_provider.parse_mimo_audio
 
 # edge-tts 中英文音色下拉列表（value=音色名，label=友好中文标签）。
 # 2026-09-22 按微软在线音色表（``edge_tts.list_voices()``，322 款）重建：老清单里
@@ -147,20 +188,29 @@ _HOUR_CN = (
 
 
 def default_chime_config() -> dict:
-    """语音报时配置默认值（config.py 顶层平铺键的镜像）。"""
-    return {
+    """语音报时配置默认值（config.py 顶层平铺键的镜像）。
+
+    合成后端那几项由 provider 自己声明（``pet/tts`` 的 ``fields``），这里遍历生成——
+    接入新 TTS 不需要改本函数，也不会漏登记。
+    """
+    config = {
         "voice_chime_enabled": False,
         "voice_chime_schedule": "hourly",
         "voice_chime_custom_times": "",
-        "voice_chime_voice": DEFAULT_VOICE,
-        "voice_chime_rate": DEFAULT_RATE,
-        "voice_chime_pitch": DEFAULT_PITCH,
         "voice_chime_volume": DEFAULT_VOLUME,
         "voice_chime_show_bubble": DEFAULT_SHOW_BUBBLE,
         "voice_chime_show_quote": DEFAULT_SHOW_QUOTE,
         "voice_chime_custom_quotes_zh": "",  # 自定义中文台词/歌词（一行一条，留空用内置库）
         "voice_chime_custom_quotes_en": "",  # 自定义英文台词/歌词（一行一条，留空用内置库）
+        "voice_chime_tts_backend": DEFAULT_BACKEND,  # 主后端（注册表里的 provider id）
+        "voice_chime_tts_fallback": DEFAULT_TTS_FALLBACK,  # 主后端失败自动回退后备后端
     }
+    for provider in tts.providers():
+        for spec in provider.fields:
+            if spec.kind == "secret":
+                continue  # 凭据存系统钥匙串，不进 config
+            config[spec.key] = spec.default
+    return config
 
 
 def clean_flag(value, default: bool = True) -> bool:
@@ -175,6 +225,48 @@ def clean_flag(value, default: bool = True) -> bool:
     if text in ("0", "false", "no", "off", "关", "关闭"):
         return False
     return default
+
+
+def clean_backend(value) -> str:
+    """清洗合成后端 id：必须是已注册的 provider，非法值回落默认后端。"""
+    text = str(value or "").strip().lower()
+    return text if text in tts.provider_ids() else DEFAULT_BACKEND
+
+
+def synth_ext(backend) -> str:
+    """该后端产物的扩展名（缓存文件名用）：由 provider 的合成计划给出。"""
+    provider = tts.get(clean_backend(backend))
+    if provider is None:
+        return "mp3"
+    return str(provider.plan(provider.values({})).get("ext") or "mp3")
+
+
+def synth_attempts(cfg: dict, secrets: dict | None = None) -> tuple[tts.TtsAttempt, ...]:
+    """按配置给出合成尝试序列（主后端优先，再回退带 ``is_fallback`` 的后端）。
+
+    每项是 :class:`pet.tts.TtsAttempt`（``provider`` / ``values`` / ``plan``）。
+    纯函数：不探测环境、不读凭据——「现在能不能用」由 ``provider.availability`` 判定，
+    密钥由调用方经 ``secrets[provider_id][字段名]`` 注入，因此单测不需要网络与钥匙串。
+    """
+    backend = clean_backend(cfg.get("backend", DEFAULT_BACKEND))
+    order = [backend]
+    if clean_flag(cfg.get("fallback", DEFAULT_TTS_FALLBACK), DEFAULT_TTS_FALLBACK):
+        order.extend(tts.fallback_ids(exclude=backend))
+    values_map = cfg.get("providers") or {}
+    secret_map = secrets or {}
+    attempts: list[tts.TtsAttempt] = []
+    for provider_id in order:
+        provider = tts.get(provider_id)
+        if provider is None:
+            continue
+        values = dict(values_map.get(provider_id) or provider.values({}))
+        injected = secret_map.get(provider_id) or {}
+        for spec in tts.secret_fields(provider):
+            values[spec.name] = str(injected.get(spec.name) or "")
+        attempts.append(
+            tts.TtsAttempt(provider=provider_id, values=values, plan=provider.plan(values))
+        )
+    return tuple(attempts)
 
 
 def clean_schedule(value) -> str:
@@ -254,21 +346,47 @@ def clean_volume(value) -> int:
 
 
 def normalize_chime_config(config) -> dict:
-    """从 config 对象读取并清洗语音报时全部键（config 缺失字段用默认值）。"""
+    """从 config 对象读取并清洗语音报时全部键（config 缺失字段用默认值）。
+
+    ``providers`` 是各后端的字段值表（密钥留空，服务层按需注入）；``voice`` /
+    ``rate`` / ``pitch`` / ``mimo_*`` 是历史平铺键，供既有调用点与设置页读取，
+    值取自同一张表，两套名字不会分叉。
+    """
     if config is None:
         config = {}
+    providers: dict[str, dict] = {}
+    for provider in tts.providers():
+        values = provider.values(config)
+        for spec in tts.secret_fields(provider):
+            values[spec.name] = ""  # 凭据不由纯逻辑层读
+        providers[provider.id] = values
+    edge_values = providers.get(BACKEND_EDGE, {})
+    mimo_values = providers.get(BACKEND_MIMO, {})
     return {
         "enabled": bool(config.get("voice_chime_enabled", False)),
         "schedule": clean_schedule(config.get("voice_chime_schedule", "hourly")),
         "custom_times": clean_custom_times(config.get("voice_chime_custom_times", "")),
-        "voice": clean_voice(config.get("voice_chime_voice", DEFAULT_VOICE)),
-        "rate": clean_rate(config.get("voice_chime_rate", DEFAULT_RATE)),
-        "pitch": clean_pitch(config.get("voice_chime_pitch", DEFAULT_PITCH)),
         "volume": clean_volume(config.get("voice_chime_volume", DEFAULT_VOLUME)),
-        "show_bubble": clean_flag(config.get("voice_chime_show_bubble", DEFAULT_SHOW_BUBBLE), DEFAULT_SHOW_BUBBLE),
-        "show_quote": clean_flag(config.get("voice_chime_show_quote", DEFAULT_SHOW_QUOTE), DEFAULT_SHOW_QUOTE),
+        "show_bubble": clean_flag(
+            config.get("voice_chime_show_bubble", DEFAULT_SHOW_BUBBLE), DEFAULT_SHOW_BUBBLE
+        ),
+        "show_quote": clean_flag(
+            config.get("voice_chime_show_quote", DEFAULT_SHOW_QUOTE), DEFAULT_SHOW_QUOTE
+        ),
         "custom_quotes_zh": clean_custom_quotes(config.get("voice_chime_custom_quotes_zh", "")),
         "custom_quotes_en": clean_custom_quotes(config.get("voice_chime_custom_quotes_en", "")),
+        "backend": clean_backend(config.get("voice_chime_tts_backend", DEFAULT_BACKEND)),
+        "fallback": clean_flag(
+            config.get("voice_chime_tts_fallback", DEFAULT_TTS_FALLBACK), DEFAULT_TTS_FALLBACK
+        ),
+        "providers": providers,
+        # —— 历史平铺键（兼容既有调用点）——
+        "voice": edge_values.get("voice", DEFAULT_VOICE),
+        "rate": edge_values.get("rate", DEFAULT_RATE),
+        "pitch": edge_values.get("pitch", DEFAULT_PITCH),
+        "mimo_model": mimo_values.get("model", DEFAULT_MIMO_MODEL),
+        "mimo_voice": mimo_values.get("voice", DEFAULT_MIMO_VOICE),
+        "mimo_style": mimo_values.get("style", DEFAULT_MIMO_STYLE),
     }
 
 
@@ -475,9 +593,22 @@ def edge_pitch_arg(pitch) -> str:
     return f"{sign}{value}Hz"
 
 
-def cache_key(text: str, cfg: dict) -> str:
-    """音频缓存文件名键：内容 + 音色 + 语速 + 音调的短哈希。"""
+def cache_key(text: str, cfg: dict, provider_id: str | None = None) -> str:
+    """音频缓存文件名键：内容 + 该后端 flavor 的短哈希。
+
+    flavor 由 provider 给（只含影响音频内容的参数），因此换后端 / 换音色 / 换风格都会
+    换键，不同后端的缓存不会互串；edge 的 flavor 保持历史格式，老缓存升级后仍命中。
+    """
     import hashlib
 
-    raw = f"{text}|{cfg.get('voice')}|{edge_rate_arg(cfg.get('rate'))}|{edge_pitch_arg(cfg.get('pitch'))}"
+    backend = clean_backend(provider_id or cfg.get("backend", BACKEND_EDGE))
+    provider = tts.get(backend)
+    if provider is None:
+        raw = f"{text}|{backend}"
+    else:
+        values = (cfg.get("providers") or {}).get(backend)
+        if values is None:
+            # 紧凑调用（传的是原始 config 映射）：让 provider 自己按字段 key 取值
+            values = provider.values(cfg)
+        raw = f"{text}|{provider.flavor(values)}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]

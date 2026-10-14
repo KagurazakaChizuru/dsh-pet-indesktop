@@ -1357,6 +1357,26 @@ class CollapsibleGroup(QWidget):
         self.toggle.setAccessibleName(f"{state}{self.toggle.text()}")
 
 
+def reveal_settings_row(row: SettingRow, page: QWidget) -> None:
+    """把搜索命中的行露出来：展开它所在的折叠框，并切到它所在的页内标签。
+
+    两种折叠形态都要管：``CollapsibleGroup`` 是 QWidget 嵌套（判祖先即可）；
+    语音报时的后端参数行由 ``voice_chime_tts_panel.TtsBackendPanel`` 折叠——那批行会被
+    「语音」域搬进一张平卡，容器活不下来，所以它只在行上挂一个 ``_reveal_fold`` 回调。
+    """
+    reveal = getattr(row, "_reveal_fold", None)
+    if callable(reveal):
+        reveal()
+    ancestor = row.parentWidget()
+    while ancestor is not None and ancestor is not page:
+        if isinstance(ancestor, CollapsibleGroup):
+            ancestor.set_expanded(True)
+        if isinstance(ancestor, SettingsTabContainer):
+            ancestor.activate_for_descendant(row)
+            break
+        ancestor = ancestor.parentWidget()
+
+
 class _CurrentPageStack(QStackedWidget):
     """Do not let a hidden tab impose its minimum width on the active task."""
 
