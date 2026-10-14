@@ -146,6 +146,13 @@ def _section(dialog, domain: str, title: str, tab_key: str | None = None) -> Set
                     return hit
             elif isinstance(widget, SettingsSection) and _title_of(widget) == title:
                 return widget
+            elif type(widget) is QWidget:
+                # 域装配可能先起一层普通容器再往里放卡片（2026-10-14「语音」域就是：
+                # 一张语音报时平卡 + 节日页自建卡片组）。这些容器没有自己的标题，
+                # 只是布局层，递归进去找，别让分组在测试眼里"消失"。
+                hit = find(widget)
+                if hit is not None:
+                    return hit
         return None
 
     found = find(content)
@@ -256,35 +263,53 @@ def test_agent_box_and_phrase_box_are_prebuilt_widgets_in_the_table(tmp_path, mo
 
 
 # ------------------------------------------------------------------- 语音域：3 + 3 组
-def test_voice_and_festival_domains_split_into_three_groups_each(tmp_path, monkeypatch):
-    """语音报时 12 行（何时报 / 用什么声音 / 说什么）与节日提醒 12 行（开关 / 时间 /
-    文案）各自拆回 3 个小分组；行数与行归属一个不变。"""
+def test_voice_and_festival_domains_split_into_groups(tmp_path, monkeypatch):
+    """语音报时与节日提醒各自**自建卡片**交给「语音」域：语音报时整组占一张平卡
+    （含基础设置 / 合成后端折叠编排 / 凭据组 / 语音 / 台词歌词的全部行），节日提醒按
+    何时提醒 / 提醒哪些日子 / 怎么提醒 / 你的生日 / 少用项 分卡。行数与行归属一个不变
+    ——只是不再由本域按「一组行」拼小分组（那样页面容器会散架、分组标题会跟着丢）。"""
     dialog = _dialog(tmp_path, monkeypatch)
     try:
-        assert _top_level_titles(_content(dialog, "语音")) == [
-            "语音报时 · 何时报",
-            "语音报时 · 用什么声音",
-            "语音报时 · 说什么",
-            "节日提醒 · 开关",
-            "节日提醒 · 时间",
-            "节日提醒 · 文案",
-        ]
+        # 「语音」域现在是一层自建容器：顶层放一张「语音报时」平卡 + 节日页自建的卡片组。
+        # _top_level_titles 只看直接子块，所以这里分两段断言：顶层第一块是语音报时，
+        # 其余（节日提醒那几张）在它下面的子容器里。
+        top = _top_level_titles(_content(dialog, "语音"))
+        assert top[:1] == ["语音报时"], top
+        all_titles = [label.text() for label in _content(dialog, "语音").findChildren(QLabel, "sectionTitle")]
+        for title in ("语音报时", "何时提醒", "提醒哪些日子", "怎么提醒", "你的生日", "少用项"):
+            assert title in all_titles, f"「语音」域丢了卡片：{title}"
+        # 语音报时整组：既有行一个不少，外加 provider 化带来的引擎/后端字段行。
+        voice_rows = [row.objectName().replace("settingRow_", "")
+                      for row in _section(dialog, "语音", "语音报时").rows]
+        for key in ("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times",
+                    "voice_chime_volume", "voice_chime_show_bubble", "voice_chime_show_quote",
+                    "voice_chime_custom_quotes_zh", "voice_chime_custom_quotes_en",
+                    "voice_chime_preview", "voice_chime_voice", "voice_chime_rate",
+                    "voice_chime_pitch"):
+            assert key in voice_rows, f"「语音报时」丢了既有行：{key}"
+        # 引擎下拉与四家后端的参数行都由 provider 声明生成（加后端不用改设置页）
+        for key in ("voice_chime_tts_backend", "voice_chime_tts_fallback",
+                    "voice_chime_doubao_speaker", "voice_chime_doubao_pitch",
+                    "voice_chime_mimo_model", "voice_chime_mimo_voice", "voice_chime_mimo_style",
+                    "voice_chime_sapi_voice", "voice_chime_sapi_rate"):
+            assert key in voice_rows, f"「语音报时」缺后端字段行：{key}"
+        # 节日提醒按卡归属
         expected = {
-            "语音报时 · 何时报": ("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times"),
-            "语音报时 · 用什么声音": ("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume"),
-            "语音报时 · 说什么": ("voice_chime_show_bubble", "voice_chime_show_quote",
-                             "voice_chime_custom_quotes_zh", "voice_chime_custom_quotes_en", "voice_chime_preview"),
-            "节日提醒 · 开关": ("festival_reminder_enabled", "festival_reminder_cn",
-                           "festival_reminder_solar_terms", "festival_reminder_west", "festival_reminder_speak"),
-            "节日提醒 · 时间": ("festival_reminder_mode", "festival_reminder_count", "festival_reminder_times"),
-            "节日提醒 · 文案": ("festival_reminder_show_quote", "festival_custom_quotes_cn",
-                           "festival_custom_quotes_west", "festival_preview"),
+            "何时提醒": ("festival_reminder_enabled", "festival_reminder_mode",
+                     "festival_reminder_count", "festival_reminder_times"),
+            "提醒哪些日子": ("festival_reminder_cn", "festival_reminder_solar_terms",
+                        "festival_reminder_west"),
+            "怎么提醒": ("festival_reminder_speak", "festival_reminder_animation",
+                     "festival_reminder_show_quote"),
+            "你的生日": ("festival_birthday",),
+            "少用项": ("festival_custom_quotes_cn", "festival_custom_quotes_west",
+                    "festival_preview"),
         }
         for title, keys in expected.items():
-            section = _section(dialog, "语音", title)
-            assert [row.objectName() for row in section.rows] == [
-                f"settingRow_{key}" for key in keys], f"「{title}」的成员或顺序不符"
-        assert sum(len(keys) for keys in expected.values()) == 24, "两个页共 24 行必须全覆盖"
+            rows = [row.objectName().replace("settingRow_", "")
+                    for row in _section(dialog, "语音", title).rows]
+            for key in keys:
+                assert key in rows, f"「{title}」丢了行：{key}"
         # 「立即试听」仍在 SettingRow 里（历史事故：没包进行里就不会被域收集搬运）。
         assert _page(dialog, "语音").isAncestorOf(_row(dialog, "voice_chime_preview"))
         assert "待分类（开发期）" not in [
