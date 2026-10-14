@@ -1370,7 +1370,11 @@ def reveal_settings_row(row: SettingRow, page: QWidget) -> None:
     ancestor = row.parentWidget()
     while ancestor is not None and ancestor is not page:
         if isinstance(ancestor, CollapsibleGroup):
+            # 命中折叠框内的行：先自动展开，否则搜索结果存在但看不见。
             ancestor.set_expanded(True)
+        elif isinstance(ancestor, SettingsSection) and ancestor.advanced:
+            # 高级折叠组同理：不展开等于折了搜不到（新老全部 advanced 组一体生效）。
+            ancestor.toggle.setChecked(True)
         if isinstance(ancestor, SettingsTabContainer):
             ancestor.activate_for_descendant(row)
             break

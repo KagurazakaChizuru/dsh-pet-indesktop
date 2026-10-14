@@ -120,6 +120,7 @@ from .settings_widgets import (
     SETTINGS_DOMAIN_NAV,
     BROWSER_CONTROL_STYLESHEET,
     _widget_dark,
+    reveal_settings_row,
     ToggleSwitch,
     IMAGE_NAME_FILTER,
     AUDIO_NAME_FILTER,
@@ -1961,18 +1962,11 @@ class ModernSettingsDialog(QDialog):
             ("主动识屏 · 细调（高级）", claim("proactive_dry_run", "proactive_dwell", "proactive_cooldown",
                                        "proactive_min_interval", "proactive_daily_cap", "proactive_free"), True),
         ]
-        voice_sections = [
-            ("语音报时 · 何时报", claim("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times")),
-            ("语音报时 · 用什么声音", claim("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume")),
-            ("语音报时 · 说什么", claim("voice_chime_show_bubble", "voice_chime_show_quote", "voice_chime_custom_quotes_zh",
-                                   "voice_chime_custom_quotes_en", "voice_chime_preview")),
-        ]
-        festival_sections = [
-            ("节日提醒 · 开关", claim("festival_reminder_enabled", "festival_reminder_cn", "festival_reminder_solar_terms",
-                                  "festival_reminder_west", "festival_reminder_speak")),
-            ("节日提醒 · 时间", claim("festival_reminder_mode", "festival_reminder_count", "festival_reminder_times")),
-            ("节日提醒 · 文案", claim("festival_reminder_show_quote", "festival_custom_quotes_cn", "festival_custom_quotes_west", "festival_preview")),
-        ]
+        voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
+        claimed.update(voice_chime_rows)
+        # 节日提醒不在域构建前登记：它的行由 build_domain_page 现造卡片收走（见下方
+        # 「语音」域的注释），构建期它们还没有 parent，findChildren 取不到，也就不会
+        # 掉进「待分类（开发期）」。
         dialogue_rows = claim_prefix("dialogue_")
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
         # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开
@@ -2022,11 +2016,26 @@ class ModernSettingsDialog(QDialog):
         )
 
         # 「语音」总域（2026-09-17 定稿口径）：只收鱼开口说话（TTS）类设置——
-        # 语音报时整组 + 节日提醒 12 行（原「自动化与联动」域，带 speak/TTS 播报
+        # 语音报时整组 + 节日提醒整组（原「自动化与联动」域，带 speak/TTS 播报
         # 能力）。音效类回各自功能分组：点击音效 4 行回「互动 · 点击反馈」、
         # 碰撞音效 2 行回「桌宠」碰撞组；Agent 提示音效（agent_sound_*）留在
-        # Agent 联动折叠框内不动。
-        voice = page_content(voice_sections + festival_sections)
+        # Agent 联动折叠框内不动。节日提醒整组（分组标题 + 折叠编排）由
+        # festival_settings 自己建卡交给本域：本域不能按「一组行」收它——页面容器
+        # 会散架、四段分组标题会跟着丢（见 docs/SETTINGS-CHANGE-GATES.md 节日提醒
+        # 准入记录）。故这里不用 page_content，自己起一层容器。
+        voice = QWidget(self)
+        voice_layout = QVBoxLayout(voice)
+        voice_layout.setContentsMargins(0, 0, 0, 0)
+        voice_layout.setSpacing(18)
+        if voice_chime_rows:
+            voice_layout.addWidget(SettingsSection("语音报时", voice_chime_rows, voice))
+        voice_layout.addWidget(self.festival_page.build_domain_page(voice))
+        voice_layout.addStretch(1)
+        # 语音报时的行刚被搬进这张平卡（容器散架、行序即创建序）：让设置页按当前
+        # 后端重新排一遍——当前后端平铺在最上面，其余后端各占一行折叠头。
+        self.voice_chime_page.refresh_backend_rows()
+        # 节日提醒的行同样被搬进这张平卡：摆正「常用项在前 + 少用项折叠」的行序。
+        self.festival_page.refresh_backend_rows()
 
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
@@ -2101,18 +2110,13 @@ class ModernSettingsDialog(QDialog):
                 break
         self.sidebar.setCurrentRow(page_index)
         page = self.pages.widget(page_index)
-        ancestor = row.parentWidget()
-        while ancestor is not None and ancestor is not page:
-            if isinstance(ancestor, CollapsibleGroup):
-                # 命中折叠框内的行：先自动展开，否则搜索结果存在但看不见。
-                ancestor.set_expanded(True)
-            elif isinstance(ancestor, SettingsSection) and ancestor.advanced:
-                # 高级折叠组同理：不展开等于折了搜不到（新老全部 advanced 组一体生效）。
-                ancestor.toggle.setChecked(True)
-            if isinstance(ancestor, SettingsTabContainer):
-                ancestor.activate_for_descendant(row)
-                break
-            ancestor = ancestor.parentWidget()
+        # 命中折叠里的行要先把它露出来，否则「搜索结果存在但看不见」。
+        # 折叠有两种形态，交给 settings_widgets.reveal_settings_row 一处管：
+        # ① CollapsibleGroup / 高级组 / 页内标签是 QWidget 嵌套（判祖先即可）；
+        # ② 语音报时与节日提醒的后端参数行是**行级**折叠（那批行会被搬进一张
+        #    平卡，容器活不下来，所以折叠状态落在行上的 _reveal_fold 回调里）。
+        # 只判祖先会漏掉 ②：搜索命中「豆包音色」这类行时它仍藏在折叠后端里。
+        reveal_settings_row(row, page)
         scroll = page.findChild(QScrollArea, "settingsScroll")
         if scroll is not None:
             scroll.ensureWidgetVisible(row, 0, 24)
@@ -2354,7 +2358,7 @@ class ModernSettingsDialog(QDialog):
         self.config.set("agent_link", agent_cfg)
         self.config.set("todo_reminder_enabled", self.todo_reminder_check.isChecked())
         self.config.set("todo_reminder_lead_minutes", int(self.todo_reminder_lead_spin.value()))
-        # 语音报时设置页写回（仅写 voice_chime_* 11 键）
+        # 语音报时设置页写回（voice_chime_* 平铺键 + 各后端字段键）
         if self.voice_chime_page is not None:
             self.voice_chime_page.apply_to_config()
         # 节日提醒设置页写回（仅写 festival_reminder_* / festival_custom_* 10 键）
