@@ -56,7 +56,7 @@ class _FakeCommunicate:
     plan: list[str] = ["ok"]
     payload = b"MP3-BYTES"
 
-    def __init__(self, text, voice, rate=None, pitch=None):
+    def __init__(self, text, voice, rate=None, pitch=None, proxy=None):
         self.voice = voice
 
     async def save(self, path):
@@ -75,7 +75,7 @@ def _install_fake_edge_tts(monkeypatch, *, live_voices=None):
     """装一个假的 edge_tts 模块（不联网），并让 provider 认为它可用。"""
     module = types.ModuleType("edge_tts")
 
-    async def list_voices():
+    async def list_voices(proxy=None):
         return [{"ShortName": name} for name in (live_voices or [])]
 
     module.list_voices = list_voices
@@ -198,7 +198,7 @@ def test_synth_refreshes_live_voice_list_in_background(monkeypatch, tmp_path):
     calls: list[int] = []
     module = _install_fake_edge_tts(monkeypatch, live_voices=["zh-CN-XiaoxiaoNeural"])
 
-    async def counting_list_voices():
+    async def counting_list_voices(proxy=None):
         calls.append(1)
         return [{"ShortName": "zh-CN-XiaoxiaoNeural"}]
 

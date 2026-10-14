@@ -86,8 +86,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import importlib.util
 import logging
 import threading
 import time
@@ -97,17 +95,13 @@ from pathlib import Path
 
 from . import tts, tts_secrets
 from .voice_chime import (
-    DEFAULT_VOICE,
-    VOICE_OPTIONS,
     build_bubble_sentence,
     build_chime_sentence,
     cache_key,
     chime_slot,
-    clean_voice,
     next_chime_in_seconds,
     normalize_chime_config,
     synth_attempts,
-    voice_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,115 +165,6 @@ TEMP_SUFFIX = ".part"
 #: 白跑（POSIX 上 os.replace 直接 FileNotFoundError）。
 _live_temp_paths: set[str] = set()
 _live_temp_lock = threading.Lock()
-
-
-def _edge_tts_available() -> bool:
-    """**不 import 本体**地探测 edge-tts 是否可用（惰性探测）。
-
-    ``importlib.util.find_spec`` 只问 import 系统找不找得到包，不执行模块代码，
-    因此不付 edge_tts 的 ~1.4s 导入成本、也不占常驻内存。真正的 import 推迟到
-    :class:`_TTSWorker` 的合成线程里第一次合成时；万一探测通过而 import 失败
-    （半装/被禁用），worker 会在回调里带回错误码 :data:`EDGE_TTS_MISSING`，走
-    同一套降级文案。
-    """
-    try:
-        return importlib.util.find_spec("edge_tts") is not None
-    except (ImportError, ValueError):
-        # 父包缺失 / sys.modules 里被置 None 等异常形态：一律按不可用处理。
-        return False
-
-
-# 惰性探测结果（模块顶层，但不 import 本体）。测试可 monkeypatch 本标志。
-_EDGE_TTS_AVAILABLE = _edge_tts_available()
-
-# 合成失败的重试与间隔：微软这个接口在**连发**时会偶发返回空音频（实机：同一批
-# en-US 音色间隔 6 秒逐个重试全部成功，连发则整批 NoAudioReceived）。
-EDGE_RETRY_TIMES = 2
-EDGE_RETRY_DELAY_S = 1.5
-# 在线音色表缓存时长：厂家会下架音色，配置里存的是「当时有效」的值
-VOICE_LIST_TTL_S = 6 * 3600
-
-#: 同一条音色替换提示每个进程只弹一次（避免每次报时都刷屏）
-_VOICE_SUBSTITUTION_NOTICES: set[str] = set()
-
-_live_voices: frozenset[str] | None = None
-_live_voices_at = 0.0
-_voice_lock = threading.Lock()
-
-
-def _resolve_edge_tts_proxy() -> str | None:
-    """edge-tts 使用的系统代理（issue #252）。
-
-    edge-tts 的合成与音色列表走 aiohttp 的 WSS/HTTPS，aiohttp 默认
-    ``trust_env=False``——**不读环境变量里的代理**，直连被拦（403）时不会
-    自动走系统代理。这里从系统设置（Windows 注册表 / 环境变量，经
-    ``urllib.request.getproxies()``）取代理并显式传给 edge-tts。
-    读不到就返回 None（直连，保持原行为）。
-    """
-    try:
-        import urllib.request
-
-        proxies = urllib.request.getproxies()
-    except Exception:  # noqa: BLE001 —— 代理探测失败不该阻断合成
-        return None
-    proxy = proxies.get("https") or proxies.get("http")
-    return proxy or None
-
-
-def _bundled_voices() -> frozenset[str]:
-    """内置（随包发布）音色集合——拿不到在线表时的校验集。"""
-    return frozenset(value for value, _label in VOICE_OPTIONS)
-
-
-def known_voices() -> frozenset[str]:
-    """当前可用于校验的音色集合：有在线缓存就用在线表，否则退回内置清单。**不联网。**"""
-    with _voice_lock:
-        return _live_voices if _live_voices else _bundled_voices()
-
-
-def refresh_voice_list(*, force: bool = False, timeout: float = 10.0) -> frozenset[str] | None:
-    """拉一次微软在线音色表并缓存（**会联网**，只该在后台合成线程里调）。
-
-    失败/超时返回 ``None`` 并保留旧缓存——联网失败不该让报时跟着失败。
-    """
-    global _live_voices, _live_voices_at
-    now = time.time()
-    with _voice_lock:
-        if not force and _live_voices and now - _live_voices_at < VOICE_LIST_TTL_S:
-            return _live_voices
-    try:
-        import edge_tts
-
-        raw = asyncio.run(asyncio.wait_for(edge_tts.list_voices(proxy=_resolve_edge_tts_proxy()), timeout=timeout))
-        voices = frozenset(str(item.get("ShortName") or "") for item in raw if item)
-    except Exception as exc:  # noqa: BLE001 —— 拉不到不是错误，用旧的就够
-        logger.debug("拉取在线音色表失败（沿用内置/旧表）：%s", exc)
-        return None
-    voices = frozenset(name for name in voices if name)
-    if not voices:
-        return None
-    with _voice_lock:
-        _live_voices = voices
-        _live_voices_at = now
-    return voices
-
-
-def resolve_voice(configured) -> tuple[str, str]:
-    """把配置音色解析成「这次真要用哪把嗓子」，必要时换成默认音色并给出说明。
-
-    厂家会下架音色，而用户配置里存的是当时有效的值：配上已下架的音色时接口返回的
-    是空音频（``NoAudioReceived``），用户只会觉得「声音没了」。这里**不联网**——
-    用在线表缓存（没有就用内置清单）判定，联网刷新在后台合成线程里做。
-    """
-    voice = clean_voice(configured)
-    if not _EDGE_TTS_AVAILABLE or voice in known_voices():
-        return voice, ""
-    note = (
-        f"音色「{voice_label(voice)}」已不在微软在线音色表里（多半被下架了），"
-        f"本次改用默认音色「{voice_label(DEFAULT_VOICE)}」；"
-        "可在 设置 → 语音 → 语音报时 → 音色 里换一个可用的。"
-    )
-    return DEFAULT_VOICE, note
 
 
 def _nonempty_file(path: Path) -> bool:
@@ -1635,15 +1520,6 @@ class VoiceChimeService:
         msg = "语音报时需要 edge-tts 库：请运行 pip install edge-tts 后重试"
         logger.warning(msg)
         self._bubble(msg)
-
-    def _announce_voice_substitution(self, note: str) -> None:
-        """配置音色已失效的说明：同一进程只弹一次，别每次报时都刷屏。"""
-        if note in _VOICE_SUBSTITUTION_NOTICES:
-            logger.debug("已提示过：%s", note)
-            return
-        _VOICE_SUBSTITUTION_NOTICES.add(note)
-        logger.warning(note)
-        self._bubble(note)
 
     def _release_stale_busy(self) -> None:
         """看门狗入口：把到点仍未结的**两个**挂钟都收掉（合成卡死 / 播放接管卡死）。

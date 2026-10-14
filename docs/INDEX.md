@@ -82,6 +82,7 @@
 |---|---|---|
 | [`CHAT-BACKGROUND-DISPLAY-2026-08-27.md`](CHAT-BACKGROUND-DISPLAY-2026-08-27.md) | AI 对话背景显示调整记录：两套窗口各自的背景图片/不透明度/填充模式，以及消息卡片可读性方案。 | 改对话窗口背景、`cover`/`contain`/`stretch` 语义、或消息区 QSS（`message-bubble` vs `message-surface`、`QScrollArea` 调色板）时。 |
 | [`ISSUE-EDGE-TTS-VOICE-DEPRECATION-2026-09-22.md`](ISSUE-EDGE-TTS-VOICE-DEPRECATION-2026-09-22.md) | 事故档案：edge 合成「没声音」的两条根因（微软下架音色 + 连发偶发空音频）与对策（音色表兜底、重试、非空缓存判定）。 | **改语音报时的合成/缓存路径、或再遇到「配置了却没声音」时必读**；它记录了 `NoAudioReceived` 为什么不等于网络问题的判断链。 |
+| [`ADDING-A-TTS-PROVIDER.md`](ADDING-A-TTS-PROVIDER.md) | 语音报时的 TTS **provider 接入指南**：`pet/tts` 的注册表/接口契约、四步接入流程、字段类型与红线。 | **新增、替换或修改任何合成后端（`pet/tts/*.py`）、或调整 `voice_chime_tts_*` 配置前必读**；改设置页的「合成后端」区之前也先看它，那里是 provider 声明驱动、不该写死后端。 |
 | [`grill-2026-08-21-ai-chat.md`](grill-2026-08-21-ai-chat.md) | AI 对话功能的需求对齐记录：多 Provider、流式、多轮上下文、JSON 会话、system prompt 优先级等已确认决策。 | 质疑"聊天窗口为什么这样设计/为什么用标准库 HTTP 而不是某个 SDK"时；这是原始决策依据。 |
 
 ---

@@ -1811,8 +1811,9 @@ def test_service_module_top_level_does_not_import_edge_tts():
     proc = _run_python(
         "import importlib.util, sys\n"
         "import pet.voice_chime_service as svc\n"
+        "import pet.tts.edge as edge_mod\n"
         "assert 'edge_tts' not in sys.modules, '模块顶层把 edge_tts import 进来了（白付 1.4s）'\n"
-        "assert svc._EDGE_TTS_AVAILABLE is (importlib.util.find_spec('edge_tts') is not None), "
+        "assert edge_mod._EDGE_TTS_AVAILABLE is (importlib.util.find_spec('edge_tts') is not None), "
         "'惰性探测结果必须与真实可导入性一致（否则会误报“请 pip install”）'\n"
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -2336,11 +2337,13 @@ def test_precache_worker_uses_resolved_voice(tmp_path, monkeypatch):
     这一处曾经传配置原值：音色下架时预合成会拿一把在线表里不存在的嗓子白试两轮
     （产物还落到另一个 key 上），并正好踩进 45s 超时自愈的竞态。
     """
+    import pet.tts.edge as edge_mod
     import pet.voice_chime_service as svc_mod
 
     service, _app, cfg = _service(tmp_path, monkeypatch)
     # 在线表里只剩默认音色 → 配置的这把嗓子被判"已被下架"
-    monkeypatch.setattr(svc_mod, "_live_voices", frozenset({DEFAULT_VOICE}))
+    # （在线表缓存随 edge 后端搬进 provider，此处钉的是 provider 的缓存）
+    monkeypatch.setattr(edge_mod, "_live_voices", frozenset({DEFAULT_VOICE}))
     dead = "zh-CN-XiaohanNeural"
     cfg.set("voice_chime_enabled", True)
     cfg.set("voice_chime_schedule", "hourly")
@@ -3224,7 +3227,9 @@ def test_disabled_lazy_created_channel_is_released_on_sync(tmp_path, monkeypatch
     cfg.set("festival_reminder_speak", False)
     cfg.set("self_talk_speak_enabled", False)
     cfg.set("click_show_self_talk", False)
-    monkeypatch.setattr(svc_mod, "_EDGE_TTS_AVAILABLE", False)   # 不打网络
+    # 不打网络：让每个合成后端都自报不可用（可用性判据现由各 provider 提供）
+    for provider in svc_mod.tts.providers():
+        monkeypatch.setattr(type(provider), "availability", lambda self, values: True)
     shell = AppShell(_qapp(), cfg, enable_chat=False)
     assert shell.voice_chime_service is None, "前提：三处开关都关，启动期不建通道"
 
