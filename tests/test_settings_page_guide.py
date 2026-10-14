@@ -356,20 +356,33 @@ def _visible_chips(bar) -> list[QPushButton]:
 
 
 def _blocks_of(domain_content: QWidget) -> list[tuple[str, QWidget]]:
-    """页内容顶层块（分区 / 折叠框），测试自己走布局顺序（不调被测函数自证）。"""
+    """页内容顶层块（分区 / 折叠框），测试自己走布局顺序（不调被测函数自证）。
+
+    2026-10-14 起域装配可能先起一层**普通容器**再把卡片放进去（「语音」域就是：
+    一张「语音报时」平卡 + 节日页自建的卡片组）。这层没有标题、只是布局层，所以
+    这里也要穿透——否则测试看到的块比用户看到的少，会得出"跳转条格数不对"的假结论。
+    """
     blocks = []
-    layout = domain_content.layout()
-    for position in range(layout.count()):
-        widget = layout.itemAt(position).widget()
-        if isinstance(widget, CollapsibleGroup):
-            blocks.append((widget.toggle.text(), widget))
-        elif isinstance(widget, SettingsSection):
-            blocks.append((_title_of(widget), widget))
+
+    def walk(node: QWidget) -> None:
+        layout = node.layout()
+        if layout is None:
+            return
+        for position in range(layout.count()):
+            widget = layout.itemAt(position).widget()
+            if isinstance(widget, CollapsibleGroup):
+                blocks.append((widget.toggle.text(), widget))
+            elif isinstance(widget, SettingsSection):
+                blocks.append((_title_of(widget), widget))
+            elif type(widget) is QWidget:
+                walk(widget)
+
+    walk(domain_content)
     return blocks
 
 
 def _all_groups(dialog) -> list[tuple[str, QWidget]]:
-    """对话框里所有分区 / 折叠框（含折叠框里的子分区），按域页布局顺序。"""
+    """对话框里所有分区 / 折叠框（含折叠框里与普通容器层里的子分区），按域页布局顺序。"""
     found: list[tuple[str, QWidget]] = []
 
     def walk(node: QWidget) -> None:
@@ -377,6 +390,10 @@ def _all_groups(dialog) -> list[tuple[str, QWidget]]:
             found.append((title, widget))
             if isinstance(widget, CollapsibleGroup):
                 walk(widget.body)
+            # 普通容器层：域装配可能先起一层（「语音」域 = 平卡 + 自建卡片组），
+            # 里面的卡片也要算进来，否则它们的描述会被误判成"已不存在"。
+            elif type(widget) is QWidget:
+                walk(widget)
 
     for index in range(dialog.pages.count()):
         domain = dialog.sidebar.item(index).text()
@@ -450,11 +467,17 @@ def test_clicking_a_chip_top_aligns_the_section(tmp_path, monkeypatch):
         app.processEvents()
         page, bar = _select(dialog, "语音")
         scroll = page.findChild(QScrollArea, "settingsScroll")
-        target = _section(dialog, "语音", "语音报时 · 说什么")
+        # 2026-10-14 起「语音」域的语音卡就叫「语音报时」（旧的四张小卡不再进域）。
+        # 卡片 0「语音报时」天生在 y=0，验不出"顶对齐"；域尾的卡片又会被滚动范围
+        # 夹住（滚到底也够不到 8px）。所以挑一个**中段、且滚得到**的卡片——
+        # 「提醒哪些日子」在 1416px 处，滚动范围 2046px，正合适。
+        target = _section(dialog, "语音", "提醒哪些日子")
         expected = target.mapTo(scroll.widget(), QPoint(0, 0)).y() - 8
         assert scroll.verticalScrollBar().maximum() > 0, "内容不够长，测不出滚动"
+        assert expected <= scroll.verticalScrollBar().maximum(), (
+            "所选目标超出一屏滚动范围，顶对齐验不出来（请换一个更靠前的卡片）")
 
-        chip = next(chip for chip in _chips(bar) if chip.text() == "语音报时 · 说什么")
+        chip = next(chip for chip in _chips(bar) if chip.text() == "提醒哪些日子")
         chip.click()
         app.processEvents()
         assert scroll.verticalScrollBar().value() == max(0, expected)

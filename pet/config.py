@@ -1291,6 +1291,10 @@ class Config:
             # 节日语音播报：复用语音报时服务的音频通道（音色/语速/音调/音量同报时），
             # 故不新增独立的语音参数键。默认关闭。开启后同一分钟由节日让报时让位。
             "festival_reminder_speak": False,  # 节日提醒是否语音播报
+            "festival_reminder_animation": True,  # 节日提醒是否播匹配动画
+            # 生日进「动态节日」：命中当天排最前，不进 FESTIVALS 静态表（见 festival_animations）。
+            # 默认空串＝没填，非法/不存在的日期静默落空（clean_birthday 整串 fullmatch 校验）。
+            "festival_birthday": "",
             "festival_custom_quotes_cn": "",  # 自定义中文文案（一行一条，追加到内置库）
             "festival_custom_quotes_west": "",  # 自定义西文文案（一行一条，追加到内置库）
             # 天气（右键菜单「查看天气」/「天气城市」，issue #209）。**默认开**：
@@ -1551,6 +1555,8 @@ class Config:
             "festival_reminder_times",
             "festival_reminder_show_quote",
             "festival_reminder_speak",
+            "festival_reminder_animation",
+            "festival_birthday",
             "festival_custom_quotes_cn",
             "festival_custom_quotes_west",
             "weather_enabled",

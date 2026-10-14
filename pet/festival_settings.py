@@ -59,6 +59,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -104,6 +105,17 @@ class FestivalSettingsPage(QWidget):
 
         def flag(key: str, default: bool) -> bool:
             return clean_flag(self.config.get(key, default), default)
+
+        # ---- 行的临时容器 ----
+        # 本页不自己排版（行会被「语音」域搬进平卡），但**行从构造起就必须有父对象**：
+        # 无父的 SettingRow 一旦被 setVisible 就是一个顶层窗口，用户会看到无标题小窗
+        # 一闪（上游 #261 修的就是这个）。所以先收养进这个不排版的容器，域装配时
+        # 再由 build_domain_page 把它们 reparent 进域卡片。
+        self._holding = QWidget(self)
+        self._holding.setObjectName("festivalRowsHolding")
+        self._holding_layout = QVBoxLayout(self._holding)
+        self._holding_layout.setContentsMargins(0, 0, 0, 0)
+        self._holding.hide()
 
         # ---- 控件 ----
         # 顺序＝呈现顺序（域构建期平卡按这个次序排；折叠编排再按同一顺序摆正）
@@ -273,7 +285,8 @@ class FestivalSettingsPage(QWidget):
                     SettingRow(
                         "festival_reminder_speak",
                         "语音播报",
-                        "念出声；音色等沿用语音报时。",
+                        "念出声；音色等沿用语音报时。与报时共用一条音频通道，"
+                        "同一分钟时由报时先念。免打扰期间不出声，气泡照旧。",
                         self.speak_check,
                     ),
                     SettingRow(
@@ -310,10 +323,20 @@ class FestivalSettingsPage(QWidget):
 
     # ------------------------------------------------------------ 折叠登记
     def _register_rows(self) -> None:
-        """按呈现次序把行登记给折叠编排（平铺在前，折叠成员在后）。"""
+        """按呈现次序把行登记给折叠编排（平铺在前，折叠成员在后），并先收养它们。
+
+        **必须先收养**：``SettingRow`` 在无父状态下被 ``setVisible`` 就是一个顶层窗口
+        ——用户点设置时会看到一串无标题小窗闪一下（那正是上游 ``ffc80a6`` 修掉的
+        ``#261``）。本页的行稍后会被「语音」域搬进平卡，但那是域装配阶段的事；在
+        那之前它们也得挂在某个真实容器里。这里挂进本页的隐藏持有容器，域装配时
+        再由 ``build_domain_page`` reparent 走。
+        """
         for _title, rows in self._rows_by_group:
             for row in rows:
+                self._holding_layout.addWidget(row)
                 self._festival_panel.add_flat(row)
+        for row in (self.custom_cn_row, self.custom_west_row, self.preview_row, self.fold_row):
+            self._holding_layout.addWidget(row)
         for row in (self.custom_cn_row, self.custom_west_row, self.preview_row):
             self._festival_panel.add_folded(row)
 

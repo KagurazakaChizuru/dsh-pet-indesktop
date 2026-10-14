@@ -166,8 +166,10 @@ RELOAD_WHITELIST_SNAPSHOT = frozenset(
         "voice_chime_show_quote",
         "voice_chime_tts_backend",
         "voice_chime_tts_fallback",
+        "festival_birthday",
         "festival_custom_quotes_cn",
         "festival_custom_quotes_west",
+        "festival_reminder_animation",
         "festival_reminder_cn",
         "festival_reminder_count",
         "festival_reminder_enabled",
@@ -208,6 +210,10 @@ SPECIAL_CASED_KEYS = frozenset({"version", "proactive_screen", "agent_link", "ch
 # 2026-10-13 加语音报时合成后端 9 键（tts_backend / tts_fallback / mimo_model /
 # mimo_voice / mimo_style / sapi_voice / sapi_rate / doubao_speaker / doubao_pitch，
 # 随 provider 注册表一起进来），白名单 151。
+# 2026-10-14 补登记节日提醒 2 键（festival_reminder_animation / festival_birthday）：
+# 它们随「节日动画 + 我的生日」一起进来时**漏登在 config.py 的默认 dict 与白名单里**
+# （设置页有行、config 没键），于是本轮把它们渲染出来后被
+# `test_settings_default_marks` 的「冻结集」抓到——补齐后白名单 153。
 DEFAULTS_SNAPSHOT = RELOAD_WHITELIST_SNAPSHOT | SPECIAL_CASED_KEYS
 
 

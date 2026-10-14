@@ -1964,9 +1964,12 @@ class ModernSettingsDialog(QDialog):
         ]
         voice_chime_rows = list(self.voice_chime_page.findChildren(SettingRow))
         claimed.update(voice_chime_rows)
-        # 节日提醒不在域构建前登记：它的行由 build_domain_page 现造卡片收走（见下方
-        # 「语音」域的注释），构建期它们还没有 parent，findChildren 取不到，也就不会
-        # 掉进「待分类（开发期）」。
+        # 节日提醒的行**也要在这里登记**：本页的行从构造起就挂在自己的持有容器里
+        # （无父的 SettingRow 一旦 setVisible 就是个顶层窗口，用户会看到无标题小窗闪
+        # ——上游 #261 修的就是这个），因此 findChildren 现在取得到它们。不登记就会
+        # 掉进「待分类（开发期）」——它们稍后由 build_domain_page 现造卡片收进「语音」域。
+        festival_rows = list(self.festival_page.findChildren(SettingRow))
+        claimed.update(festival_rows)
         dialogue_rows = claim_prefix("dialogue_")
         # 「自定义台词」＝一个可折叠框（默认折叠）：逐事件文案行全部收进去，
         # 不用自定义台词的用户不该翻过整页文案框；搜索命中时会自动展开

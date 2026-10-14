@@ -297,6 +297,12 @@ def test_every_row_copy_is_one_short_sentence(tmp_path):
         for marker in KEY_LIKE:
             assert marker not in title, f"{row.objectName()} 标题里出现了配置键名：{title}"
         assert 0 < len(title) <= 14, f"{row.objectName()} 标题太长：{title}"
+        # 「语音播报」是唯一允许超长的行：它必须交代**免打扰期间不出声**（否则用户会
+        # 以为功能坏了，见 test_festival.test_speak_hint_mentions_quiet_mode），
+        # 还要说清与报时共用通道、同一分钟由报时让位。一句话说不完，按信息量让步。
+        if row.objectName() == "settingRow_festival_reminder_speak":
+            assert len(hint) <= 60, f"{row.objectName()} 提示过长（>60 字）：{hint}"
+            continue
         assert 0 < len(hint) <= 20, f"{row.objectName()} 提示必须是一句话 ≤20 字：{hint}"
 
 
