@@ -431,7 +431,7 @@ python scripts/capture_settings_pages.py .scratch/divination-pr290/capture-light
 | 门 | 命令 | 结果 |
 |---|---|---|
 | 静态检查 | `python -m ruff check .` | **All checks passed!** |
-| 聚焦（两侧改动面的并集，25 个文件） | `pytest -q tests/test_tts_*.py tests/test_voice_chime*.py tests/test_divination*.py tests/test_settings_{interaction_tabs,page_guide,default_marks,search_aliases,copy_lint,pet_tabs,slot_config_route}.py tests/test_menu_layout.py tests/test_desktop_pet_features.py tests/test_config_schema.py tests/test_sprite_menu_parity.py tests/test_festival*.py tests/test_architecture.py tests/test_pr_report_discipline.py` | **1052 passed**（198.80 s） |
+| 聚焦（两侧改动面的并集，25 个文件） | `pytest -q tests/test_tts_*.py tests/test_voice_chime*.py tests/test_divination*.py tests/test_settings_{interaction_tabs,page_guide,default_marks,search_aliases,copy_lint,pet_tabs,slot_config_route}.py tests/test_menu_layout.py tests/test_desktop_pet_features.py tests/test_config_schema.py tests/test_sprite_menu_parity.py tests/test_festival*.py tests/test_architecture.py tests/test_pr_report_discipline.py` | **1053 passed**（201.64 s，提交后在已提交的树上复跑；9.3 之外那次 1052 是新增用例之前跑的） |
 | 受影响时序族高负载复跑 ×3 | `pytest -q tests/test_voice_chime.py tests/test_voice_chime_service.py` 连跑 3 遍 | 3 遍各 **272 passed**（5.88 / 6.07 / 6.23 s），无 flake |
 | 全量（按文件切 18 片、各起独立进程） | `python run_chunks_pr290.py 500`（脚本与逐片日志：`D:/dsh-pet-pr290-artifacts/`） | **8092 用例跑到：passed 8070 / failed 1 / skipped 21**；唯一那条红是 9.4 的环境用例，与本次改动无关 |
 | 断言有效性（消融·早退守卫，本轮新增用例） | 删掉 `_fire` 里那 4 行 `if role in PRECACHE_ROLES: … return` 后重跑 `-k aux_precache` | **1 failed / 3 passed**（红的那条正是新增用例，`plays == 1`："预合成偷偷播了一次"）；恢复后 4/4 绿，文件 sha256 与消融前一致 |
