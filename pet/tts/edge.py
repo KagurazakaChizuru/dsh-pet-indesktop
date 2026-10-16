@@ -16,28 +16,45 @@
 
 在线音色表通过 ``refresh_voice_list()`` 拉取并缓存（TTL ``VOICE_LIST_TTL_S``）；
 **它只允许在后台合成线程里调用**——``preflight()`` 跑在 GUI 线程，只看缓存/内置清单。
+
+失败诊断跟合成本体一起落在这里（``pet/tts_diagnostics``）：对用户只给分类后的人话，
+细节进日志，且**两边都不回显签名 URL、令牌与代理凭据**——provider 是本后端唯一的
+合成入口，异常文本也就只在这里能被拦住。
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib.util
+import logging
 import threading
 import time
+from pathlib import Path
 
+from ..tts_diagnostics import describe_failure, missing_dependency_hint
 from .base import TtsField, TtsProvider, TtsUnavailable, register
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 DEFAULT_RATE = 0  # 语速偏移（%），范围约 -100 ~ +100
 DEFAULT_PITCH = 0  # 音调偏移（Hz），范围约 -50 ~ +50
 AVAILABILITY_CODE = "edge-tts-missing"
-MISSING_MESSAGE = "语音报时需要 edge-tts 库：请运行 pip install edge-tts 后重试"
+#: 缺依赖时给用户看的话：**单一来源**是 ``pet/tts_diagnostics``（它认得打包版——
+#: 打包版用户没地方 pip install，该说「更新或重装」）。导入期取值即可：冻结与否
+#: 是进程启动就定下的属性（``sys.frozen``），不会在运行期变。
+MISSING_MESSAGE = missing_dependency_hint()
 
 #: 合成失败时的重试次数与间隔（避开连发限流；实测间隔重试能救回偶发的 NoAudioReceived）
 EDGE_RETRY_TIMES = 2
 EDGE_RETRY_DELAY_S = 1.5
 #: 在线音色表缓存时长
 VOICE_LIST_TTL_S = 6 * 3600
+
+
+class _EmptyAudio(RuntimeError):
+    """服务端「成功」但没给音频（0 字节产物）——按失败处理，不能留下空缓存。"""
+
 
 # 中英文音色下拉列表（value=音色名，label=友好中文标签）。
 # **2026-09-22 按微软在线音色表重建**：删掉已下线的 10 款，补上在线的新音色。
@@ -210,16 +227,17 @@ def refresh_voice_list(*, force: bool = False, timeout: float = 10.0) -> frozens
     with _voice_lock:
         if not force and _live_voices and now - _live_fetched_at < VOICE_LIST_TTL_S:
             return _live_voices
+    proxy = resolve_proxy()
     try:
         import edge_tts
 
-        raw = asyncio.run(asyncio.wait_for(edge_tts.list_voices(proxy=resolve_proxy()), timeout=timeout))
+        raw = asyncio.run(asyncio.wait_for(edge_tts.list_voices(proxy=proxy), timeout=timeout))
         voices = frozenset(str(item.get("ShortName") or "") for item in raw)
         voices = frozenset(name for name in voices if name)
     except Exception as exc:  # noqa: BLE001 —— 拉不到不是错误，用旧的就够
-        import logging
-
-        logging.getLogger(__name__).debug("拉取在线音色表失败（沿用内置/旧表）：%s", exc)
+        # 只记脱敏行（类型/版本/HTTP 状态/走没走代理），不回显 URL、令牌与代理凭据。
+        logger.debug("拉取在线音色表失败（沿用内置/旧表）：%s",
+                     describe_failure(exc, proxy_used=bool(proxy))[1])
         return None
     if not voices:
         return None
@@ -235,6 +253,18 @@ def reset_voice_cache() -> None:
     with _voice_lock:
         _live_voices = None
         _live_fetched_at = 0.0
+
+
+def _discard(path) -> None:
+    """删掉本次失败留下的产物。
+
+    合成总是**先建文件再写**，半截/0 字节文件留在缓存目录会被后续「文件非空即命中」
+    的判定当成已有缓存，播出来是一声静音且再也不重合成——所以每次失败都必须清掉。
+    """
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 class EdgeTtsProvider(TtsProvider):
@@ -309,6 +339,10 @@ class EdgeTtsProvider(TtsProvider):
         checked, _note = self.preflight({"voice": voice})
         voice = clean_voice(checked.get("voice"))
 
+        # 代理只解析一次：既喂给 Communicate，也作为失败诊断里的 route 口径。
+        proxy = resolve_proxy()
+        proxy_used = bool(proxy)
+
         candidates = [voice]
         if voice != DEFAULT_VOICE:
             # 主音色反复失败（下架、限流、参数被拒）时退到默认音色再试一轮
@@ -317,34 +351,38 @@ class EdgeTtsProvider(TtsProvider):
         for candidate in candidates:
             for attempt in range(1, EDGE_RETRY_TIMES + 1):
                 try:
-                    asyncio.run(self._save(edge_tts, text, candidate, plan, out_path))
+                    asyncio.run(self._save(edge_tts, text, candidate, plan, out_path, proxy))
                     if out_path.exists() and out_path.stat().st_size > 0:
                         if candidate != voice:
-                            import logging
-
-                            logging.getLogger(__name__).warning(
+                            logger.warning(
                                 "音色 %s 合成失败，已改用默认音色 %s", voice, candidate
                             )
                         return
-                    raise RuntimeError("服务端未返回音频（空文件）")
+                    raise _EmptyAudio("服务端未返回音频（空文件）")
+                except _EmptyAudio as exc:
+                    # 空音频也走同一套重试：偶发的「没给音频」多半是连发被拒。
+                    errors.append(str(exc))
+                    _discard(out_path)
                 except Exception as exc:  # noqa: BLE001 —— 记下来，重试/换音色
-                    errors.append(f"{candidate} 第{attempt}次: {type(exc).__name__}: {exc}")
-                    try:
-                        out_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    if attempt < EDGE_RETRY_TIMES:
-                        time.sleep(EDGE_RETRY_DELAY_S)  # 间隔重试：连发会被偶发拒绝
+                    # 对用户只说分类后的人话：异常文本里可能带签名 URL、令牌或代理
+                    # 凭据，一律不进用户可见的错误串；细节进日志，且只记脱敏行。
+                    message, diagnostic = describe_failure(exc, proxy_used=proxy_used)
+                    errors.append(message)
+                    logger.warning("edge-tts 合成失败（%s 第%d次）：%s",
+                                   candidate, attempt, diagnostic)
+                    _discard(out_path)
+                if attempt < EDGE_RETRY_TIMES:
+                    time.sleep(EDGE_RETRY_DELAY_S)  # 间隔重试：连发会被偶发拒绝
         raise RuntimeError("edge-tts 合成失败 → " + "；".join(errors[-4:]))
 
     @staticmethod
-    async def _save(edge_tts, text: str, voice: str, plan: dict, out_path) -> None:
+    async def _save(edge_tts, text: str, voice: str, plan: dict, out_path, proxy=None) -> None:
         communicate = edge_tts.Communicate(
             text,
             voice,
             rate=plan.get("rate") or edge_rate_arg(DEFAULT_RATE),
             pitch=plan.get("pitch") or edge_pitch_arg(DEFAULT_PITCH),
-            proxy=resolve_proxy(),
+            proxy=proxy if proxy is not None else resolve_proxy(),
         )
         await communicate.save(str(out_path))
 

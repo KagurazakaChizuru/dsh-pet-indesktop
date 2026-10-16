@@ -16,6 +16,7 @@ synth 主音色失败退默认音色。全部用例不打网络（edge_tts 用�
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import types
 from pathlib import Path
@@ -125,6 +126,13 @@ def test_refresh_voice_list_failure_keeps_previous(monkeypatch):
 # ============================================================ preflight
 
 
+def test_voice_label_prefers_bundled_then_deprecated_map():
+    """提示里说人话：「晓涵」而不是 zh-CN-XiaohanNeural（随 provider 一起搬来）。"""
+    assert edge_mod.voice_label("zh-CN-XiaoxiaoNeural") == "晓晓"
+    assert edge_mod.voice_label("zh-CN-XiaohanNeural") == "晓涵"
+    assert edge_mod.voice_label("some-unknown-voice") == "some-unknown-voice"
+
+
 def test_preflight_swaps_removed_voice_and_explains(monkeypatch):
     """配置音色已下线：换默认音色并给出「换哪一个」的说明（GUI 线程不联网）。"""
     _install_fake_edge_tts(monkeypatch, live_voices=["zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural"])
@@ -190,6 +198,63 @@ def test_synth_treats_empty_file_as_failure(monkeypatch, tmp_path):
         edge_mod.PROVIDER.synth("现在是上午九点整。",
                                 {"voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%", "pitch": "+0Hz"}, out)
 
+    assert not out.exists(), "失败产物必须清掉"
+
+
+# ============================================================ 失败诊断（脱敏）
+
+
+class _CredentialedFailure(Exception):
+    """真实形态的失败：aiohttp 的异常文本里就带着签名 URL 与代理凭据。"""
+
+    status = 403
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (type("NoAudioReceived", (Exception,), {})("PRIVATE_TOKEN"), "未返回音频"),
+        (_CredentialedFailure(
+            "wss://host/?token=PRIVATE_TOKEN http://user:PRIVATE_PASSWORD@proxy"), "403"),
+    ],
+    ids=["no-audio", "http-403"],
+)
+def test_synth_failure_is_classified_and_credential_free(
+    monkeypatch, tmp_path, caplog, error, expected
+):
+    """失败诊断（287 的口径搬进 provider）：用户可见的错误串只给分类后的人话，
+    细节进日志且只记脱敏行——**异常原文里的签名 URL、令牌与代理凭据两边都不许出现**。
+
+    同时守住「失败产物必须清掉」：合成是先建文件再写，半截文件留在缓存目录会被
+    「文件非空即命中」判成已有缓存，播出来是一声静音且再也不重合成。
+    """
+    module = _install_fake_edge_tts(monkeypatch, live_voices=[edge_mod.DEFAULT_VOICE])
+    monkeypatch.setattr("urllib.request.getproxies", dict)  # 直连（route=direct）
+
+    class FailingCommunicate:
+        def __init__(self, text, voice, **kwargs):
+            pass
+
+        async def save(self, path):
+            Path(path).write_bytes(b"\x00half")  # 半截产物
+            raise error
+
+    module.Communicate = FailingCommunicate
+    caplog.set_level(logging.DEBUG)
+    out = tmp_path / "chime.mp3"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        edge_mod.PROVIDER.synth("现在是上午九点整。",
+                                {"voice": edge_mod.DEFAULT_VOICE,
+                                 "rate": "+0%", "pitch": "+0Hz"}, out)
+
+    message = str(excinfo.value)
+    assert expected in message, f"用户看到的是分类结果，不是异常原文：{message}"
+    assert "PRIVATE_TOKEN" not in message + caplog.text
+    assert "PRIVATE_PASSWORD" not in message + caplog.text
+    assert "version=" in caplog.text and "route=" in caplog.text, (
+        f"日志要有可排查的脱敏细节（类型/版本/HTTP 状态/走没走代理）：{caplog.text}"
+    )
     assert not out.exists(), "失败产物必须清掉"
 
 
