@@ -83,6 +83,35 @@ recovery
 
 ## 变更记录
 
+### 2026-10-17 — slot0 迁移「源清理」口径回正：清源与 `Config.save` 同一条规则，不丢数据改由备份承担
+
+本刀**不新增/不删除任何配置键、不改默认值、不改设置页**；改的是**迁移与保存语义**
+（`migrate_slot0_profile` 在目标档案已存在时的源清理口径），属本文适用范围。
+
+| 项 | 本刀口径 |
+|---|---|
+| 被修的口径 | 2026-10-16 的 #289 把 `already-exists` 支改成"**不清源**"（源每宠键原样保留、登记在 `retained_keys`）。实测该口径**在盘上不成立**：`Config.save()` 对全局身份**无条件** `pop(PER_PET_KEYS \| SLOT_LOCAL_KEYS)`（`pet/config.py:2328`），下一次保存就把源里那批键抹掉——`retained_keys` 描述的是"保留"，用户拿到的是空配置（已用真 `Config.save()` 跑通复现）。而全局配置 + 槽档案同时装每宠值 = 规范禁止的**双真值** |
+| 回正为 | `created` 与 `already-exists` **都清源每宠键**（全局 `config.json` 不留每宠键，只有一条规则）；`already-exists` 照旧**绝不写目标**（锁内复查 + `test_slot0_migration_never_overwrites_existing_profile` 逐字节钉死）。与 2026-10-10 那条"验证既有目标后清源"一致，也就是**回到 main 的既有口径**——`origin/main`（`056dc2a`）的 `pet/pet_profiles.py` 与合并基 `6a68570` 逐字节相同，"不清源"只是这个 PR 自己的改动 |
+| 不丢数据由谁承担 | **备份**。`_backup_file` 在这条支路之前跑（`config.json.pre-slot0-migration.bak`，已存在则保留第一份、不覆盖）。清理前再验一次"这份备份**装的就是即将被清掉的那批值**"（`_backup_holds_values`，值逐条相等——比"键在不在"强）；若规范备份路径已被**另一份快照**占用（旧快照也能过键存在性校验），**不覆盖它**，另存时间戳恢复副本 `config.json.pre-slot0-migration-recovery-<毫秒>-<pid>.bak`，结果走新增字段 `recovery_path`。取不到恢复副本就**不清源**并返回 `backup-failed`——宁可不做，也不做不可恢复的删除 |
+| 相对 main 的净增量 | **只有上面"恢复保证"那半边**（清源口径与 main 一致）。实测对照：同一现场跑在 `origin/main` 上，`already-exists` 同样清源、同样不覆盖旧备份，但**没有恢复副本**（连 `recovery_path` 字段都不存在）⇒ 规范备份被旧快照占用时当前每宠键**真丢 6 个**；本刀把这条路堵上 |
+| 可诊断 | `already-exists` 结果：`retained_keys` = 未采用的源每宠键、`reason` 点名备份/副本文件名、另有一条 WARNING 写明路径与键名 |
+| **明确不做** | 不引入任何新的持久键、不引入 `retain`/迁移框架；不改 `Config.save()` 的 `pop`（那是单真值的落地处）；**不**把源几何"补进"既有档案——「不覆盖目标」是已发布契约，所以本刀**修不了**"位置落回右下角"（覆盖层落点取自档案，全局 rx/ry 无读者，见下） |
+
+准出对应：
+
+1. **契约**：键/默认值/归属/依赖零变更；改的是保存与迁移语义，逐条见上表。失败路径
+   仍走既有词表（`backup-failed` / `backup-invalid` / 锁类），其中 `backup-failed`
+   在本刀新增一处触发点（恢复副本写不出）且**两个方向都不动**（源保留、目标不写）。
+2. **TDD**：`tests/test_pet_profiles.py` 改写 1 例（原"不清源"契约改成"清源 + 可恢复"）、
+   新增 3 例（与真 `Config.save()` 的一致性、旧快照占位时另存副本且不覆盖旧备份、
+   取不到副本就不清源且目标不动）；消融（撤掉产品改动）**4 failed**，先红后绿在案。
+3. **布局与可访问性**：不适用——本刀无 UI 改动（不新增/移动/删除任何设置行）。
+4. **跨平台**：无平台分支（判据是文件与值，与平台无关）；验证仅本机 Windows。
+5. **视觉与文档**：本记录即变更记录；同步改了 `pet/pet_profiles.py` 的模块头与函数
+   docstring（清理口径、`retained_keys`/`recovery_path` 语义）、
+   [`PR-REPORT-ZERO-PET-NOTICE-AND-SLOT0-MIGRATION-2026-10-16.md`](PR-REPORT-ZERO-PET-NOTICE-AND-SLOT0-MIGRATION-2026-10-16.md) §九（原报告 §二/§三 的"不清源"表述已更正）
+   与 `docs/INDEX.md` 对应行。
+
 ### 2026-10-16 — 新增全局键 `allow_cross_screen`（「允许桌宠跨屏」行）
 
 本刀**新增 1 个持久设置键与 1 行设置项**（多屏能力的总开关），不改任何既有键的默认值、

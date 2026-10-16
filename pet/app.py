@@ -4133,6 +4133,17 @@ class AppShell:
             logging.exception("退出这只：关闭会话写盘 worker 失败")
 
     def _build_empty_pet_tray(self) -> None:
+        """零宠物的可见兜底：托盘（无托盘时另开恢复窗）。
+
+        **必须留一条 WARN**：legacy 拓扑下走这条路径意味着"进程活着、但桌面上没有
+        任何顶层窗口"，而调用方不区分它与正常启动——没有日志时用户侧只能报出
+        「启动后什么都没有」，连是不是启动失败都无从自查（issue #286）。
+        """
+        logging.warning(
+            "legacy: slot0 未活跃，没有捕获窗（活跃集合=%s，配置目录=%s）："
+            "托盘/恢复窗的「生成 / 恢复 slot0」可重建",
+            sorted(getattr(self, "_active_pet_slots", None) or ()),
+            getattr(self.instance.config, "dir", None))
         tray = self.tray
         if tray is None:
             tray = QSystemTrayIcon(self._tray_placeholder_icon())
@@ -4144,6 +4155,9 @@ class AppShell:
         menu.addAction("退出应用", self.request_app_quit)
         self._install_tray_menu(menu, [menu])
         tray.setContextMenu(menu)
+        # 托盘提示同样说实话：默认的通用 tooltip 会让"桌面上什么都没有"看起来像
+        # 悬停没反应，而不是"这只宠物当前没有捕获窗"。
+        tray.setToolTip("dsh-pet：没有可显示的桌宠（slot0 未活跃）")
         tray.show()
         if not QSystemTrayIcon.isSystemTrayAvailable():
             from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton

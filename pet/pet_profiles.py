@@ -39,9 +39,18 @@ overlay、legacy与设置路由共同使用本模块的固定身份档案、活�
 ``migrate_slot0_profile``：从**全局** ``config.json`` 抽取每宠键（含几何）写进
 ``config-slot-0.json``。铁律：
 
-- 目标已存在 → ``already-exists``，**绝不覆盖**（锁内复查，避免两个进程同时创建）；
-- **先备份再写**（``config.json.pre-slot0-migration.bak``，已存在则保留第一份）；
-- 档案写入或既有目标验证成功后清除源每宠键；legacy由同一档案派生读取。
+- 目标已存在 → ``already-exists``，**绝不覆盖目标**（锁内复查，避免两个进程同时创建）；
+- **先备份再写**（``config.json.pre-slot0-migration.bak``，已存在则保留第一份、不覆盖）；
+- **两条支都清理源每宠键**（``created`` 与 ``already-exists`` 同一条规则：全局
+  ``config.json`` 不留每宠键）。目标已存在时源里的那批键是**未被本次迁移采用**的
+  源值，清理前必须保证恢复路径真的留住了它们：规范备份若本来就是这批值 → 直接用；
+  若该路径已被**另一份快照**占用（不覆盖它）→ 另存一份时间戳恢复副本
+  （``config.json.pre-slot0-migration-recovery-<毫秒>-<pid>.bak``），结果见
+  ``recovery_path``。取不到恢复副本就**不清源**并返回 ``backup-failed``。
+  这条"清理"不是可有可无的对称美：``Config.save()`` 对全局身份**无条件**
+  ``pop(PER_PET_KEYS | SLOT_LOCAL_KEYS)``，迁不迁移都会在下一次保存时把源里的每宠键
+  抹掉——迁移侧若"不清源"，只会留下一个骗人的 ``retained_keys``（文件里其实留不住）。
+- legacy 由同一档案派生读取；旧版本退回读全局键的场面由上面那份备份兜底。
 - **不是事务**：备份 + 写目标 + 将来删源是多个文件的多个步骤，中途中断只会留下
   "备份在、目标未写"或"目标已写、源未清"这类可重跑状态，本模块**不声称原子**——
   重跑一遍即可收敛（幂等）。
@@ -118,6 +127,7 @@ __all__ = [
     "POSITION_KEYS",
     "PROFILE_FILE_VERSION",
     "PROFILE_MIGRATION_BACKUP_SUFFIX",
+    "PROFILE_MIGRATION_RECOVERY_MARKER",
     "ProfileError",
     "ProfileResult",
     "ProfileStateError",
@@ -347,13 +357,24 @@ class SlotSnapshot:
 
 @dataclass(frozen=True)
 class Slot0Migration:
-    """slot0 迁移的结果。``status`` 见 :func:`migrate_slot0_profile`。"""
+    """slot0 迁移的结果。``status`` 见 :func:`migrate_slot0_profile`。
+
+    三个与"数据去哪了"有关的字段别混：
+
+    - ``backup_path``：**规范**备份（``config.json.pre-slot0-migration.bak``），
+      已存在则保留第一份、绝不覆盖；
+    - ``recovery_path``：规范备份路径已被**另一份快照**占用时才另存的时间戳副本——
+      它才装着本次被清掉的那批源值；
+    - ``retained_keys``：目标已存在时**未被本次迁移采用**的源每宠键（源里已清掉，
+      值只在上面的备份里；供诊断与取回）。
+    """
 
     status: str
     reason: str = ""
     profile_path: Path | None = None
     source_path: Path | None = None
     backup_path: Path | None = None
+    recovery_path: Path | None = None
     copied_keys: tuple[str, ...] = ()
     retained_keys: tuple[str, ...] = ()
 
@@ -983,7 +1004,11 @@ def migrate_slot0_profile(config_dir: Path | str, *, source: Path | str | None =
     ``status`` 取值与含义：
 
     - ``created``：先备份、清洗抽档案、再清源每宠键；
-    - ``already-exists``：已有档案不覆盖，仍验证备份并清源；
+    - ``already-exists``：已有档案不覆盖、**但照样清源每宠键**——与 ``Config.save()``
+      的全局清理同一条规则（见模块头）。源里那批键是**未被本次迁移采用**的值，清理前
+      先保证恢复路径留住了它们：规范备份若已是这批值就直接用，否则另存一份时间戳
+      恢复副本（``recovery_path``）；拿不到恢复副本就**不清源**并返回
+      ``backup-failed``。未采用的键名登记在 ``retained_keys``（可诊断）；
     - ``no-source``：源文件不存在，或源里没有任何每宠键（无事可做，不造空档案）；
     - ``source-corrupt`` / ``source-unreadable``：源读不出可信对象 → 不写目标；
     - ``target-corrupt``：目标（``config-slot-0.json``）不可信 → **一个字节都不写、
@@ -1044,7 +1069,38 @@ def migrate_slot0_profile(config_dir: Path | str, *, source: Path | str | None =
                            else "备份全局配置失败：中止迁移，不写档案")
             from .config import normalize_pet_profile_snapshot
 
-            if not existed:
+            retained: tuple[str, ...] = ()
+            recovery: Path | None = None
+            if existed:
+                # 目标已存在：**绝不覆盖目标**，但源每宠键照样清算——与
+                # ``Config.save()`` 的全局清理是**同一条规则**（它对全局身份无条件
+                # ``pop(PER_PET_KEYS | SLOT_LOCAL_KEYS)``）。迁移侧若"不清源"，源里那批
+                # 键活不过本进程的下一次保存，``retained_keys`` 就成了骗人的字段
+                # （文件里根本留不住），而且全局配置 + 槽档案同时装着每宠值 = 规范
+                # 禁止的双真值。这里源里的键是**未被本次迁移采用**的值，清理前先保证
+                # 恢复路径真的留住了它们：规范备份本来就是这批值就直接用；该路径已被
+                # 另一份快照占用（**不覆盖它**）就另存一份时间戳恢复副本。取不到副本
+                # 就不清源。
+                retained = tuple(copied)
+                values = {key: data[key] for key in copied}
+                if not _backup_holds_values(backup, values):
+                    recovery = _recovery_copy_path(src)
+                    if not _copy_file(src, recovery):
+                        return Slot0Migration(
+                            status="backup-failed", profile_path=target, source_path=src,
+                            backup_path=backup,
+                            reason="既有备份不含当前每宠值且恢复副本写不出："
+                                   "不清源、不写目标（下次重跑即可收敛）")
+                    logger.warning(
+                        "slot0 迁移：目标档案已存在（不覆盖）；源每宠键已清理，"
+                        "未采用的源值在规范备份之外另存于 %s（规范备份 %s 未被覆盖）：%s",
+                        recovery, backup, ", ".join(retained))
+                else:
+                    logger.warning(
+                        "slot0 迁移：目标档案已存在（不覆盖）；源每宠键已清理，"
+                        "未采用的源值可从备份取回 %s：%s",
+                        backup, ", ".join(retained))
+            else:
                 cleaned = normalize_pet_profile_snapshot(data)
                 profile = {key: cleaned[key] for key in PER_PET_KEYS if key in cleaned}
                 profile.update(version=PROFILE_FILE_VERSION, user_customized=True)
@@ -1056,10 +1112,15 @@ def migrate_slot0_profile(config_dir: Path | str, *, source: Path | str | None =
     except cwl.ConfigWriteError as exc:
         return Slot0Migration(status=_failure_status(exc), profile_path=target,
                               source_path=src, reason=str(exc))
+    source_backup = recovery or backup
     return Slot0Migration(
         status="already-exists" if existed else "created",
-        profile_path=target, source_path=src, backup_path=backup,
-        copied_keys=copied, reason="备份已验证、档案保留、源每宠键已清理")
+        profile_path=target, source_path=src, backup_path=backup, recovery_path=recovery,
+        copied_keys=() if existed else copied,
+        retained_keys=retained,
+        reason=(f"备份已验证；目标档案已存在：不覆盖目标；源每宠键已清理，"
+                f"未采用的源值留存于 {source_backup.name}（{source_backup}）"
+                if existed else "备份已验证、档案已建、源每宠键已清理"))
 
 
 # ------------------------------------------------------------------ 数据代次
@@ -1289,6 +1350,30 @@ def _backup_file(src: Path, dst: Path, *, validate=None) -> str:
         logger.warning("检查备份路径失败: %s", dst, exc_info=True)
         return BACKUP_FAILED
     return BACKUP_OK if _copy_file(src, dst) else BACKUP_FAILED
+
+
+#: 恢复副本名字标记：规范备份路径被**另一份快照**占用时才用（时间戳 + pid，零覆盖）。
+PROFILE_MIGRATION_RECOVERY_MARKER = ".pre-slot0-migration-recovery"
+
+
+def _recovery_copy_path(src: Path) -> Path:
+    """恢复副本路径（时间戳 + pid ⇒ 结构上不可能覆盖任何既有文件）。"""
+    stamp = f"{int(time.time() * 1000)}-{os.getpid()}"
+    return src.with_name(f"{src.name}{PROFILE_MIGRATION_RECOVERY_MARKER}-{stamp}.bak")
+
+
+def _backup_holds_values(path: Path, values: Mapping[str, Any]) -> bool:
+    """既有备份是否**装着这批值**——键在不算数，值也要逐条相等。
+
+    与 :func:`_is_global_config_snapshot` 的区别是"证据强度"：那个只查键在不在
+    （用作"这文件是不是一份全局配置快照"的入场判据），本函数用来回答"**这一批
+    即将被清掉的源值**，能不能从这份备份取回"。后者答否时调用方必须另存恢复副本，
+    否则清理就成了不可恢复的删除。
+    """
+    data, status = cwl.read_json_dict(path)
+    if status != "ok" or not isinstance(data, dict):
+        return False
+    return all(key in data and data[key] == value for key, value in values.items())
 
 
 def _is_v1_active_set_document(path: Path) -> bool:

@@ -1372,7 +1372,61 @@ class OverlayShell(QObject):
         self._build_tray()
         self._install_settings_command_watch()
         self._slot_signature_cache = self._slot_config_signatures()
+        self._announce_no_pets_if_empty()
         self._built = True
+
+    def _announce_no_pets_if_empty(self) -> None:
+        """一只宠物都没有时**不许静默**（issue #286）。
+
+        零活跃宠物是一个合法状态（用户点过托盘「退出这只」、``overlay-active-pets.json``
+        损坏或版本不认识、slot0 档案降级被剥出活跃集），但旧口径下 overlay 拓扑照常
+        ``show()`` 一个全屏置顶空窗、legacy 拓扑只留一个托盘图标，**既不报错也不打
+        日志**：用户看到的是「进程在、托盘在、桌面上什么都没有」，而 CPU 停在 idle
+        （0 sprite 空窗停表，见 M12c），观感等同于"启动失败或被安全软件拦了"。
+
+        这里把事实说清楚：日志给排查，托盘 tooltip / 恢复窗给用户（无托盘时恢复窗是
+        唯一可见入口）。不造宠物、不碰档案——只陈述与指路。
+        """
+        if self._all_sprites():
+            return
+        reason = self._no_pets_reason()
+        active = list(getattr(self, "_remembered_active", ()) or ())
+        config_dir = self._spawn_config_dir() or getattr(self._config, "dir", None)
+        logging.warning(
+            "overlay: 启动后没有任何宠物（活跃集合=%s，配置目录=%s）：%s",
+            active, config_dir, reason)
+        text = (f"没有可显示的桌宠：{reason}\n"
+                "托盘（或本窗口）的「生成 / 恢复 slot0」可以重建。")
+        # 恢复窗开着且还是空白时补一句话（无托盘时它是唯一的可见入口）。
+        # **绝不写 ``_slot0_profile_diagnosis``**：那是"slot0 档案降级"的专用诊断源，
+        # ``_spawn_failure_text`` 会优先引用它、因而带上坏档案路径；塞一句笼统的
+        # "没有宠物"进去会把那条线索顶掉（本片首版就是这么踩的，
+        # `test_slot0_lifecycle` 的恢复窗用例当场红）。零宠物是另一回事，只走
+        # 日志、托盘 tooltip 与恢复窗的空白补齐。
+        label = getattr(self, "_recovery_diagnosis_label", None)
+        if label is not None:
+            try:
+                if not str(label.text() or ""):
+                    label.setText(text)
+                    label.setVisible(True)
+            except RuntimeError:  # 窗口已随进程销毁
+                pass
+        tray = getattr(self, "tray", None)
+        if tray is not None:
+            try:
+                tray.setToolTip(f"dsh-pet：没有可显示的桌宠（{reason}）")
+            except RuntimeError:
+                pass
+
+    def _no_pets_reason(self) -> str:
+        """零宠物的一句话原因：按三条已知入口如实陈述，不猜。"""
+        diagnosis = self.slot0_profile_diagnosis()
+        if diagnosis:
+            return diagnosis
+        active = list(getattr(self, "_remembered_active", ()) or ())
+        if not active:
+            return "活跃宠物清单为空（overlay-active-pets.json 里没有有效身份）"
+        return f"活跃清单 {active} 里的宠物都没能建起来（原因见日志）"
 
     def _create_host(self, screen):
         """建一块屏的宿主（含该屏的 overlay 与一份屏局部控制器），并接线到壳。

@@ -475,6 +475,143 @@ def test_slot0_migration_never_overwrites_existing_profile(tmp_path):
     assert (tmp_path / "config.json.pre-slot0-migration.bak").exists()
 
 
+def test_slot0_migration_existing_profile_cleans_source_and_keeps_it_recoverable(tmp_path):
+    """目标已存在：**不覆盖目标**、**清理源每宠键**，且被清掉的值必须取得回。
+
+    清理这一半与 ``Config.save()`` 是同一条规则（它对全局身份无条件
+    ``pop(PER_PET_KEYS | SLOT_LOCAL_KEYS)``）：迁移侧"不清源"留不住任何东西，
+    只会在下一次保存时被抹掉，``retained_keys`` 也就成了骗人的字段。
+    "不丢数据"由**备份**承担——规范备份本来就是这批值（`_backup_file` 在这条支路
+    之前跑），所以不需要第二份副本。
+    """
+    source = _global_with_per_pet(tmp_path)
+    target = pp.slot_profile_path(tmp_path, 0)
+    _dump(target, {"version": 4, "character": "dog", "sentinel": 7})
+    before_target = target.read_bytes()
+
+    result = pp.migrate_slot0_profile(tmp_path)
+
+    assert result.status == "already-exists"
+    assert target.read_bytes() == before_target, "目标档案一个字节都不许动"
+
+    remaining = json.loads(pp.global_config_path(tmp_path).read_text(encoding="utf8"))
+    assert not pp.PER_PET_KEYS.intersection(remaining), "源每宠键必须清干净"
+    assert remaining["pet_opacity"] == source["pet_opacity"], "全局键一个都不许少"
+
+    # 被清掉的那批值全部可从规范备份取回（这就是"不丢数据"的落点）
+    assert result.backup_path is not None and result.backup_path.exists()
+    backup = json.loads(result.backup_path.read_text(encoding="utf8"))
+    for key in ("rx", "ry", "screen_name", "facing", "scale", "character"):
+        assert backup[key] == source[key], key
+    assert result.recovery_path is None, "规范备份本来就是这批值，不必再存副本"
+
+    # 未采用的键如实登记（可诊断），copied_keys 只记真的写进档案的
+    assert set(result.retained_keys) >= {"rx", "ry", "character"}
+    assert result.copied_keys == ()
+    assert result.backup_path.name in result.reason, "诊断信息必须点名备份文件"
+
+    # 本函数**不**把源几何补进既有档案（「不覆盖目标」是已发布契约），所以它
+    # 修不了"位置落回右下角"：档案缺 rx/ry 时，覆盖层落点由档案决定（缺 → 默认
+    # 右下角），全局 config.json 的 rx/ry 在覆盖层里没有读者。别把这条支路当成
+    # 位置丢失的修复。
+    restored = pp.read_slot_profile(tmp_path, 0)
+    assert restored.value("rx") is None, "目标档案缺的位置不会被源值补上"
+    assert restored.value("ry") is None
+
+
+def test_slot0_migration_existing_profile_consistency_with_config_save(tmp_path):
+    """迁移清源 == ``Config.save()`` 的全局清理：两条路不许有分歧。
+
+    分歧的真实形态（本用例钉住的就是它）：迁移说"不清源"，源里留着每宠键，
+    但 ``Config.save()`` 的 ``pop(PER_PET_KEYS | SLOT_LOCAL_KEYS)`` 是无条件的，
+    下一次保存就把它们抹掉——于是 `retained_keys` 描述的"保留"在盘上并不成立，
+    用户拿到的是一份写着"保留"却已经空掉的配置。这里连续走两步（先迁移、再真保存），
+    断言源侧**始终**没有每宠键、目标档案**始终**逐字节不变。
+    """
+    from pet.config import APP_DIR_NAME, Config
+
+    cfg_dir = tmp_path / APP_DIR_NAME          # Config.dir = base / APP_DIR_NAME
+    source = _global_with_per_pet(cfg_dir)
+    target = pp.slot_profile_path(cfg_dir, 0)
+    _dump(target, {"version": 4, "character": "dog", "sentinel": 7})
+    before_target = target.read_bytes()
+
+    assert pp.migrate_slot0_profile(cfg_dir).status == "already-exists"
+    after_migration = json.loads(pp.global_config_path(cfg_dir).read_text(encoding="utf8"))
+    assert not pp.PER_PET_KEYS.intersection(after_migration), \
+        "迁移这一步就该清完（否则 save 会再清一次 = 两条规则）"
+
+    cfg = Config(base=tmp_path, instance_id="")
+    assert cfg.path == pp.global_config_path(cfg_dir), "夹具钉住：save 的就是迁移源"
+    assert cfg.save() is True
+    after_save = json.loads(pp.global_config_path(cfg_dir).read_text(encoding="utf8"))
+    assert not pp.PER_PET_KEYS.intersection(after_save), "保存后源侧同样不许有每宠键"
+    assert after_save["pet_opacity"] == source["pet_opacity"]
+    assert target.read_bytes() == before_target, "保存路径同样不许动目标档案"
+
+
+def test_slot0_migration_existing_profile_keeps_a_different_backup_and_gets_recovery_copy(tmp_path):
+    """规范备份已被**另一份快照**占用：不覆盖它，另存副本把当前值留住。
+
+    这是"清源"唯一真正会丢数据的场面：``_is_global_config_snapshot`` 只查
+    **键在不在**，所以一份**旧**快照也能通过校验并被"保留第一份"规则保护下来。
+    若这时照旧清源，源里**当前**的每宠值就再无着落（旧版本退回过、又升级回来时
+    真实可达）。契约：规范备份逐字节不动 + 当前值可从 ``recovery_path`` 取回。
+    """
+    source = _global_with_per_pet(tmp_path)
+    target = pp.slot_profile_path(tmp_path, 0)
+    _dump(target, {"version": 4, "character": "dog", "sentinel": 7})
+
+    # 旧快照 = 键齐全（过得了"是不是全局配置快照"的入场校验）但**值不同**
+    stale = dict(source)
+    stale.update({"character": "dog", "scale": 0.5, "rx": 1.0, "ry": 2.0,
+                  "screen_name": "DISPLAY1", "facing": "right", "pet_opacity": 42})
+    canonical = tmp_path / "config.json.pre-slot0-migration.bak"
+    _dump(canonical, stale)
+    canonical_before = canonical.read_bytes()
+
+    result = pp.migrate_slot0_profile(tmp_path)
+
+    assert result.status == "already-exists"
+    assert canonical.read_bytes() == canonical_before, "规范备份（旧快照）不得被覆盖"
+    assert result.recovery_path is not None, "必须另存恢复副本"
+    assert result.recovery_path.exists()
+    copy = json.loads(result.recovery_path.read_text(encoding="utf8"))
+    for key in ("rx", "ry", "screen_name", "facing", "scale", "character"):
+        assert copy[key] == source[key], f"当前值 {key} 必须留在恢复副本里"
+    assert result.recovery_path.name in result.reason, "诊断信息必须点名恢复副本"
+
+
+def test_slot0_migration_existing_profile_refuses_to_clean_without_a_recovery_copy(
+        tmp_path, monkeypatch):
+    """取不到恢复副本就**不清源**：宁可留下双份，也不做不可恢复的删除。
+
+    不改这里的话，``_copy_file`` 失败会静默降级成"照旧清源"——源里当前值没了、
+    备份里只有旧快照，正是"数据丢了还没人知道"。
+    """
+    source = _global_with_per_pet(tmp_path)
+    target = pp.slot_profile_path(tmp_path, 0)
+    _dump(target, {"version": 4, "character": "dog", "sentinel": 7})
+    before_target = target.read_bytes()
+    # 键齐全但值不同的旧快照 → 校验通过、但"装着这批值"为假 → 才走到恢复副本这一步
+    stale = dict(source)
+    stale.update({"character": "dog", "scale": 0.5, "rx": 1.0, "ry": 2.0,
+                  "screen_name": "DISPLAY1", "facing": "right"})
+    _dump(tmp_path / "config.json.pre-slot0-migration.bak", stale)
+
+    def boom(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(pp, "_copy_file", boom)
+    result = pp.migrate_slot0_profile(tmp_path)
+
+    assert result.status == "backup-failed", result
+    remaining = json.loads(pp.global_config_path(tmp_path).read_text(encoding="utf8"))
+    assert remaining["character"] == source["character"], "取不到副本就不许清源"
+    assert remaining["rx"] == source["rx"]
+    assert target.read_bytes() == before_target, "目标档案照旧一个字节不动"
+
+
 def test_slot0_migration_is_idempotent_and_retryable(tmp_path, monkeypatch):
     _global_with_per_pet(tmp_path)
     target = pp.slot_profile_path(tmp_path, 0)
