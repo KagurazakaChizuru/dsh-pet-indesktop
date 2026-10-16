@@ -2,24 +2,27 @@
 """帧序列「首跑自动供给」（帧序列化 B 档）。
 
 素材包不带 frameseq 时（安装包只带 webm），运行时后台低优先级把 webm 转成
-WebP 帧序列。**全部 clip 统一一档**：Q70 有损 + 白底反解 v3（``ENCODER_DESC``）
+WebP 帧序列。**全部 clip 统一一档**：Q70 有损 + 白底反解 v5（``ENCODER_DESC``）
 ——热集（idle/move/turn/click/drag ≈95% 播放时长）与冷集（random/events）不再分档，
-旧的三代产物（热集无损 / 冷集 Q80 / 反解 v2）因此都不再被采纳
+旧的四代产物（热集无损 / 冷集 Q80 / 反解 v2 / 反解 v3）因此都不再被采纳
 （``current_generation``）。
 
 转换分**两段**（``convert_clip``）：
 
 1. **无损中间帧**：ffmpeg 一次调用把 webm 每一帧写成无损 WebP（``-lossless 1``，
    参数见 ``_ffmpeg_argv``）；
-2. **逐帧白底反解 v3 + 有损重编码**：``unblend_frames_in_place`` 用 Pillow 逐帧跑
+2. **逐帧白底反解 v5 + 有损重编码**：``unblend_frames_in_place`` 用 Pillow 逐帧跑
    ``unblend_v3``（反解 ``unblend_rgba`` → 低 alpha 亮色收色 → 镂空还原
-   ``restore_hair_holes`` → alpha 微缩 1px）后原地编码 Q70。镂空还原本来是 v3 档位
-   内的缺陷收口（不构成新档：档串仍是 ``unblend-white-v3``），针对 v3 结构性够不到
-   的那一类——**抠图整块失败的背景残留**（发丝间该透明的缝隙留成了 ``a = 255`` 的
-   实心灰白块）；但它在实机上**误切了白色鲸鳍**（残留与白色艺术品在该判据的形状
-   特征上同构），**现已默认挂起**（``HOLE_RESTORE_ENABLED = False``，直通、
-   零开销），等用户给出精确残留位置后重标定再开启。挂起期间这一段的产物与
-   「反解 → 收色 → 微缩」完全相同，档串不变。
+   ``restore_hair_holes`` → alpha 微缩 1px）最后接 **alpha 底板清理**
+   （``floor_faint_alpha``：``a == 1`` 的像素清成全透明）后原地编码 Q70。镂空还原
+   本来是 v3 档位内的缺陷收口（当时不构成新档），针对
+   v3 结构性够不到的那一类——**抠图整块失败的背景残留**（发丝间该透明的缝隙留成了
+   ``a = 255`` 的实心灰白块）；但它在实机上**误切了白色鲸鳍**（残留与白色艺术品在该
+   判据的形状特征上同构），**已默认挂起**（``HOLE_RESTORE_ENABLED = False``，直通、
+   零开销），所以 v5 也不含它（**没有"v4 产物"**，等用户给出精确残留位置后重标定
+   再开启）。底板清理是 v5 相对 v3 的**唯一**差别：抠图把整块背景留成了 ``a = 1``
+   （实测占 640×360 的 ≈82%），叠在任何背景上都是 ``dst × 254/255``（白底 255 →
+   254，整块矩形比背景暗一档），微缩够不到它。
 
 为什么不让 ffmpeg 一趟做完有损：素材在白底上抠图，半透明像素的存值里混着白
 （``stored = 角色色 × a + 255 × (1-a)``），必须在**有损编码之前**按 alpha 反解
@@ -40,9 +43,9 @@ unlink 而不是一整趟编码。成本对比见 PR 报告的性能分析。
   前 12 位）——**目录名即身份**，meta.json 同时写全量 ``source_sha256``。
   采纳（帧序列化 B 档生效）要求五件事同时成立：目录名看得出戳、meta 有合法
   戳、名字戳 = meta 戳前缀、meta 帧数 = 磁盘帧数、**meta encoder = 当前档位串
-  ``ENCODER_DESC``**（Q70 + 白底反解 v3：档位不符说明这份产物不是按当前档产出的
-  ——改档前的热集无损 / 冷集 Q80 世代全在这一条上被拦住——宁可重转，不拿旧档产物
-  顶替）；
+  ``ENCODER_DESC``**（Q70 + 白底反解 v5：档位不符说明这份产物不是按当前档产出的
+  ——改档前的热集无损 / 冷集 Q80 / 反解 v2 / 反解 v3 世代全在这一条上被拦住
+  ——宁可重转，不拿旧档产物顶替）；
   给强身份时还要求 meta 戳 =
   当前源 sha256。**任何一条不成立都不采纳，回退 WebM 播放**——没有身份凭证的
   旧版/手工产物绝不当当前源用（``<stem>/``、``<stem>.g<戳>.tmp/`` 亦然）。
@@ -88,13 +91,15 @@ unlink 而不是一整趟编码。成本对比见 PR 报告的性能分析。
   libvpx 解码（原生 vp9 解码器静默丢弃 VP9 alpha 位流）、``-pix_fmt bgra``
   直通（libwebp 走 yuva420p 会 chroma 下采样）、``-nostdin``（循环里跑
   ffmpeg 会吞父进程 stdin）；
-- **两段式管线与白底反解 v3**（硬约束，见模块文档）：① 阶段一**永远无损**
+- **两段式管线与白底反解 v5**（硬约束，见模块文档）：① 阶段一**永远无损**
   （``-lossless 1`` 是唯一的阶段一编码档）；② 阶段二逐帧跑 ``unblend_v3``：
   ``rec = clip((stored - 255×(1-a)) / a, 0, 255)`` 之后接**低 alpha 亮色收色**
   （a 落在收色带内、且比最近的不透明邻居亮出 ``UNBLEND_EXCESS_LUMA`` 的像素，
   颜色收成邻居色）、**镂空还原**（实心灰白的背景残留整块切透，只动 alpha；
-  **默认挂起**，见模块常量 ``HOLE_RESTORE_ENABLED``）与
-  **alpha 微缩 1px**（3x3 最小值滤波）。**颜色会被改、alpha 也会被改**（v2 的
+  **默认挂起**，见模块常量 ``HOLE_RESTORE_ENABLED``；挂起即不在 v5 里，没有 v4 档）、
+  **alpha 微缩 1px**（3x3 最小值滤波）与 **alpha 底板清理**
+  （``floor_faint_alpha``：``a == 1`` → 0，RGB 同时置 0；v5 的**唯一**新增步骤）。
+  **颜色会被改、alpha 也会被改**（v2 的
   "alpha 一个位都不动"到此为止）：档位串与反解标记一起换，旧世代按既有迁移机制
   自动不采纳；收色只动半透明像素，且判据方向决定**只会变暗**——不存在修完反而
   更亮（>30）的像素。反解本身两端不反解：``a < UNBLEND_MIN_ALPHA``
@@ -102,7 +107,7 @@ unlink 而不是一整趟编码。成本对比见 PR 报告的性能分析。
   （白底项 ≤2%，整数除法反而引入 ±1 抖动）。单帧处理不了就**跳过该帧并记日志**
   （原文件那份无损帧原样留着：能播、帧数对），绝不中断整段供给；只有整段进不了
   阶段二（Pillow / ``ImageMath.lambda_eval`` 不可用）才按失败收口——宁可不产出，
-  也不写一份「Q70 + 反解 v3」却不成立的假 meta。帧数契约因此只有一处定义：
+  也不写一份「Q70 + 反解 v5」却不成立的假 meta。帧数契约因此只有一处定义：
   ``meta.frames`` = 磁盘 ``f_*.webp`` 数（阶段二原地覆盖，一张都不增删）；
 - fps 探测用 ``imageio_ffmpeg.read_frames`` 的 meta（运行时不带 ffprobe）；
 - 幂等：当前源已有可用世代目录 → 跳过（不重编码、不重建半成品）；
@@ -259,29 +264,35 @@ BACKOFF_NAME = ".backoff.json"
 BACKOFF_BASE_S = 300.0
 BACKOFF_MAX_S = 6 * 3600.0
 DEFAULT_FPS = 24.0
-# 统一编码档：**全部 clip** 一档（Q70 + 白底反解 v3）。encoder 串是采纳条件的一部分
-# （``current_generation``），改它 = 全部旧世代失效——这是设计好的迁移路径：
-# 旧世代不采纳 ⇒ 回退 WebM 播放 + 后台按新档重新供给。
-ENCODER_DESC = "libwebp lossy q70 (bgra straight, unblend-white-v3)"
-# meta 里的反解标记：这份帧集是**白底反解 v3 过**的（供将来识别/迁移用）。
+# 统一编码档：**全部 clip** 一档（Q70 + 白底反解 v5 = v3 三步 + alpha 底板清理）。
+# encoder 串是采纳条件的一部分（``current_generation``），改它 = 全部旧世代失效
+# ——这是设计好的迁移路径：旧世代不采纳 ⇒ 回退 WebM 播放 + 后台按新档重新供给。
+# **v3 与 v5 之间没有"v4 档"**：``HOLE_RESTORE_ENABLED``（镂空还原）从未启用、
+# 现在仍是挂起状态（实机误切白色鲸鳍），所以它不占档位——没有一份产物是"v4 产物"。
+# v5 相对 v3 只多一步：把 ``a == 1`` 的底板清成全透明（``floor_faint_alpha``）。
+ENCODER_DESC = "libwebp lossy q70 (bgra straight, unblend-white-v5)"
+# meta 里的反解标记：这份帧集是**白底反解 v5 过**的（供将来识别/迁移用）。
 # 与 ``ENCODER_DESC`` 同写同弃，采纳闸门只看 encoder 串——标记不足以单独构成身份。
-UNBLEND_MARK = "white-v3"
-# 改档之前的 encoder 串（热集无损 / 冷集 Q80 / 反解 v2）：**只作历史识别**，
+UNBLEND_MARK = "white-v5"
+# 改档之前的 encoder 串（热集无损 / 冷集 Q80 / 反解 v2 / 反解 v3）：**只作历史识别**，
 # 绝不写进 meta。它们天然不等于 ``ENCODER_DESC`` ⇒ 那一代产物不被采纳
 # （迁移路径，不是巧合）；列在这里是为了让"上一代的串长什么样"在代码里可查，
 # 而不是只能靠字符串比对去猜。v2（``unblend-white``）与 v3 的差别是**像素级**的
-# （v2 的产物在深色角色边缘留着白边），所以它必须同旧两档一样重转，不能混用。
+# （v2 的产物在深色角色边缘留着白边），所以它必须同旧两档一样重转，不能混用；
+# v3 与 v5 同理（v3 的产物铺着一整块 ``a == 1`` 的底板，叠在任何背景上都会显出一块
+# 浅灰——白底 255 → 254，这正是"白底整块色差"）。
 LEGACY_ENCODER_DESCS: tuple[str, ...] = (
     "libwebp lossless (bgra straight)",
     "libwebp lossy q80 (bgra straight)",
     "libwebp lossy q70 (bgra straight, unblend-white)",
+    "libwebp lossy q70 (bgra straight, unblend-white-v3)",
 )
 # 阶段二编码参数：libwebp 编码器（Pillow 的 webp 后端就是 libwebp，与 ``_ffmpeg_argv``
 # 用的同一个），quality=70 与用户实测口径一致；method=4 = libwebp 默认压缩档，与
 # ffmpeg 的 ``compression_level`` 默认值 4 同档（实测体积/PSNR 持平，见报告）。
 WEBP_QUALITY = 70
 WEBP_METHOD = 4
-# 白底反解 v3 的两端（详见模块文档「两段式管线与白底反解 v3」）：
+# 白底反解 v3 的两端（详见模块文档「两段式管线与白底反解 v5」）：
 # ``UNBLEND_MIN_ALPHA`` = 0.08 × 255 ≈ 20.4，即 a/255 < 0.08 不反解；a ≥ 250 也不反解。
 UNBLEND_MIN_ALPHA = 21
 UNBLEND_MAX_ALPHA = 250
@@ -557,7 +568,7 @@ def is_lossy_clip(webm: Path | str, videos_dir: Path | str,
                   *, folders: Iterable[str] = LOSSY_FOLDERS) -> bool:
     """该 clip 是否属于**冷集目录**（``LOSSY_FOLDERS`` = random/events）：看第一级目录。
 
-    改档后它**不再选择编码档**（全部 clip 都是 Q70 + 反解 v3）；剩下的含义只有"冷集"
+    改档后它**不再选择编码档**（全部 clip 都是 Q70 + 反解 v5）；剩下的含义只有"冷集"
     ——供给序把冷集排在全部热集之后（``supply_priority``）。保留是因为构建期 CLI
     （``tools/convert_frameseq.py``）按它给 ``convert_clip(lossy=...)`` 传参，而那个
     文件不在本批改动范围内：同名同步更新后，本函数与 ``convert_clip`` 的 ``lossy``
@@ -666,8 +677,9 @@ def current_generation(webm: Path | str, videos_dir: Path | str,
 
     生产侧（``plan_clips``）与消费侧（``MovieLibrary.rescan_frameseq``）共用
     本谓词——"什么算当前源的帧序列缓存"只有一处定义。档位也是采纳条件：``meta``
-    的 encoder 必须等于当前档位串（``ENCODER_DESC`` = Q70 + 白底反解 v3）——不符说明
-    这份产物不是按当前档位产出的（改档前的热集无损 / 冷集 Q80、手工搬运、旧工具），
+    的 encoder 必须等于当前档位串（``ENCODER_DESC`` = Q70 + 白底反解 v5）——不符说明
+    这份产物不是按当前档位产出的（改档前的热集无损 / 冷集 Q80 / 反解 v2 / 反解 v3、
+    手工搬运、旧工具），
     不采纳、列进待转。**改档即让全部旧世代走这条路径**：回退 WebM 播放 + 后台按
     新档重新供给，而不是拿旧档产物顶替。
     """
@@ -1212,7 +1224,7 @@ def _ffmpeg_argv(exe: str, webm: Path, tmp_dir: Path) -> list[str]:
     ]
 
 
-# --------------------------------------------- 阶段二：白底反解 v3 + Q70 重编码
+# --------------------------------------------- 阶段二：白底反解 v5 + Q70 重编码
 def _pil():
     """懒载 Pillow：``(Image, ImageMath, ImageFilter, ImageChops)``。
 
@@ -1427,6 +1439,65 @@ def erode_alpha(im, *, px: int = UNBLEND_ERODE_PX):
     red, green, blue, alpha = im.split()
     kernel = 2 * int(px) + 1
     return Image.merge("RGBA", (red, green, blue, alpha.filter(ImageFilter.MinFilter(kernel))))
+
+
+# ------------------------------------------------- 白底反解 v5：alpha 底板清理
+# 微缩之后还剩一类像素：**整块底板的 ``a = 1``**。它不是轮廓上的渐隐，而是抠图时
+# 背景整块留下的"几乎全透明"值——实测源 webm 与 v3 产物上占 640×360 的 ≈82%。
+# 它够不到的两个理由：① ``erode_alpha`` 取的是 3×3 最小值，只能啃轮廓外圈 1px，
+# 底板内部的 1 是稳定的（邻域全是 1）；② 反解/收色的口径都建立在"半透明带"或
+# "``a >= 250`` 的实心块"上，``a = 1`` 两边都不在。
+#
+# 屏幕上它就是 ``dst × 254/255``：白底 255 → **254**（整块矩形比背景暗一档，
+# 用户报的"白底整块色差"），深色底各自按比例压暗一档。清成 ``a = 0`` 即可
+# 完全复原背景。判据是**恰好等于** ``FAINT_ALPHA``（不是"<= 某阈值"）：
+# ``a = 0`` 本来就透明、``a >= 2`` 承载着真实的半透明过渡（发丝/AA 边），
+# 一个都不许动。
+FAINT_ALPHA = 1
+
+
+def faint_alpha_mask(alpha):
+    """``a`` **恰好等于** ``FAINT_ALPHA`` 的像素掩膜（L，0/255，纯函数）。
+
+    单独成函数是因为它是"清哪些像素"的唯一判据：清理与单测的两侧断言共用它
+    （``a = 1`` 命中、0 与 2..255 全不命中），口径只有一处。
+    """
+    _Image, _ImageMath, _ImageFilter, _ImageChops = _pil()
+    return alpha.point(lambda v: 255 if v == FAINT_ALPHA else 0)
+
+
+def floor_faint_alpha(im):
+    """alpha 底板清理：``a == FAINT_ALPHA`` 的像素清成全透明（纯函数）。
+
+    依据、判据与屏幕观感见上面那组常量注释：``a = 1`` 的底板叠在任何背景上都是
+    ``dst × 254/255``（白底 255 → 254），清成 0 之后背景逐位复原。只动 ``a == 1``：
+    ``a = 0`` 原样、``a >= 2`` 一个位不动（**颜色也不动**——见下）。
+
+    归零像素的 RGB 同时置 0：它们已经全透明（屏幕上看不见任何颜色），而存值本身
+    必须自洽——"alpha=0 的像素 RGB 必须是 0"是预乘透明的读法，置 0 不会在任何
+    实现里漏色，置 255 则会在"把 RGB 直接当颜色用"的实现里漏出一圈白（**不用 255**）。
+    实测这一步对绝大多数像素是空操作（底板本来就被编码器/源存成 ``(0,0,0,1)``）：
+    真素材上 ``a = 1`` 的像素里 99.0-99.5% 的 RGB 已经是 0，只有微缩环上那 ≈0.5%
+    带着非 0 颜色（最大 ≈170），置 0 正是为它们准备的。
+
+    位置 = ``unblend_v3`` 的**最后一步**（微缩之后、Q70 编码之前）。与放在微缩之前
+    **逐位等价**：清理把 0/1 都映射成 0（``F(0) = F(1) = 0``，其余不变）是单调不增的，
+    而微缩取的是 3×3 最小值（``min F(x) = F(min x)``）；放在最后是因为它产出的
+    就是发布出去的像素，WebP 的 alpha 走无损位流（实测编码→解码后 ``a == 1`` 仍是 0）。
+
+    没有 ``a == 1`` 的帧**原对象返回**（稳态零成本）；非 RGBA 输入当场报错
+    （工序契约：调用点喂进来的坏输入必须在这里炸，不许静默直通）。
+    """
+    Image, _ImageMath, _ImageFilter, ImageChops = _pil()
+    if im.mode != "RGBA":
+        raise ValueError(f"floor_faint_alpha 只接受 RGBA，收到 {im.mode}")
+    _red, _green, _blue, alpha = im.split()
+    faint = faint_alpha_mask(alpha)
+    if faint.getbbox() is None:
+        return im
+    colors = im.convert("RGB")          # convert 是拷贝：不要就地改入参
+    colors.paste((0, 0, 0), (0, 0), faint)
+    return Image.merge("RGBA", (*colors.split(), ImageChops.subtract(alpha, faint)))
 
 
 def hole_candidate_mask(im):
@@ -1700,8 +1771,12 @@ def _pull_region(im, box: tuple[int, int, int, int]):
 
 
 def unblend_v3(im):
-    """阶段二单帧 v3（纯函数）：白底反解 → 低 alpha 亮色收色 → **镂空还原** →
-    alpha 微缩 1px。
+    """阶段二单帧（纯函数）：白底反解 → 低 alpha 亮色收色 → **镂空还原** →
+    alpha 微缩 1px → **alpha 底板清理**。
+
+    函数名里的 ``v3`` 指这条链的主体（v2 之后的那三步），**产物档位是 v5**
+    （``ENCODER_DESC`` = ``unblend-white-v5``）：v4（镂空还原）从未启用、现仍挂起，
+    所以档号从 v3 直接落到 v5，这一步的相对差别只有链尾的底板清理。
 
     收色的两步**必须**在反解之后：反解的除法是 v2 那部分的全部价值（a ≥ 21 的像素
     颜色被除回去），而收色的判据是"亮度差"——先收色等于拿还没除白的存值去比，深色
@@ -1711,12 +1786,16 @@ def unblend_v3(im):
     直接删掉，看着"白边没了"其实是把轮廓啃掉了；反过来，收色先动颜色、微缩只动
     alpha，两者互不干扰，各自的效果都能单独验。
 
-    **镂空还原**（``restore_hair_holes``，工序四，档串仍是 ``unblend-white-v3``——
-    它修的是同一版产物上的缺陷收口，不构成新档）放在收色之后、微缩之前。
-    **它现在默认挂起**（``HOLE_RESTORE_ENABLED = False``：实机目视确认误切白色
-    鲸鳍，见该常量注释）——挂起时这一步是 O(1) 直通，本函数的产物与
-    「反解 → 收色 → 微缩」逐位相同；工序位置留着，是为了开关一开就回到原位、
-    不必再改这里。放在这个位置的顺序理由（开关开启后成立）：
+    **底板清理在最后**：``a == 1`` 铺满整个背景（≈82%），微缩够不到它（它不在轮廓
+    环上、邻域全是 1），而它是"白底整块色差"的成因（白底 255 → 254）。放在微缩
+    之后与放在微缩之前**逐位等价**（``floor_faint_alpha`` 的注释里有证明），放在
+    最后是因为它产出的就是发布出去的像素。
+
+    **镂空还原**（``restore_hair_holes``，工序四 = 本仓一直叫的 "v4"）放在收色之后、
+    微缩之前。**它现在默认挂起**（``HOLE_RESTORE_ENABLED = False``：实机目视确认
+    误切白色鲸鳍，见该常量注释）——挂起时这一步是 O(1) 直通。
+    工序位置留着，是为了开关一开就回到原位、不必再改这里。
+    放在这个位置的顺序理由（开关开启后成立）：
 
     - 收色之后是因为它对颜色的要求正好相反——收色要判"比邻居亮多少"，镂空判的是
       "整块是不是墙色"；顺序对结果没有耦合，但对**阅读**有：读到这里时颜色已经被
@@ -1727,7 +1806,9 @@ def unblend_v3(im):
 
     单帧 640×360 实测（真素材帧，Pillow 12.2 / Python 3.13）：反解 10.2ms +
     收色 25.6ms（裁剪区内的 5 轮扩散 18ms + 判据 + 替换）+ 微缩 7.0ms = **44ms**；
-    镂空还原开启时实测 **+24.5ms**（第四批口径；挂起时 **+0ms**）。
+    镂空还原开启时实测 **+24.5ms**（第四批口径；挂起时 **+0ms**）；
+    v5 的底板清理实测 **+4.6ms**（640×360 真素材帧、铺满 a==1；无 a==1 的帧
+    **1.3ms**——掩膜 + 包围盒 + 原对象返回，见 PR 报告 §四）。
     再加 Q70 重编码 42.3ms，含逐帧读写（读盘/解码/落盘）**≈99ms/帧**
     （预算 210ms；2.5 万帧 ≈41 分钟）。对照：v2 同口径 69.2ms/帧；同一份 v3 代码
     把扩散放回整帧是 102.8ms（单帧计算，不含编码）——**裁剪是这条管线守得住预算的
@@ -1738,18 +1819,21 @@ def unblend_v3(im):
     if box is not None:                     # 没有收色带（例如全不透明帧）就只微缩
         rectified = _pull_region(
             rectified, _pad_box(box, rectified.size, UNBLEND_DIFFUSE_ROUNDS))
-    return erode_alpha(restore_hair_holes(rectified))
+    return floor_faint_alpha(erode_alpha(restore_hair_holes(rectified)))
 
 
 def unblend_frames_in_place(frames_dir: Path | str, *,
                             cancelled: Callable[[], bool] | None = None
                             ) -> tuple[int, int, bool, str]:
-    """阶段二：把目录里的 ``f_*.webp`` 逐帧反解 v3 + Q70 重编码（原地覆盖）。
+    """阶段二：把目录里的 ``f_*.webp`` 逐帧反解 v5 + Q70 重编码（原地覆盖）。
 
-    ``v3`` = ``unblend_v3``（白底反解 → 低 alpha 亮色收色 → alpha 微缩 1px，见模块
-    文档）。相对 v2 的两处差别都会体现在产物里：**半透明像素的颜色可能被改成邻居
-    颜色**（收色）、**轮廓外圈 alpha 会降 1px**（微缩）——所以档位串与反解标记一起
-    换了（``ENCODER_DESC`` / ``UNBLEND_MARK``），v2 的世代按既有迁移机制自动不采纳。
+    ``v5`` = ``unblend_v3``（白底反解 → 低 alpha 亮色收色 → alpha 微缩 1px →
+    alpha 底板清理，见模块文档）。相对 v3 的差别是**背景底板**：``a == 1`` 的像素
+    清成 0（``floor_faint_alpha``）——它就铺在整个画面的背景上（实测 ≈82%），
+    叠在任意背景上都是 ``dst × 254/255``（白底 255 → 254）。所以档位串与反解标记
+    一起换了（``ENCODER_DESC`` / ``UNBLEND_MARK``），v3 及更早的世代按既有迁移机制
+    自动不采纳；相对 v2 的两处差别（**半透明像素的颜色可能被改成邻居颜色**、
+    **轮廓外圈 alpha 会降 1px**）仍在产物里。
 
     返回 ``(已重编码帧数, 跳过帧数, 是否被打断, 错误文本)``：
 
@@ -1757,7 +1841,7 @@ def unblend_frames_in_place(frames_dir: Path | str, *,
       无损帧原样留着（能播、帧数对），只记 warning——整段供给绝不因一帧坏掉而中断；
     - **整段不可用**（Pillow / ``ImageMath.lambda_eval`` 缺失、目录读不开）⇒
       ``(0, 0, False, 错误文本)``：调用方丢弃半成品并按失败收口。绝不发布「meta 写着
-      Q70+反解 v3、里面却是无损帧」的世代——那是假凭证（与「戳与帧不符」同一类错）；
+      Q70+反解 v5、里面却是无损帧」的世代——那是假凭证（与「戳与帧不符」同一类错）；
     - ``cancelled`` / ``session_ending()`` 置位 ⇒ **停手并置 ``被打断`` 位**：此时
       目录里是「一部分 Q70 + 一部分无损」的混合体，绝不能发布，由调用方丢弃半成品
       （issue #111 的关机窗口：逐帧粒度把不可中断的窗口压到一次 unlink）；
@@ -1829,7 +1913,7 @@ def _write_meta(out_dir: Path, webm: Path, *, sha: str, fps: float, frames: int)
     """写带源身份戳的 meta（戳 = 源 sha256 全量；目录名只带前 12 位）。
 
     ``encoder`` 一档到底（``ENCODER_DESC``，采纳闸门按它比对），``unblend`` 是反解
-    标记（``UNBLEND_MARK``）：只做"这份帧集是白底反解 v3 过的"的指纹，采纳不看它——
+    标记（``UNBLEND_MARK``）：只做"这份帧集是白底反解 v5 过的"的指纹，采纳不看它——
     标记与 encoder 串同写同弃，任何一半都不足以单独构成身份凭证。
     """
     meta = {
@@ -1918,7 +2002,7 @@ def convert_clip(webm: Path | str, out_dir: Path | str, *, force: bool = False,
 
     - **阶段一**：ffmpeg 一次调用把源 webm 写成**无损**帧序列（``_ffmpeg_argv``，
       永远 ``-lossless 1``）；
-    - **阶段二**：``unblend_frames_in_place`` 逐帧白底反解 v3 + Q70 原地重编码。整段
+    - **阶段二**：``unblend_frames_in_place`` 逐帧白底反解 v5 + Q70 原地重编码。整段
       进不了阶段二（Pillow/ImageMath 缺失）⇒ 丢弃半成品、按失败收口；单帧失败只
       跳过那一帧（日志留痕，帧数不变）。
 
@@ -2030,10 +2114,10 @@ def convert_clip(webm: Path | str, out_dir: Path | str, *, force: bool = False,
         _discard(tmp_dir)
         return False, "转换期间源身份已变，丢弃本轮产物（不发布戳与帧不符的世代）"
 
-    # ---- 阶段二：逐帧白底反解 v3 + Q70 重编码（原地覆盖 tmp 里的无损帧）------
+    # ---- 阶段二：逐帧白底反解 v5 + Q70 重编码（原地覆盖 tmp 里的无损帧）------
     # 放在身份对账**之后**：对账是毫秒级、阶段二是秒级，先花便宜的；源若已漂移，
     # 这一段的 CPU 一个周期都不该花。整段失败 ⇒ 丢弃半成品（绝不发布一份
-    # "meta 写着 Q70+反解 v3、帧却是无损"的假凭证）；单帧失败只跳过那一帧。
+    # "meta 写着 Q70+反解 v5、帧却是无损"的假凭证）；单帧失败只跳过那一帧。
     # ``interrupted``（会话结束/取消落在阶段二里）同样丢弃：那一刻目录里是
     # 「一部分 Q70 + 一部分无损」的混合体，发布出去就是假 meta。
     # 注意这里**不**在阶段二成功后复查会话闸门：一趟已经完成的转换不因为会话结束

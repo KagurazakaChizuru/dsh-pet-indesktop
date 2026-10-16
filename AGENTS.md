@@ -220,6 +220,14 @@ exact breakpoint there; see `docs/agents/handoff.md`.
   (`session_watcher`, `match_shutdown`, `AppShell._on_session_end`).
 - Read `docs/ONEDIR_PACKAGING.md` when changing PyInstaller specs, bundled
   resources, or platform build scripts.
+- Read `docs/PR-REPORT-FRAMESEQ-ALPHA-FLOOR-2026-10-16.md` when changing the
+  frame-sequence encode grade or unblend chain
+  (`pet/frameseq_provision.py`: `ENCODER_DESC` / `UNBLEND_MARK` / `unblend_v3` /
+  `floor_faint_alpha`), the build-time material gate
+  (`scripts/check_frameseq_bundle.py`, whose grade constants must stay
+  byte-identical to the runtime ones), or when deciding whether frame-sequence
+  material must be re-generated. Current grade is `unblend-white-v5` (v3 is
+  history); v4 (hole restore) is suspended and is **not** a grade.
 - Read `docs/ONEDIR_PACKAGING.md` §「随包分发的第三方二进制」and
   `docs/PR-REPORT-GAME-FPS-2026-10-11.md` when touching the game-FPS chain
   (`pet/game_fps.py`, `pet/fps_monitor.py`, `pet/island_fps.py`), the bundled

@@ -137,14 +137,18 @@ def _skin_patch(size=SIZE):
     return _hair_with_gap(block=(70, 50, 96, 62), block_color=SKIN, size=size)
 
 
-def _v3_without_holes(im):
-    """无镂空工序的参考产物：反解 → 收色 → 微缩（与 ``unblend_v3`` 同口径）。"""
+def _chain_without_holes(im):
+    """无镂空工序的参考产物：反解 → 收色 → 微缩 → alpha 底板清理。
+
+    与 ``unblend_v3`` 同口径（当前档 v5：链尾多一步 ``floor_faint_alpha`` 清 ``a == 1``），
+    只少了镂空还原那一步——挂起语义要证的正是"少了它，逐位相同"。
+    """
     rectified = fp.unblend_rgba(im)
     box = fp.pull_band(rectified.split()[3]).getbbox()
     if box is not None:
         rectified = fp._pull_region(
             rectified, fp._pad_box(box, rectified.size, fp.UNBLEND_DIFFUSE_ROUNDS))
-    return fp.erode_alpha(rectified)
+    return fp.floor_faint_alpha(fp.erode_alpha(rectified))
 
 
 def _real_frame():
@@ -427,14 +431,14 @@ def test_disabled_by_default_leaves_solid_blocks_and_white_art_alone(
     """
     for source in (_hair_with_gap(), _white_fin(), _lace_band()):
         assert list(fp.unblend_v3(source).get_flattened_data()) == \
-            list(_v3_without_holes(source).get_flattened_data())
+            list(_chain_without_holes(source).get_flattened_data())
 
     real = _real_frame_rectified()
     if real is None:
         pytest.skip("真素材帧不可用（缺 imageio_ffmpeg 或素材）")
     frame, rectified = real
     assert list(fp.unblend_v3(frame).get_flattened_data()) == \
-        list(_v3_without_holes(frame).get_flattened_data())
+        list(_chain_without_holes(frame).get_flattened_data())
 
     monkeypatch.setattr(fp, "HOLE_RESTORE_ENABLED", True)
     # 自证：灰白块与**同形的白色鲸鳍**在开关打开时都会被切——后者正是挂起的原因
@@ -450,7 +454,7 @@ def test_switch_round_trip(hole_restore_off, monkeypatch):
     "关的时候不只是另一位像素都没变，而是**连对象都不新建**"是挂起态的零开销
     契约：调用方（``unblend_v3``）不做任何特判，靠的就是这一步自己直通。
     """
-    rectified = _v3_without_holes(_hair_with_gap())
+    rectified = _chain_without_holes(_hair_with_gap())
 
     assert fp.HOLE_RESTORE_ENABLED is False          # 产品默认值就是挂起
     assert fp.restore_hair_holes(rectified) is rectified

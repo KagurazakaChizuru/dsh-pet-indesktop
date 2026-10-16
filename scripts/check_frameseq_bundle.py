@@ -44,15 +44,15 @@ from pathlib import Path
 # 是副本；行号按当前源码标注）。tests/test_frameseq_bundle_gate.py 从该源码文本
 # 重新提取这几个值逐条比对——provision 改档而这里没跟，测试即红。
 # ---------------------------------------------------------------------------
-# frameseq_provision.py:265 —— 统一编码档（全部 clip：Q70 + 白底反解 v3）。
+# frameseq_provision.py:273 —— 统一编码档（全部 clip：Q70 + 白底反解 v5）。
 # encoder 串是运行时采纳条件的一部分，不符 ⇒ 那份产物不被采纳（回退 WebM）。
-ENCODER_DESC = "libwebp lossy q70 (bgra straight, unblend-white-v3)"
-# frameseq_provision.py:268 —— meta 里的反解标记（与 ENCODER_DESC 同写同弃）。
-UNBLEND_MARK = "white-v3"
-# frameseq_provision.py:235 / :236 —— 世代目录名 = <stem><GEN_INFIX><sha 前 N 位>。
+ENCODER_DESC = "libwebp lossy q70 (bgra straight, unblend-white-v5)"
+# frameseq_provision.py:276 —— meta 里的反解标记（与 ENCODER_DESC 同写同弃）。
+UNBLEND_MARK = "white-v5"
+# frameseq_provision.py:240 / :241 —— 世代目录名 = <stem><GEN_INFIX><sha 前 N 位>。
 GEN_INFIX = ".g"
 GEN_STAMP_HEX = 12
-# frameseq_provision.py:637 —— meta.source_sha256 必须是 64 位十六进制
+# frameseq_provision.py:648 —— meta.source_sha256 必须是 64 位十六进制
 # （``_complete_meta`` 的 ``_is_hex(stamp, 64)``：源身份凭证的长度口径）。
 SOURCE_SHA_HEX = 64
 

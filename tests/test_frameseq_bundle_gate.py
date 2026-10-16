@@ -45,6 +45,10 @@ PROVISION_SOURCE = ROOT / "pet" / "frameseq_provision.py"
 LEGACY_ENCODER = "libwebp lossy q70 (bgra straight, unblend-white)"
 # 旧反解标记（v2）
 LEGACY_UNBLEND = "white"
+# **刚被取代的那一代**（v3）：改档到 v5 后，磁盘上现存的产物正是这一档——构建门
+# 必须判它陈旧（否则 v3 素材会被静默打进包，用户看到的就是带 a==1 底板的桌宠）。
+SUPERSEDED_ENCODER = "libwebp lossy q70 (bgra straight, unblend-white-v3)"
+SUPERSEDED_UNBLEND = "white-v3"
 
 
 def _load_gate():
@@ -217,6 +221,19 @@ class TestGateVerdicts:
         assert result.returncode == 1
         assert "世代" in result.stderr
         assert LEGACY_UNBLEND in result.stderr
+
+    def test_superseded_v3_generation_fails(self, tmp_path):
+        """刚被取代的 v3 产物：构建期同样判陈旧（磁盘上现存素材正是这一档）。"""
+        characters = tmp_path / "characters"
+        _make_clip(characters, "shenshen", "写代码",
+                   encoder=SUPERSEDED_ENCODER, unblend=SUPERSEDED_UNBLEND)
+        result = _run(characters)
+        assert result.returncode == 1, result.stdout
+        assert "世代" in result.stderr
+        assert SUPERSEDED_ENCODER in result.stderr
+        assert GATE.ENCODER_DESC in result.stderr
+        # 同源守卫：这一档必须在 provision 的 LEGACY 清单里（改档不许漏登记）
+        assert SUPERSEDED_ENCODER in PROVISION_SOURCE.read_text(encoding="utf-8")
 
     def test_corrupt_meta_fails(self, tmp_path):
         characters = tmp_path / "characters"

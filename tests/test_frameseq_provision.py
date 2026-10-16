@@ -1560,6 +1560,42 @@ def test_library_falls_back_when_source_changed(tmp_path, monkeypatch):
         lib.shutdown()
 
 
+def test_library_rejects_v3_generation_and_adopts_v5(tmp_path, monkeypatch):
+    """改档回归：磁盘上的 **v3** 世代不再被采纳，按当前档重出的同一路径才被采纳。
+
+    ``white-v5`` 相对 v3 只多一步 alpha 底板清理（把 ``a == 1`` 的整块背景清成 0），
+    对库来说这就是一次改档：世代目录名随**源身份**（不变），档位在 meta 里 —— 所以
+    "同一路径上换成新档产物"正是升级时的真实形态（供给按当前档重转同一目录）。
+    """
+    videos, frameseq = _make_pack(tmp_path, {"idle": ["x.webm"]})
+    webm = videos / "idle" / "x.webm"
+    v3_encoder = "libwebp lossy q70 (bgra straight, unblend-white-v3)"
+    assert v3_encoder in fp.LEGACY_ENCODER_DESCS
+    gen = fp.clip_out_dir(webm, videos, frameseq)
+    _write_frames(gen, FRAME_COUNT)
+    (gen / "meta.json").write_text(json.dumps({
+        "fps": 24.0, "source": webm.name, "frames": FRAME_COUNT,
+        "encoder": v3_encoder, "unblend": "white-v3",
+        "source_sha256": fp.source_sha256(webm)}), encoding="utf-8")
+    _light_clips(monkeypatch)
+
+    lib = MovieLibrary(asset_dir=videos, prewarm_enabled=False)
+    try:
+        assert lib._frameseq_dirs == {}                   # v3 世代不采纳
+        assert isinstance(lib.movie("x"), _FakeClip)      # 回退 WebM（不冻结、不播旧档）
+        assert fp.current_generation(webm, videos, frameseq) is None
+        assert [pair[0] for pair in fp.plan_clips(videos, frameseq)] == [webm]
+
+        (gen / "meta.json").write_text(               # 同一路径按当前档重出
+            json.dumps(_meta(webm, FRAME_COUNT)), encoding="utf-8")
+        lib.rescan_frameseq()
+
+        assert lib._frameseq_dirs == {"x": gen}           # 新档世代被采纳
+        assert fp.plan_clips(videos, frameseq) == []
+    finally:
+        lib.shutdown()
+
+
 def test_library_protects_adopted_generation(tmp_path, monkeypatch):
     """库采纳的世代目录立刻登记为「在用」——清扫据此跳过（活 clip 在读）。"""
     videos, frameseq = _make_pack(tmp_path, {"idle": ["x.webm"]})
@@ -2238,23 +2274,29 @@ def _expected_tail(webm: Path, videos: Path, frameseq: Path) -> list[str]:
 def test_encoder_strings_are_frozen():
     """档位常量冻结：新串一档到底，旧档串只作历史识别（绝不写进 meta）。
 
-    ``white → white-v3`` 是一次**像素级**的改档（v2 的产物在深色角色边缘留着白边），
-    所以 v2 的串与更早两档并列进 ``LEGACY_ENCODER_DESCS``：它的产物按既有迁移机制
-    自动不采纳、后台按 v3 重供，绝不与 v3 混用。
+    ``white → white-v3 → white-v5`` 都是**像素级**的改档（v2 的产物在深色角色边缘
+    留着白边；v3 的产物铺着一整块 ``a == 1`` 的底板），所以 v2/v3 的串与更早两档
+    并列进 ``LEGACY_ENCODER_DESCS``：它们的产物按既有迁移机制自动不采纳、后台按
+    v5 重供，绝不与 v5 混用。**v4 不是档**：镂空还原（``HOLE_RESTORE_ENABLED``）
+    从未启用，档号直接落到 v5。
     """
     assert fp.LOSSY_FOLDERS == ("random", "events")
-    assert fp.ENCODER_DESC == "libwebp lossy q70 (bgra straight, unblend-white-v3)"
-    assert fp.UNBLEND_MARK == "white-v3"
+    assert fp.ENCODER_DESC == "libwebp lossy q70 (bgra straight, unblend-white-v5)"
+    assert fp.UNBLEND_MARK == "white-v5"
     assert fp.WEBP_QUALITY == 70
     assert fp.LEGACY_ENCODER_DESCS == (
         "libwebp lossless (bgra straight)",
         "libwebp lossy q80 (bgra straight)",
         "libwebp lossy q70 (bgra straight, unblend-white)",
+        "libwebp lossy q70 (bgra straight, unblend-white-v3)",
     )
     assert fp.ENCODER_DESC not in fp.LEGACY_ENCODER_DESCS
-    # 反解 v3 的三个可调常量（依据见模块注释）
+    # 反解 v3 的三个可调常量（依据见模块注释）+ v5 清掉的 alpha 值
     assert (fp.UNBLEND_EXCESS_LUMA, fp.UNBLEND_PULL_MAX_ALPHA,
             fp.UNBLEND_ERODE_PX) == (30, 128, 1)
+    assert fp.FAINT_ALPHA == 1
+    # 镂空还原仍挂起（v5 里没有它；开启要另行换档）
+    assert fp.HOLE_RESTORE_ENABLED is False
 
 
 def test_scope_follows_first_level_folder(tmp_path):
