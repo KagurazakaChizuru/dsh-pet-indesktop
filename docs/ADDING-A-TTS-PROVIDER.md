@@ -118,7 +118,8 @@ from . import edge, mimo, mytts  # noqa: F401 —— import 即注册
    ``pet/tts/edge.py``（晓涵等 10 款音色 2026-09-22 被微软下架那次事故）。
 1. **`pet/tts/*.py` 模块顶层不得 import Qt**，也不得 import 重量级/可选依赖
    （`edge_tts` 这种惰性到 `synth()` 里）——`tests/test_architecture.py::
-   test_pure_logic_modules_do_not_import_qt` 会红。
+   test_tts_providers_keep_top_level_imports_light` 会红（只扫顶层；函数体内的
+   延迟 import 不算违规）。
 2. **密钥只走 `secret_ref` → 钥匙串**；`config.json`、日志、缓存键里都不许出现。
 3. **缓存键必须只依赖 `flavor()`**：换音色/换风格要换键，换密钥/换展示文案不该换键
    （否则同一个声音会被重复合成、旧音频被当成新后端的声音播放）。

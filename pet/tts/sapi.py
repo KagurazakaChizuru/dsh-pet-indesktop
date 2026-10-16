@@ -2,11 +2,16 @@
 """Windows 本地语音（SAPI5）合成后端：**零网络、零 Key、毫秒级**。
 
 为什么加它（2026-10-12 机主反馈「TTS 合成速度太慢、延迟太高」＋现场排查）：
-- edge-tts 被微软侧 403（`WSServerHandshakeError 403`），而 PyPI 上 `edge-tts 7.2.8`
-  **已是最新版**，我们这边无从修——是上游/服务端的事；
+- edge-tts 当时被微软侧 403（`WSServerHandshakeError 403`）。**2026-10-17 更正**：
+  那是 `edge-tts` 7.2.8 自己的版本问题，不是「服务端不可修」——同机同网络 7.3.1 起
+  正常出音频，依赖下限已提到 `edge-tts>=7.3.1,<8`（实测见
+  `docs/PR-REPORT-TTS-PROVIDERS-2026-10-14.md` §五）；
 - MiMo 走公网，秒级延迟；
 - 本机实测 SAPI5（Microsoft Huihui Desktop，zh-CN）：**首句 111 ms、同进程第二句 19 ms**，
   写出的就是标准 wav，直接进既有缓存链。
+
+**它到今天仍然值得留着**（不是「edge 修好了就可以删」）：在线后端要网络、要凭据、
+冷启动秒级；SAPI5 零网络、零 Key、毫秒级，是断网 / 代理异常 / 服务端抖动时的兜底。
 
 实现要点：
 1. **晚绑定**（`CreateObject(..., dynamic=True)`）——本机 `comtypes.client.GetModule('sapi.dll')`

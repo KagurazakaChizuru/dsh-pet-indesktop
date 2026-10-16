@@ -202,6 +202,10 @@ _live_voices: frozenset[str] | None = None
 _live_fetched_at = 0.0
 _voice_lock = threading.Lock()
 
+#: 「代理尚未解析」的哨兵：``_save()`` 的参数默认值。显式传 ``None`` 的意思是
+#: **已确认直连**，不能拿它当「没传」——否则每次重试都要再问一次系统代理。
+_PROXY_UNRESOLVED = object()
+
 
 def bundled_voices() -> frozenset[str]:
     """内置（随包发布）音色集合——拿不到在线表时的校验集。"""
@@ -376,13 +380,13 @@ class EdgeTtsProvider(TtsProvider):
         raise RuntimeError("edge-tts 合成失败 → " + "；".join(errors[-4:]))
 
     @staticmethod
-    async def _save(edge_tts, text: str, voice: str, plan: dict, out_path, proxy=None) -> None:
+    async def _save(edge_tts, text: str, voice: str, plan: dict, out_path, proxy=_PROXY_UNRESOLVED) -> None:
         communicate = edge_tts.Communicate(
             text,
             voice,
             rate=plan.get("rate") or edge_rate_arg(DEFAULT_RATE),
             pitch=plan.get("pitch") or edge_pitch_arg(DEFAULT_PITCH),
-            proxy=proxy if proxy is not None else resolve_proxy(),
+            proxy=resolve_proxy() if proxy is _PROXY_UNRESOLVED else proxy,
         )
         await communicate.save(str(out_path))
 

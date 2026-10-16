@@ -18,8 +18,9 @@ voice_chime*、config.py、UI 或服务层**（配置键仍需在 config.py 登�
 写 provider 的红线：
 
 1. 模块顶层**不得** import Qt，也不得 import 重量级/可选依赖（``edge_tts`` 这类要
-   惰性导入到 ``synth`` 里）——``tests/test_architecture.py`` 对 ``pet/tts/*.py``
-   有机器化守卫，违反即红；
+   惰性导入到 ``synth`` 里）——``tests/test_architecture.py::
+   test_tts_providers_keep_top_level_imports_light`` 对 ``pet/tts/*.py`` 做机器化
+   守卫（只扫顶层，函数体内的延迟 import 不受影响），违反即红；
 2. 密码类字段用 ``kind="secret"`` + ``secret_ref``：值存系统钥匙串
    （``pet/tts_secrets``），服务层读出后注入 ``values``，**绝不进 config.json**；
 3. ``flavor()`` 只放「影响音频内容」的参数，密钥与纯展示参数不要放——它进缓存键；
