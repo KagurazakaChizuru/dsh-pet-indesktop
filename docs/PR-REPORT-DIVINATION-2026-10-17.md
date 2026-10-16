@@ -557,7 +557,7 @@ IsIconic        = False
 | ① | **只开「抽签时念出来」时，通道不按用户配置合成** | `AppShell._chime_wanted()` 只认报时 / 节日语音 / 点击朗读三者：报时一关、只剩抽签语音时，`_sync_chime_service()` 把通道释放掉。抽签取通道走 `ensure_audio_channel()` → `_ensure_chime_service()` **懒创建** `VoiceChimeService`，而它构造里的 `_cfg` 是 `normalize_chime_config(None)`（模块默认：`backend="edge"`、`fallback=True`、`volume=80`），**没有任何人 `apply_config()`**（运行中的通道由 `start()` / 保存路径刷新，懒创建这条没有）。后果：选了本机 SAPI / 关掉回退 / 音量 0 的主人点抽签时**照旧联网 edge 合成、按默认音量出声**——三个设置项一个都不生效 | ① 把**真实抽签需求**纳入通道生命周期：新增 `_divination_speak_wanted()`（读 `normalize_divination_config`，与抽签服务同一处清洗，不另立第二份真值）并接进 `_chime_wanted()` 的**四个**消费者；② 在**唯一的取通道接缝** `ensure_audio_channel()` 上补"未运行就先 `apply_config()`"（沿用 `speak_self_talk` 的既有做法）。收在一处，两个抽签调用点与节日那条自动跟上，不必逐个改调用方 |
 | ② | **停用抽签后，在途的揭签 / 预热重试闭包照旧执行** | `DivinationService.shutdown()` 只 `timer.stop()` 那个 10 分钟跨天定时器；而**揭签**（`_schedule_reveal` → `QTimer.singleShot(READING_GAP_MS=2800)`）、**通道轮询**（`WAITING_POLL_MS`）、**预热重试**（`PRECACHE_RETRY_MS`，上限 20 次）全是**投递出去的闭包**，停定时器管不着它们。于是关掉抽签之后：签文气泡照冒、经**共用的音频通道**出声、还把当天那段文本重新提交一次合成（真事故：在设置里关掉抽签，几秒后仍听得到签文） | 投递口 + 入口两层最小 guard：① `_after()` 的投递 wrapper 带**动身时的代次**，回调回来时代次对不上（`shutdown()` 把代次 +1）即整条丢弃——揭签 / 轮询 / 重试三条闭包一次覆盖；② `_disabled` 挡入口（`draw_now` / `hint_on_interaction` / `_precache_today`），`apply_config()` 是"重新可用"的判定点；③ `shutdown()` 顺手把 `_precache_pending` 复位——那条链已被代次作废，标记留着会让复活后的 `_precache_today` 一直以为"已有一条链在跑"，当天那段签文再也没人补合成。**不碰共用音频通道**：`shutdown()` 里没有任何 channel 调用（停用抽签 ≠ 替报时 / 节日 / 点击朗读关声音） |
 
-### 11.2 修改文件说明（`git diff --numstat HEAD`，HEAD = `6ce64db`）
+### 11.2 修改文件说明（`git diff --numstat 6ce64db..` 本轮 6 个文件；含 §11.9 的 docs-only 补登提交）
 
 | 文件 | 增删 | 改了什么 + 为什么 |
 |---|---|---|
@@ -565,7 +565,7 @@ IsIconic        = False
 | `pet/divination_service.py` | **+52 / −6** | 阻断②：`__init__` 加 `_disabled` / `_generation`；`apply_config()` 置 `_disabled = False`（读一次配置即"可用"）；`draw_now()` / `hint_on_interaction()` / `_precache_today()` 三处入口早退；`_after()` 的投递 wrapper 加代次比较（唯一覆盖全部延后回调的地方）；`shutdown()` 置停用 + 代次 +1 + 复位 `_precache_pending`（定时器停法不变），docstring 写清"只作废自己、不碰共用通道" |
 | `tests/test_voice_chime_service.py` | **+85 / −0** | 阻断①的两条回归：① "只剩抽签语音时通道必须存在且在跑"（与节日语音 / 点击朗读同款用例，此前抽签缺这条）；② **真 `VoiceChimeService`**（不是 `_Channel` 桩）跑真抽签点击：断言合成链路只出现 `sapi`（`edge` 一出现即红）、音量 0 真落到播放器 —— 只替掉合成线程与播放器两个边界 |
 | `tests/test_divination_service_timers.py` | **新增 148 行** | 阻断②的三条**时序**用例（真 `QTimer.singleShot` + 真事件循环）：揭签闭包 / 预热重试闭包在停用后不许执行、停用再启用是新代次（旧闭包全死、新实例照常揭签）；共用通道不许被停；另钉住 `shutdown()` 复位 `_precache_pending`。每条"什么都没发生"的断言都配一个**更晚到点**的控制定时器当凭据（避免"等得不够久"的假绿），不用固定 sleep 赌时序 |
-| `docs/PR-REPORT-DIVINATION-2026-10-17.md` | **+178 / −0** | 本节（第五轮的现场 / 修法 / 先红后绿 / 消融 / 实测 / 门禁 / 边界） |
+| `docs/PR-REPORT-DIVINATION-2026-10-17.md` | **+179 / −0**（含 §11.9 数字补登的 docs-only 提交） | 本节（第五轮的现场 / 修法 / 先红后绿 / 消融 / 实测 / 门禁 / 边界） |
 | `docs/INDEX.md` | **+1 / −1**（同一行的条目内追加一句） | 「PR 报告存档」里本报告那一行追加"第五轮"这一段（新文档入场规则不涉及新文件，但索引条目要跟内容同步） |
 
 ### 11.3 这两条为什么在"上一轮全绿"里没被抓住（口径修正，必须登记）
@@ -713,7 +713,8 @@ platform = windows  python = 3.13.7
 | 项 | 值 |
 |---|---|
 | 目标 | 作者 fork `KagurazakaChizuru/dsh-pet-indesktop` 的 `feat/divination`（PR #290 的 head 分支） |
-| push 前 head | `6ce64db`（CI run 38976101980 success） |
-| push 后 head | PUSHED_HEAD |
-| 同 head CI | CI_RUN |
-| 不做 | 不 merge、不 tag、不 release；不看 CI 循环等待（只取同 head 的一次快照） |
+| push 前 head | `6ce64db`（其 CI：run 38976101980 success，三端 job 全绿） |
+| 本轮修复提交（= 推上去的 head） | `451b4bc`（`gh pr view` 与 `git ls-remote` 双证：PR #290 的 `headRefOid` 已指向它） |
+| 同 head CI | run **38982694017**（`pull_request`，创建于 2026-10-16T23:40:47Z；快照时刻三个 job 均已建、状态 `queued`——本轮**不等循环**，只取这一次快照） |
+| 本节数字的补登 | 一个 docs-only 提交（`pet/` / `tests/` 零改动）；它自己那次 CI 不在本报告内登记（避免"报告里记自己的 run"的循环） |
+| 不做 | 不 merge、不 tag、不 release |
