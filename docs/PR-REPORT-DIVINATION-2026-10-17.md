@@ -420,6 +420,14 @@ python scripts/capture_settings_pages.py .scratch/divination-pr290/capture-light
 = `requirements.txt` 的下限）+ `D:/dsh-pet-pr267-deps-ocr`（omegaconf）、
 `PYTHONPATH="…;…"` `QT_QPA_PLATFORM=offscreen`。
 
+> **环境坑（会让结果看起来像产品 bug）**：Windows 上 `PYTHONPATH` 的分隔符是 **`;`**，
+> 用 Git Bash 惯用的 `:` 拼两条路径会**整条作废**（被当成一个带冒号的路径名）。后果是
+> `edge_tts` 根本没被导入 → `_usable_attempts()` 返回空 → `test_voice_chime_service.py`
+> 里 46 条用例集体变红（"worker 没被构造"），看起来像 provider 化改坏了合成链。共享 venv
+> 本身**没装 edge-tts**，同样表现为那 46 条红；而上游 `main` 的同一批用例在 267 候选树上
+> 是依赖 `edge-tts>=7.3.1` 的（构建门禁也认这个下限）。复跑请用
+> `PYTHONPATH="D:/dsh-pet-pr267-deps;D:/dsh-pet-pr267-deps-ocr"`。
+
 | 门 | 命令 | 结果 |
 |---|---|---|
 | 静态检查 | `python -m ruff check .` | **All checks passed!** |
