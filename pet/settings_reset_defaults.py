@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""「恢复默认设置」入口（设置页侧栏按钮 → 二次确认 → 整体重置）。
+"""重置入口（设置页侧栏按钮 → 二次确认 → 整体重置）。
 
 只做**整体重置**这一个粒度，但有两个**作用域**，各自一个动作、各自一份确认文案：
 「本宠恢复默认」只重置这只桌宠的每宠偏好（保位置/身份/active/历史）；「全局恢复默认」
-只重置所有桌宠共用的全局设置（保每宠档案/位置/active/凭据）。按分页重置在没有"用户
+只重置所有桌宠共用的全局设置（保每宠档案/位置/active/凭据）。两个动作同时出现时
+（slot 页）**按钮标签自带作用域**（「重置本宠设置…」/「重置全局设置…」）——破坏性操作
+不该让人点开确认框或读 tooltip 才知道自己点的是哪一个。按分页重置在没有"用户
 到底改坏了哪一页"的信息时帮不上小白用户（issue #220 的原声场景），也把交互压到
 按钮 + 一次确认。
 
@@ -65,10 +67,17 @@ __all__ = [
 RESET_SCOPE_SLOT = "slot"
 RESET_SCOPE_GLOBAL = "global"
 
+#: 全局页（只有一个动作、没有每宠划分）的按钮文案。
 RESET_BUTTON_TEXT = "恢复默认设置…"
+#: slot 页上的**本宠**动作：这一页有两个重置动作，主按钮必须自己说清作用域
+#: （只写「恢复默认设置…」时，两个按钮看起来一个管本宠一个管全局，用户得靠 tooltip
+#: 猜）。措辞与同一支确认框的标题（``RESET_SLOT_HEADLINE``「将重置这只桌宠的独立设置
+#: 为默认值」）同族：动作叫「重置…设置」，确认框接着说「将重置…为默认值」。
+RESET_SLOT_BUTTON_TEXT = "重置本宠设置…"
 RESET_TOOLTIP = "恢复影响所有桌宠的全局设置；保留每宠档案、位置、活跃状态与 AI 密钥。"
 #: slot 页上的第二个动作：全局 reset 在这里也要可达（否则从产品 UI 根本走不到它）。
-RESET_GLOBAL_BUTTON_TEXT = "恢复全局默认…"
+#: 与主按钮成对（``RESET_SLOT_BUTTON_TEXT``），作用域只差两个字。
+RESET_GLOBAL_BUTTON_TEXT = "重置全局设置…"
 RESET_TITLE = "恢复默认设置"
 RESET_HEADLINE = "将重置全局设置为默认值。"
 RESET_KEPT = (
@@ -113,11 +122,9 @@ def reset_scope_is_slot(host) -> bool:
     slot 文件上。
 
     判据 = 配置面是不是 ``SlotRoutedConfig``：只有它把 ``reset_to_defaults`` 闸在
-    slot 文件上，文案必须跟着**那道闸**走，而不是跟着实例名走——legacy 拓扑下的
-    ``--slot N`` 进程里 ``instance_id`` 同样是 ``slot-N``，但
-    ``route_settings_config`` 在那个拓扑下原样返回配置，重置动的是该进程那份配置的
-    **全部**键（与 R01 的拓扑接缝同源：作用域由路由决定，不由实例名决定）。按实例名
-    判会把子宠页文案挂到那个进程上，恰好重演 R08——文案承诺的作用域 ≠ 实际重置的范围。
+    slot 文件上，文案必须跟着**那道闸**走，而不是跟着实例名走——作用域由路由决定，
+    不由实例名决定。按实例名判会把子宠页文案挂到不该挂的进程上，恰好重演 R08——
+    文案承诺的作用域 ≠ 实际重置的范围。
 
     传入的宿主没有配置面（文案断言用的 ``None`` / 测试替身）一律按全局口径。
     轻量：只 import 一个零 Qt 的模块，且它本来就随设置窗口一起被导入
@@ -157,11 +164,14 @@ def reset_config_for(host, scope=None):
 
 
 def create_reset_button(host, layout) -> QPushButton:
-    """在设置窗侧栏底部创建「恢复默认设置…」入口（slot 页上另加全局动作）。
+    """在设置窗侧栏底部创建重置入口（slot 页上是**两个**带作用域的动作）。
 
     放侧栏而不是设置页行：它是命令不是偏好项（docs/SETTINGS-CHANGE-GATES.md
     的准入清单明确排除命令类），与同侧的「保存并退出」同属应用级操作。
-    提示文案按作用域分（子宠页不是"全部设置"）。
+    按钮文案与提示文案都按作用域分：**slot 页有两个动作，两个按钮各自把作用域写在
+    标签上**（「重置本宠设置…」/「重置全局设置…」，靠 tooltip 区分等于让人猜）；全局
+    页只有一个动作，它就是"这个应用的设置"，沿用原按钮文案「恢复默认设置…」，不
+    自称"本宠"（那里既没有多宠概念，"本宠"会指向一个不存在的作用域划分）。
 
     **slot 页必须同时给出全局动作**（2026-10-10 终审 A04）：设置页所有产品入口都带
     ``--instance slot-N``（含 slot0），只留一个本宠按钮时全局 reset 在 UI 上**完全不可达**
@@ -170,7 +180,7 @@ def create_reset_button(host, layout) -> QPushButton:
     按钮同风格）。
     """
     slot_page = reset_scope_is_slot(host)
-    button = QPushButton(RESET_BUTTON_TEXT, host)
+    button = QPushButton(RESET_SLOT_BUTTON_TEXT if slot_page else RESET_BUTTON_TEXT, host)
     button.setObjectName("resetDefaults")
     button.setIcon(vector_widget_icon(button, "retry", 16))
     button.setToolTip(RESET_SLOT_TOOLTIP if slot_page else RESET_TOOLTIP)
@@ -180,6 +190,7 @@ def create_reset_button(host, layout) -> QPushButton:
     host.reset_defaults_btn = button
     layout.addWidget(button)
     if slot_page:
+        # 与主按钮成对：作用域写在标签上，两个按钮一眼分得清谁管哪一面。
         glob = QPushButton(RESET_GLOBAL_BUTTON_TEXT, host)
         glob.setObjectName("resetGlobalDefaults")
         glob.setIcon(vector_widget_icon(glob, "retry", 16))

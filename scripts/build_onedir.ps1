@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 <#
 .SYNOPSIS
     dsh-pet-standalone onedir build + portable zip packaging.
@@ -24,10 +24,29 @@
       After PyInstaller + the Qt runtime copy, scripts\slim_bundle.py removes
       statically-unreferenced modules/resources from the bundle (Qt Quick/QML/
       VirtualKeyboard stack, QtPdf, Mesa opengl32sw, non zh/en Qt translations,
-      Pillow AVIF plugin). The script aborts if any kept binary still imports a
-      removal candidate, and re-checks a required-file manifest right after the
-      removal, so an incomplete runtime can never be shipped. -SkipSlim keeps
-      the bundle untouched.
+      Pillow AVIF plugin, OpenCV's FFMPEG video backend). The script aborts if
+      any kept binary still imports a removal candidate, and re-checks a
+      required-file manifest right after the removal, so an incomplete runtime
+      can never be shipped. -SkipSlim keeps the bundle untouched.
+
+    Local OCR models (2026-10, "quick screen text"):
+      resources\rapidocr_models\ (3 ONNX files, 30.3 MiB / 31.7 MB - measured
+      2026-10-13) ships with every variant, gated by
+      scripts\verify_rapidocr_models.py both before PyInstaller and again inside
+      the built app. Missing/renamed/re-cut models do not crash the app - they
+      only make "screenshot -> text" quietly wrong, so the gate has to be here.
+      The same script's --app-dir mode also proves both dynamic targets are in the
+      bundle: `pet.screen_capture.ocr` (the action layer resolves it by name
+      through importlib) and `pet.screen_capture.ocr_worker` (the recognition
+      subprocess, whose module name only ever appears inside a command-line
+      string). The static analysis can see neither, so only the explicit
+      --hidden-import lines below put them in the module graph (2026-10-13
+      review B1: without the first one the frozen app never resolves an engine
+      and the menu entry stays grey forever; without the second every capture
+      fails with "cannot start worker process"), numpy/cv2 are runtime
+      dependencies of that feature and are therefore NOT excluded anymore
+      (excluding them made OCR unusable in the frozen bundle - measured
+      2026-10-13).
 
     Examples:
       powershell -ExecutionPolicy Bypass -File scripts\build_onedir.ps1
@@ -55,6 +74,9 @@ Write-Host "[build] pet-runtime-2026-09-01.1 build_started=$buildStamp source=$r
 #   GBK/cp1252 二次解码源码或资源（乱码包根因）。
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
+
+python scripts\verify_bundle_tts.py --environment
+if ($LASTEXITCODE -ne 0) { throw '[tts] upgrade build dependencies with pip install -r requirements.txt' }
 
 $variants = @{
     'webm-chat' = @{ Name = 'dsh-pet-standalone-webm-chat'; Entry = 'packaging\pet_entry.py' }
@@ -117,14 +139,20 @@ $excludes = if ($noChat) { @('--exclude-module', 'pet.chat', '--exclude-module',
 # 中文资源，第三方 README 属误伤）；排除后包体也更小。
 $excludes += @('--exclude-module', 'OpenGL')
 # 本机 Python 环境里的 ML/数据科学全家桶（torch/transformers/datasets/
-# langchain/pandas/spacy/cv2/playwright 等）会被 PyInstaller 模块图连带收集，
+# langchain/pandas/spacy/playwright 等）会被 PyInstaller 模块图连带收集，
 # 包体从 ~350M 膨胀到 5G+。全仓 grep 确认应用代码零引用，一律排除。
 # 注意：这份排除清单是「打包机 Python 环境」的函数——换机/重装环境/新装库后
 # 必须复查（新装的大库会再被连带收集）。
+#
+# **cv2 已于 2026-10-13 移出本清单**：快速识屏的本地 OCR 用的是 rapidocr，
+# 而 rapidocr 的预处理/后处理**直接 import cv2**（图像缩放、旋转、形态学），
+# 它现在是随包必带的运行时依赖，不再是"打包机污染"。留着这一条的实测后果：
+# 冻结包的 OCR 全线不可用（.scratch/screen-capture/build_ocr-v3.log，v3 变体
+# 专门为验证这条而打包，运行即失败）。numpy 同理，见下面那条。
 foreach ($m in @('torch','transformers','datasets','langchain','langchain_core',
                  'langchain_openai','langsmith','langgraph','wandb','sentry_sdk',
                  'pandas','numba','llvmlite','pyarrow','polars','_polars_runtime_32',
-                 'spacy','cv2','playwright','narwhals','sympy','fsspec')) {
+                 'spacy','playwright','narwhals','sympy','fsspec')) {
     $excludes += @('--exclude-module', $m)
 }
 # Qt 绑定互斥（2026-09-22 实测：构建被直接中止——不修好这一条，edge-tts 根本
@@ -149,10 +177,16 @@ foreach ($m in @('matplotlib','matplotlib_inline','seaborn','IPython','ipykernel
 }
 # 构建机环境污染（2026-10-01 实测部署包 _internal：django 30MB + numpy 27MB）：
 # 产品全仓（.py/.spec/.ps1/.json/.toml/.yaml）零 import，requirements.txt 也未声明；
-# numpy 唯一消费者是本地专用素材工具 tools/greenscreen_to_frameseq.py（不入产品），
-# 被 Pillow 的可选 import numpy 静态连带收集。scripts\slim_bundle.py 的
-# FORBIDDEN_GLOBS 会对这批做构建期硬闸，这里先让 PyInstaller 根本不收集。
-foreach ($m in @('numpy','django','hypothesis')) {
+# scripts\slim_bundle.py 的 FORBIDDEN_GLOBS 会对这批做构建期硬闸，这里先让
+# PyInstaller 根本不收集。
+#
+# **numpy 已于 2026-10-13 移出本清单**：快速识屏的本地 OCR 直接 import numpy
+# （pet\screen_capture\ocr.py 把 QImage 像素缓冲转成 BGR 数组），它已是随包依赖，
+# 也已在 requirements.txt 里声明。留着这条的实测后果与 cv2 一样：冻结包里 OCR
+# 直接 ImportError（v3 变体实测），而产品界面看不出来——只在用户点「截图提取文字」
+# 时才报"依赖缺失"。slim_bundle.py 的 FORBIDDEN_GLOBS 同步移除了 numpy 条目，
+# 否则每一次构建都会红在一个完全正常的产物上。
+foreach ($m in @('django','hypothesis')) {
     $excludes += @('--exclude-module', $m)
 }
 # Chat 版必须显式收集 keyring（API Key 系统安全存储）；no-chat 不收集
@@ -217,6 +251,58 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { throw "verify_presentmon failed: $LASTEXITCODE" }
     Write-Host "[presentmon] capture backend OK" -ForegroundColor Green
 
+    # 本地 OCR 模型硬门（2026-10-13）：快速识屏的「截图提取文字」走随包的三个
+    # ONNX 模型（resources\rapidocr_models\，30.3 MiB / 31.7 MB 实测，见下面的
+    # --add-data）。
+    # 缺件或换版时产品**不崩**——要么直接报"缺少本地 OCR 模型文件…请重新安装"，
+    # 要么更坏：识别静默变差（错字/漏行），用户只会觉得"这个识屏不准"。所以这里
+    # 在 PyInstaller 起跑前按"文件名 + sha256"挡住，打完之后再在产物里验一次
+    # （--add-data 只保证"源目录存在就拷"，源目录缺失时 PyInstaller 一个错都不报）。
+    Write-Host "[rapidocr] verifying bundled local OCR models..." -ForegroundColor Cyan
+    python scripts\verify_rapidocr_models.py
+    if ($LASTEXITCODE -ne 0) { throw "verify_rapidocr_models failed: $LASTEXITCODE" }
+    Write-Host "[rapidocr] local OCR models OK" -ForegroundColor Green
+
+    # rapidocr 自己的两份配置数据（config.yaml / default_models.yaml）也必须进包：
+    # 只带模型的包在冻结环境里连引擎都构造不出来（2026-10-13 实测 v1 变体，
+    # 见 .scratch/screen-capture/build_ocr-v1.log）。为什么不用 --collect-data
+    # rapidocr：那会把它 wheel 自带的同一批 30.3 MiB 模型再收一份（v2 变体实测），
+    # 而模型我们只从 resources\ 拿一份；所以只显式补这两份 yaml。
+    $rapidocrDir = (& python -c "import os, rapidocr; print(os.path.dirname(rapidocr.__file__))").Trim()
+    if (-not $rapidocrDir) { throw "[rapidocr] cannot resolve the rapidocr package directory" }
+    foreach ($cfgName in @('config.yaml', 'default_models.yaml')) {
+        if (-not (Test-Path (Join-Path $rapidocrDir $cfgName))) {
+            throw "[rapidocr] package data missing in $rapidocrDir : $cfgName"
+        }
+    }
+    $rapidocrData = @(
+        '--add-data', 'resources\rapidocr_models;resources\rapidocr_models',
+        '--add-data', "$rapidocrDir\config.yaml;rapidocr",
+        '--add-data', "$rapidocrDir\default_models.yaml;rapidocr"
+    )
+
+    # 两个模块必须显式 hidden-import（2026-10-13 交叉审查 B1；切片 5 加了第二个）：
+    #
+    # 1. 宿主侧引擎 `pet.screen_capture.ocr`——截图动作走的是**动态** seam
+    #    （`pet\screen_capture\actions.py` 用 importlib 按字符串 `OCR_MODULE = "ocr"`
+    #    解析它），全仓没有一处静态 import 指向它。PyInstaller 的静态分析从入口
+    #    `packaging\pet_entry.py` 出发摸不到这个模块，于是**原件全在、模块不在**：
+    #    模型和 rapidocr 配置都随包，冻结包里却解析不出引擎，右键「截图 → 提取文字」
+    #    永远置灰（实测见 .scratch\screen-capture\build_ocr_hidden.out 的 NO-HIDDEN
+    #    那一轮）。这里显式把它拉进模块图，它的依赖（rapidocr / cv2 / numpy /
+    #    onnxruntime）随之被静态收集。
+    #
+    # 2. 识别子进程 `pet.screen_capture.ocr_worker`（切片 5）——它的模块名只出现在
+    #    命令行字符串里（`<exe> --ocr-worker`，见 pet\screen_capture\ocr.py 的
+    #    worker_command），静态分析同样摸不到。缺它不会崩，只是每次识屏都报"起不了
+    #    工作进程"。入口里的 `from pet.__main__ import _run_ocr_worker` 现在**恰好**
+    #    能把它捎进图（静态分析会进 if 分支），但那条路由随时可能被挪走/改成惰性
+    #    import——本参数是不依赖这种巧合的那一份保证，产物侧的门会把它验回来。
+    $rapidocrHidden = @(
+        '--hidden-import', 'pet.screen_capture.ocr',
+        '--hidden-import', 'pet.screen_capture.ocr_worker'
+    )
+
     # DLL 冲突隔离（issue: Qt6Core "procedure not found" / 找不到指定的程序）：
     # conda 的 Library\bin 与 MiKTeX 的 bin\x64 各自携带一套 Qt6/ICU DLL（版本与
     # PySide6 6.11 不匹配）。PyInstaller 的 bindepend 会按 PATH 解析 Qt6Core.dll 的
@@ -243,6 +329,11 @@ if (-not $SkipBuild) {
         "VARIANT = '$Variant'`n",
         [System.Text.UTF8Encoding]::new($false)
     )
+    # 运行期图标（窗口/标题栏）也要进包：上面的 --icon 只把图标写进 exe 的**文件图标**
+    # 资源，窗口图标由 pet/application_icon.py 从 <_MEIPASS>\assets\icon.ico 读。
+    # 漏掉这一行不会有任何报错（只有源文件不存在时 PyInstaller 才会挡下），因此由
+    # tests/test_application_icon.py 的打包契约测试守着。见 docs\ONEDIR_PACKAGING.md
+    # 「运行期应用图标」。
     python -m PyInstaller --noconfirm --clean --onedir --windowed --noupx `
         --name $name `
         --distpath dist-onedir `
@@ -263,8 +354,11 @@ if (-not $SkipBuild) {
         @chatData `
         --add-data "assets\sounds;assets\sounds" `
         --add-data "assets\chat;assets\chat" `
+        --add-data "assets\icon.ico;assets" `
         --add-data "integrations;integrations" `
         --add-data "resources\presentmon;resources\presentmon" `
+        @rapidocrData `
+        @rapidocrHidden `
         @excludes `
         $entry
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed: $LASTEXITCODE" }
@@ -494,7 +588,25 @@ python scripts\verify_presentmon.py --path $backendInBundle
 if ($LASTEXITCODE -ne 0) { throw "[presentmon] bundled capture backend missing or corrupt" }
 Write-Host "[presentmon] bundle carries the capture backend + its license" -ForegroundColor Green
 
+# ---------- 本地 OCR 随包校验（快速识屏，2026-10-13） ----------
+# 同 presentmon 的理由：上面那条门只证明**源目录**里的东西是校验过的那一份；
+# 产物里缺件、拷坏、被瘦身误删都在这里兜住。判据来自 pet\screen_capture\ocr.py
+# 的单一真相源（脚本自己读，本文件不抄第二份文件名/摘要）。
+#
+# 这里判三件，缺一「截图提取文字」都是不可用（--app-dir 一次判完，不再分两次调用）：
+#   1. 引擎模块 `pet.screen_capture.ocr` 在不在产物的模块图里——它是动态 seam 的目标，
+#      静态分析摸不到，**只有**上面那条 --hidden-import 能让它进包（2026-10-13 B1）；
+#   2. 三个 ONNX 模型在不在、是不是校验过的那一份（文件名 + sha256）；
+#   3. rapidocr 的两份配置数据（config.yaml / default_models.yaml）在不在——它们不是
+#      "模型"，但缺了 OCR 一样全线不可用（引擎构造阶段就要读 config.yaml）。
+Write-Host "[rapidocr] verifying the built app carries the engine module + models..." -ForegroundColor Cyan
+python scripts\verify_rapidocr_models.py --app-dir $appDir
+if ($LASTEXITCODE -ne 0) { throw "[rapidocr] bundle cannot run local OCR (module missing or models corrupt)" }
+Write-Host "[rapidocr] bundle carries the engine module + models + rapidocr config" -ForegroundColor Green
+
 # ---------- exe smoke test（启动成功才继续打包） ----------
+python scripts\verify_bundle_tts.py --app-dir $appDir
+if ($LASTEXITCODE -ne 0) { throw '[tts] bundled dependency version or modules are invalid' }
 # 注意：PyInstaller --windowed 在 import 失败时会弹错误对话框且进程存活，
 # 只看"进程 8 秒没退出"是假阳性。这里先做确定性加载链验证（从 bundle 布局
 # 真实加载 Shiboken/QtCore/QtGui/QtWidgets），再启动 exe 检查主窗口出现。

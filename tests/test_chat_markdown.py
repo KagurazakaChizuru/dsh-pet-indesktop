@@ -68,3 +68,17 @@ def test_slow_markdown_render_is_throttled_while_streaming_and_flushed_on_finish
     bubble.set_state("normal")  # 结束流式：立刻渲染最终内容
     assert not bubble._render_timer.isActive()
     assert "最终版" in bubble.body.text() and "font-weight:700" in bubble.body.text()
+
+
+def test_legacy_bubble_renders_markdown_for_assistant():
+    """经典聊天窗口（chat_ui_style=classic）的助手气泡同样走 Markdown；
+    用户气泡保持纯文本（模型输出才可能含 markdown 标记）。"""
+    _app()
+    from pet.chat.legacy_widgets import MessageBubble
+
+    assistant = MessageBubble("assistant", "重点**加粗**收尾")
+    assert 'font-weight:700' in assistant.body.text() and "加粗" in assistant.body.text()  # Qt 写 span 而非 <strong>
+    user = MessageBubble("user", "原样**不渲染**")
+    assert "<strong>" not in user.body.text()
+    assistant.deleteLater()
+    user.deleteLater()

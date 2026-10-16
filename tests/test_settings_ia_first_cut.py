@@ -256,6 +256,8 @@ def test_v2_new_advanced_groups_are_advanced_and_collapsed(tmp_path, monkeypatch
             "harness_launch_target": "启动项（高级）",
             "music_player_netease": music_title,
             "music_player_qqmusic": music_title,
+            "music_player_kugou": music_title,
+            "music_player_soda": music_title,
             "music_player_detect": music_title,
             "network_probe_interval": "网络延迟检测（高级）",
         }
@@ -317,15 +319,47 @@ def test_v2_pet_domain_group_order_is_per_tab_with_advanced_last(tmp_path, monke
 
 
 def test_v2_general_domain_keeps_only_autostart_on_the_first_screen(tmp_path, monkeypatch):
-    """常规域首屏：应用启动只剩「开机自启」；harness 两行进「启动项（高级）」默认收。"""
+    """常规域首屏：应用启动只剩「开机自启」；长文案的高级项默认收起。
+
+    两组高级项垫底：「直播捕获（高级）」（只在 Windows 构造，其它平台整组不存在，
+    按实际构造结果驱动断言）与「启动项（高级）」。「光标隐藏时自动穿透」已回
+    「窗口与系统」主组——它是普通窗口旗标偏好，不该被折叠埋着。
+    """
     dialog, _cfg = _dialog(tmp_path, monkeypatch)
     try:
         _page_widget, sections = _page_sections(dialog, "常规")
         titles = [_section_title(section) for section in sections]
-        assert titles == ["应用启动", "窗口与系统", "启动项（高级）"]
+        expected = ["应用启动", "窗口与系统"]
+        if any(title == "直播捕获（高级）" for title in titles):
+            expected.append("直播捕获（高级）")
+        expected.append("启动项（高级）")
+        assert titles == expected
         assert [row.objectName() for row in sections[0].rows] == ["settingRow_autostart"]
-        advanced = sections[2]
-        assert advanced.advanced is True and advanced.card.isHidden()
+        # 高级组垫底且默认收起；「窗口与系统」仍在主视线里（主组，不是折叠）。
+        assert sections[1].advanced is False
+        for section in sections[2:]:
+            assert section.advanced is True and section.card.isHidden(), (
+                f"「{_section_title(section)}」必须是一层高级折叠且默认收起")
+        window_group = sections[1]
+        window_rows = [row.objectName() for row in window_group.rows]
+        assert "settingRow_on_top" in window_rows, "置顶仍在主组"
+        assert window_rows[-1] == "settingRow_cross_screen", (
+            "「允许桌宠跨屏」是全局窗口偏好、三端都有行，排在窗口旗标类之后")
+        if any(row == "settingRow_cursor_hidden_passthrough" for row in window_rows):
+            assert window_rows[-2] == "settingRow_cursor_hidden_passthrough", (
+                "光标穿透要在「窗口与系统」里（Windows 专属行，非 Windows 无此行）")
+
+        capture = next((s for s in sections if _section_title(s) == "直播捕获（高级）"), None)
+        if capture is not None:
+            assert [row.objectName() for row in capture.rows] == ["settingRow_stream_capture"]
+            # 行文案一字未改：重启级与平台限制都还在行内（分层只换位置）。
+            row = capture.rows[0]
+            assert "重启后生效" in row.hint_label.text()
+            assert "Windows 10（1903 及以上）" in row.hint_label.text()
+            # 作用域是行内独立标注（不再粘在说明末尾），仍在行内可见。
+            assert "影响所有桌宠" in row.scope_note.text()
+            assert capture.description_label.text().strip(), "收起时也要看得见一句摘要"
+        advanced = sections[-1]
         assert [row.objectName() for row in advanced.rows] == [
             "settingRow_harness_autostart", "settingRow_harness_launch_target"]
     finally:

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__, updater
+from .settings_about import build_author_section
 
 
 class UpdatePage(QWidget):
@@ -108,6 +109,7 @@ class UpdatePage(QWidget):
         notes_layout.addWidget(notes_title)
         notes_layout.addWidget(self.notes_label)
         layout.addWidget(notes_card)
+        layout.addWidget(build_author_section(self))
         layout.addStretch(1)
 
     def check_for_updates(self) -> None:

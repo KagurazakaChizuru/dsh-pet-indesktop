@@ -31,6 +31,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ROOT"
+"$PYTHON_BIN" scripts/verify_bundle_tts.py --environment
 if [[ -d "$BUILD_DEPS/PyInstaller" ]]; then
     export PYTHONPATH="$BUILD_DEPS${PYTHONPATH:+:$PYTHONPATH}"
     export PYINSTALLER_CONFIG_DIR="$ROOT/build/.pyinstaller/config"
@@ -69,6 +70,45 @@ if [[ "$needs_frameseq" == "1" ]]; then
     fi
 fi
 
+# 本地 OCR 模型硬门（2026-10-13，与 Windows 的 build_onedir.ps1 同口径）：
+# 「截图提取文字」走随包的三个 ONNX 模型（resources/rapidocr_models/，30.3 MiB），
+# 缺件或换版时产品不崩——只会让识别静默变差或直接报"请重新安装"。这里在
+# PyInstaller 起跑前按"文件名 + sha256"挡住（判据来自 pet/screen_capture/ocr.py，
+# 三端共用同一个脚本）。
+if ! "$PYTHON_BIN" scripts/verify_rapidocr_models.py; then
+    echo "[rapidocr] 本地 OCR 模型不完整，拒绝出包" >&2
+    exit 1
+fi
+
+# rapidocr 自己的两份配置数据（config.yaml / default_models.yaml）也必须进包：
+# 只带模型的包在冻结环境里连引擎都构造不出来（2026-10-13 实测，v1 变体）。为什么
+# 不用 --collect-data rapidocr：那会把它 wheel 自带的同一批 30.3 MiB 模型再收一份
+# （v2 变体实测），而模型我们只从 resources/ 拿一份；所以只显式补这两份 yaml。
+RAPIDOCR_DIR="$("$PYTHON_BIN" -c "import os, rapidocr; print(os.path.dirname(rapidocr.__file__))")"
+if [[ -z "$RAPIDOCR_DIR" ]]; then
+    echo "[rapidocr] 解析不出 rapidocr 包目录" >&2
+    exit 1
+fi
+for cfg in config.yaml default_models.yaml; do
+    if [[ ! -f "$RAPIDOCR_DIR/$cfg" ]]; then
+        echo "[rapidocr] 包数据缺失：$RAPIDOCR_DIR/$cfg" >&2
+        exit 1
+    fi
+done
+
+# 两个模块都要显式 --hidden-import（2026-10-13 交叉审查 B1；切片 5 加了第二个）：
+#
+# 1. 宿主侧引擎 pet.screen_capture.ocr —— 截图动作走的是**动态** seam：
+#    pet/screen_capture/actions.py 用 importlib 按字符串（OCR_MODULE = "ocr"）解析它，
+#    全仓没有一处静态 import 指向这个模块。PyInstaller 从入口出发的静态分析摸不到它，
+#    于是模型和配置都在包里、引擎模块却不在：冻结包里解析不出引擎，右键「截图 →
+#    提取文字」永远置灰。它的依赖（rapidocr / cv2 / numpy / onnxruntime）随这条
+#    hidden-import 被静态收集。
+# 2. 识别子进程 pet.screen_capture.ocr_worker（切片 5）—— 模块名只出现在命令行
+#    字符串里（<exe> --ocr-worker），静态分析同样摸不到。缺它不会崩，只是每次识屏
+#    报"起不了工作进程"。
+RAPIDOCR_HIDDEN=(--hidden-import pet.screen_capture.ocr --hidden-import pet.screen_capture.ocr_worker)
+
 for variant in "${variant_list[@]}"; do
     case "$variant" in
         webm-chat)  entry="packaging/pet_entry.py";            assets="assets/characters";       excludes="" ;;
@@ -80,6 +120,10 @@ for variant in "${variant_list[@]}"; do
     name="dsh-pet-standalone-$variant"
     printf "VARIANT = '%s'\n" "$variant" > packaging/build_variant.py
 
+    # 运行期图标（窗口/标题栏）也要进包：上面的 --icon 只把图标写进 .app 的**文件
+    # 图标**资源，窗口图标由 pet/application_icon.py 从 <_MEIPASS>/assets/icon.ico 读。
+    # 漏掉这一行不会有任何报错（只有源文件不存在时 PyInstaller 才会挡下），因此由
+    # tests/test_application_icon.py 的打包契约测试守着。
     args=(
         --noconfirm
         --clean
@@ -98,10 +142,15 @@ for variant in "${variant_list[@]}"; do
         --add-data "$assets:$assets"
         --add-data "assets/big_blue_fat_fish:assets/big_blue_fat_fish"
         --add-data "assets/chat:assets/chat"
+        --add-data "assets/icon.ico:assets"
         --add-data "assets/sounds:assets/sounds"
         --add-data "pet/menu_templates:pet/menu_templates"
         --add-data "pet/persona_presets:pet/persona_presets"
         --add-data "integrations:integrations"
+        --add-data "resources/rapidocr_models:resources/rapidocr_models"
+        --add-data "$RAPIDOCR_DIR/config.yaml:rapidocr"
+        --add-data "$RAPIDOCR_DIR/default_models.yaml:rapidocr"
+        "${RAPIDOCR_HIDDEN[@]}"
     )
     # 设置页样式表：已在 modern_settings_dialog.py 内联（_settings_stylesheet）
     if [[ "$name" == *-chat ]]; then
@@ -118,6 +167,12 @@ for variant in "${variant_list[@]}"; do
 
     echo "==> 构建 $name.app"
     "$PYTHON_BIN" -m PyInstaller "${args[@]}" "$entry"
+    # 本地 OCR 随包校验（与 Windows 的 build_onedir.ps1 同口径）：上面那条门只证明
+    # 源目录里的模型是对的，产物里还缺两件同样致命的东西——**引擎模块**
+    # （pet.screen_capture.ocr，动态 seam 的目标，只有 --hidden-import 能把它拉进包）
+    # 与 rapidocr 的两份配置数据。三者缺一「截图提取文字」都不可用，所以一并判。
+    "$PYTHON_BIN" scripts/verify_rapidocr_models.py --app-dir "$DIST_DIR/$name.app"
+    "$PYTHON_BIN" scripts/verify_bundle_tts.py --app-dir "$DIST_DIR/$name.app"
     # 中文编码自检（issue #26）：字节码/资源/文件名被编码污染即中止。
     "$PYTHON_BIN" scripts/check_bundle_encoding.py --dir "$DIST_DIR/$name.app"
     # Bridge 零依赖防线（2026-09 事故：缺 @deepseek-ai/dsh-llm 导致用户整个

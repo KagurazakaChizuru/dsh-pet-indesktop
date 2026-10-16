@@ -440,9 +440,16 @@ _MUSIC_PLAYER_WARM_DELAY_MS = 2500
 def _warm_music_player_paths() -> None:
     """后台线程暖音乐播放器路径缓存（幂等，可重复调用）。
 
-    右键菜单「打开网易云/QQ音乐并播放」的 builder 在 GUI 线程只读缓存（冷缓存
+    右键菜单「打开某播放器给主人放歌」的 builder 在 GUI 线程只读缓存（冷缓存
     时乐观启用）：真正的目录浅扫在这里的 daemon 线程里做，否则冷缓存下首次开
     菜单要在 MainThread 上扫 6s+。
+
+    **启动只预热下面这两键**（``netease`` / ``qqmusic``）：注册表后补的酷狗、
+    汽水不在启动预热点里，它们的缓存由首次构建音乐子菜单时的幂等预热（或设置页
+    「自动检测」）补齐——菜单条目不因此置灰（冷缓存一样乐观启用），只是那一次
+    扫描发生在打开菜单之后。四条串行浅扫在本机要二十多秒，压在启动路径上会拖慢
+    首屏。这条口径由 ``tests/test_music_player_cache.py`` 的
+    ``test_ui_ready_prewarm_schedules_music_player_cache_warm`` 钉住。
     """
     from . import music_players
 
@@ -580,6 +587,9 @@ class PetInstance:
         win.on_check_update = self._slot_wrap(self.shell.check_update)
         win.on_look_synced = self._slot_wrap(self.sync_look_to_chat) if self.enable_chat else None
         win.on_look_screen = win.look_at_screen if self.enable_chat and hasattr(win, "look_at_screen") else None
+        # 截图（快速识屏 P0）：状态与短结果上灵动岛——岛归 AppShell 所有，窗口侧
+        # 没有别的路径，这里显式注入取岛回调（岛会被重建，所以传可调用者而非实例）。
+        win.screen_capture_island = lambda: getattr(self.shell, "island", None)
         win.on_open_modern_settings = self._slot_wrap(self.open_modern_settings)
         # 桌宠隐藏时的气泡改道面（DSH 联动等非交互反馈气泡 → 灵动岛，见
         # window_alerts.redirect_hidden_bubble）；岛对话不可用时注入方返回 False。
@@ -4618,6 +4628,12 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
     app = QApplication(argv)
     app.setApplicationName(APP_DIR_NAME)
     app.setQuitOnLastWindowClosed(False)
+    # 图片解码上限（像素级别的一处设定）：Qt 默认 256 MB/张（本机 Qt 6.11.2 实测），
+    # 用户给的超大图会**直接读不出来**而不是慢一点——聊天附件预览、设置页头像、
+    # 趣味图片弹窗都吃这条上限。踩点放在这里而不是各调用点：它是静态设置，
+    # 一处设定覆盖全进程（与本文件里其它 Qt 全局设定同一位置纪律）。
+    from .qt_image_limits import apply_image_allocation_limit
+    apply_image_allocation_limit()
 
     # 确定配置根目录
     config_dir = _default_base() / APP_DIR_NAME

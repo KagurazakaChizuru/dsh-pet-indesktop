@@ -514,7 +514,7 @@ class PetSpeechBubble(QFrame):
         self._subtitle_label.setStyleSheet(
             "QLabel#pet-speech-subtitle { background: transparent; border: none; padding: 0; "
             f"color: {self._preset['foreground']}; "
-            f"font-size: {scale_bubble_font_px(BUBBLE_SUBTITLE_FONT_PX, self._text_scale)}px; }}"
+            f"font-size: {scale_bubble_font_px(BUBBLE_TITLE_FONT_PX if self._title_first else BUBBLE_SUBTITLE_FONT_PX, self._text_scale)}px; }}"
         )
         self._subtitle_label.setMaximumWidth(self._subtitle_width_floor())
         self._page_indicator.setStyleSheet(
@@ -522,6 +522,11 @@ class PetSpeechBubble(QFrame):
             f"color: {self._preset['foreground']}; "
             f"font-size: {scale_bubble_font_px(BUBBLE_SUBTITLE_FONT_PX, self._text_scale)}px; }}"
         )
+        self._surface_geometry_key = None
+        self._breath_geometry_key = None
+        self._placed_follow_key = None
+        if self.isVisible() and not self._anchor_rect.isNull():
+            self.reflow(self._anchor_rect, pet_scale=self._pet_scale)
         self.update()
 
     def _subtitle_width_floor(self) -> int:
@@ -612,7 +617,7 @@ class PetSpeechBubble(QFrame):
             self.label.ensurePolished()
             self.label.setText(elide_bubble_text(
                 QFontMetrics(self.label.font()),
-                self._raw_text,
+                self._pages[self._page_index] if self._pages else self._raw_text,
                 label_width,
                 bubble_max_lines(self._raw_text, keep_breaks=self._multi_line),
                 keep_breaks=self._multi_line,
@@ -949,7 +954,6 @@ class PetSpeechBubble(QFrame):
         # polish 时写进 label.font()，若此时量到的还是旧字体，换行与绘制就
         # 用了两套度量（行尾字会被 label 右边界切掉）。这里显式 polish 兜底。
         self.label.ensurePolished()
-        metrics = QFontMetrics(self.label.font())
         if interactive:
             # 交互气泡：不自动消失 + 显示按钮 + 临时关闭鼠标穿透
             self._setup_buttons(buttons)
@@ -957,11 +961,33 @@ class PetSpeechBubble(QFrame):
             self._interactive_active = True
         else:
             self._teardown_interactive()
+        duration_ms = self._layout_text_content(anchor_rect, sticky=sticky, duration_ms=duration_ms)
+        self.adjustSize()
+        self._place(anchor_rect)
+        self.show()
+        if not _MAC:
+            self.raise_()
+        if sticky or interactive:
+            # 审批等需主动关闭的气泡：不启动自动隐藏，由上层 dismiss() 收尾
+            self._hide_timer.stop()
+        else:
+            self._hide_timer.start(max(500, int(duration_ms)))
+
+    def _layout_text_content(self, anchor_rect: QRect, *, sticky: bool, duration_ms: int = 3200,
+                             preserve_paging: bool = False) -> int:
+        """Lay out existing text without replacing buttons or its dismissal timer."""
+        text = self._raw_text
+        subtitle = self._subtitle_label.text().strip()
+        pet_scale = self._pet_scale
+        interactive = self._interactive_active
+        self.label.ensurePolished()
+        metrics = QFontMetrics(self.label.font())
         # 本次实际使用的文本列宽（呼吸泡为 None：内宽由画布推出），
         # 供副标题宽度上限取「不与正文列宽打架」的口径。
         column: int | None = None
         if self._preset.get("shape") == "breath_bubble" and not interactive:
             self._configure_breath_content(anchor_rect, pet_scale)
+            self._page_indicator.hide()
         else:
             # 自适应列宽：短文案维持 248px，长文案逐步放宽到 360px 上限
             # （bubble_column_for_text），整体再乘「气泡文字大小」系数——审批/
@@ -999,16 +1025,19 @@ class PetSpeechBubble(QFrame):
                 bubble_max_lines(text, keep_breaks=self._multi_line),
                 keep_breaks=self._multi_line,
             )
-            display_text = pages[0] if pages else ""
+            page_index = min(self._page_index, len(pages) - 1) if preserve_paging and pages else 0
+            display_text = pages[page_index] if pages else ""
             if len(pages) > 1 and not sticky and not interactive:
                 dwells = page_dwells_ms(pages)
                 total_ms = max(duration_ms, sum(dwells))
+                remaining = self._page_timer.remainingTime() if preserve_paging else -1
+                self._stop_page_fade()
                 self._pages = pages
-                self._page_index = 0
+                self._page_index = page_index
                 self._page_dwells = dwells
-                self._page_indicator.setText(page_dots(0, len(pages)))
+                self._page_indicator.setText(page_dots(page_index, len(pages)))
                 self._page_indicator.show()
-                self._page_timer.start(dwells[0])
+                self._page_timer.start(max(1, remaining) if remaining >= 0 else dwells[page_index])
                 duration_ms = total_ms
             else:
                 self._reset_paging()
@@ -1043,16 +1072,7 @@ class PetSpeechBubble(QFrame):
         # 一行、末行被自己的 label 裁掉。呼吸泡路径已在 _configure_breath_content
         # 内同步过（那里的 label 宽度是画布推出来的，column=None），此处幂等。
         self._sync_subtitle_max_width(self.label.width(), column)
-        self.adjustSize()
-        self._place(anchor_rect)
-        self.show()
-        if not _MAC:
-            self.raise_()
-        if sticky or interactive:
-            # 审批等需主动关闭的气泡：不启动自动隐藏，由上层 dismiss() 收尾
-            self._hide_timer.stop()
-        else:
-            self._hide_timer.start(max(500, int(duration_ms)))
+        return duration_ms
 
     def _setup_buttons(self, buttons: list[tuple[str, object]]) -> None:
         """清空旧按钮并按元素重建按钮行（仅交互气泡用）。
@@ -1211,7 +1231,12 @@ class PetSpeechBubble(QFrame):
         def _swap_and_fade_in() -> None:
             if self._page_fade is not fade_out:
                 return  # 已被 _stop_page_fade 打断
-            self.label.setText(self._pages[index])
+            text = self._pages[index]
+            if self._preset.get("shape") == "breath_bubble":
+                text = elide_bubble_text(QFontMetrics(self.label.font()), text, self.label.width(),
+                                        bubble_max_lines(text, keep_breaks=self._multi_line),
+                                        keep_breaks=self._multi_line)
+            self.label.setText(text)
             self._page_indicator.setText(page_dots(index, len(self._pages)))
             fade_in = QPropertyAnimation(effect, b"opacity", self)
             fade_in.setDuration(PAGE_FADE_IN_MS)
@@ -1266,6 +1291,18 @@ class PetSpeechBubble(QFrame):
         self._reset_paging()
         self._subtitle_label.setText("")
         self._subtitle_label.hide()
+        self._layout_image_content(anchor_rect)
+        self.adjustSize()
+        self._place(anchor_rect)
+        self.show()
+        if not _MAC:
+            self.raise_()
+        self._hide_timer.start(max(500, int(duration_ms)))
+        return True
+
+    def _layout_image_content(self, anchor_rect: QRect) -> None:
+        pixmap = self._source_pixmap
+        pet_scale = self._pet_scale
         if self._preset.get("shape") == "breath_bubble":
             self._configure_breath_content(anchor_rect, pet_scale)
         else:
@@ -1281,21 +1318,19 @@ class PetSpeechBubble(QFrame):
             # Keep QLabel only as a layout placeholder. Parent painting uses
             # the original source, avoiding QLabel's DPR=1 pixmap normalization.
             self.label.setPixmap(QPixmap())
-        self.adjustSize()
-        self._place(anchor_rect)
-        self.show()
-        if not _MAC:
-            self.raise_()
-        self._hide_timer.start(max(500, int(duration_ms)))
-        return True
 
     def reflow(self, anchor_rect: QRect, *, pet_scale: float | None = None) -> None:
         """Resize current content after a pet scale change, then reposition it."""
         if pet_scale is not None:
             self._pet_scale = float(pet_scale)
-        if self._preset.get("shape") == "breath_bubble":
-            self._configure_breath_content(anchor_rect, self._pet_scale)
-            self.adjustSize()
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        if self._content_kind == "image":
+            self._layout_image_content(anchor_rect)
+        elif self._raw_text:
+            self._layout_text_content(anchor_rect, sticky=not self._hide_timer.isActive(),
+                                      preserve_paging=True)
+        self.adjustSize()
         self._place(anchor_rect, animate=False)
 
     def reposition(self, anchor_rect: QRect) -> None:

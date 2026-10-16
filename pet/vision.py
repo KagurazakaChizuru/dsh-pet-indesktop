@@ -307,9 +307,21 @@ def _post_vision_request(
     memory_context: str = "",
     consume_budget: Any = None,
     pet_name: str = "",
+    user_text: str | None = None,
+    messages_override: list | None = None,
 ) -> str:
     """把 JPEG 二进制数据 + 前台窗口信息发给视觉模型，返回人设口吻的回应（非流式）。
     核心内部函数：主动识屏与现有看看屏幕统一复用此函数。
+
+    ``user_text`` 给定时**整段取代**默认那套用户文本（含前台窗口元数据与
+    "截图里的桌宠就是你自己"的身份提示）：默认文本是给**整屏**看的陪伴式反应，
+    而「截图问答」发的是主人框选出的一小块，问的是"这里是什么"——两句话术不同题。
+    缺省 None 时逐字保持原行为。
+
+    ``messages_override`` 给定时**整条 messages 由调用方提供**（截图问答的多轮
+    对话浮窗用：首条用户消息带图、后续轮次带历史）。此时 ``jpeg_bytes`` 可为空
+    字节串、``app_info``/``user_text``/``memory_context``/``pet_name`` 不再参与
+    组包；端点解析、Key 纪律、重试、解析全部共用同一条路径。
 
     consume_budget: 可选，每次真实 HTTP 请求前被调用（主动识屏用于按真实请求
     次数消耗每日预算，避免一次触发多次重试却只记一次）。返回 False 表示预算
@@ -322,34 +334,39 @@ def _post_vision_request(
     # 否则残留的 GLM 地址会配上 ds 的模型名发出（modelCode 不存在）
     base_url = p.base_url if p.vision_same_as_chat else (p.vision_base_url or p.base_url)
     endpoint = normalize_chat_endpoint(base_url, p.chat_path)
-    b64 = base64.b64encode(jpeg_bytes).decode('ascii')
-    note = app_info or '（拿不到前台窗口信息）'
-    user_text = (
-        f'（参考元数据：主人当前前台应用为 {note}）\n'
-        '这是主人当前的屏幕截图。用你的人设口吻回应一两句就好'
-        '（关心、吐槽、好奇都可以）。请主要根据画面里正在发生的事情来回应；'
-        '窗口标题只是参考信息，不要逐字念出，更不要只围绕标题发挥；'
-        '也不要把画面内容逐条罗列出来。'
-    )
-    if memory_context:
-        user_text += f"\n（陪伴记忆：{memory_context}）"
-    # 自我识别：截图里通常也拍到了桌宠本体，不提示的话模型常把自己说成
-    # 「桌面上的陌生动画角色」。点名角色显示名效果更好。
-    name_part = f'「{pet_name}」' if pet_name else ''
-    user_text += (
-        '\n（身份提示：画面边缘或角落里如果有一个动漫风格的桌面宠物形象，'
-        f'那就是你自己{name_part}——你在主人桌面上的化身。请以第一人称自然看待它'
-        '（比如"我在你桌面上呢"），不要说成陌生软件或与己无关的角色。）'
-    )
-    payload = {
-        'model': resolve_vision_model(p),
-        'messages': [
+    if messages_override is None:
+        b64 = base64.b64encode(jpeg_bytes).decode('ascii')
+        note = app_info or '（拿不到前台窗口信息）'
+        if user_text is None:
+            user_text = (
+                f'（参考元数据：主人当前前台应用为 {note}）\n'
+                '这是主人当前的屏幕截图。用你的人设口吻回应一两句就好'
+                '（关心、吐槽、好奇都可以）。请主要根据画面里正在发生的事情来回应；'
+                '窗口标题只是参考信息，不要逐字念出，更不要只围绕标题发挥；'
+                '也不要把画面内容逐条罗列出来。'
+            )
+            if memory_context:
+                user_text += f"\n（陪伴记忆：{memory_context}）"
+            # 自我识别：截图里通常也拍到了桌宠本体，不提示的话模型常把自己说成
+            # 「桌面上的陌生动画角色」。点名角色显示名效果更好。
+            name_part = f'「{pet_name}」' if pet_name else ''
+            user_text += (
+                '\n（身份提示：画面边缘或角落里如果有一个动漫风格的桌面宠物形象，'
+                f'那就是你自己{name_part}——你在主人桌面上的化身。请以第一人称自然看待它'
+                '（比如"我在你桌面上呢"），不要说成陌生软件或与己无关的角色。）'
+            )
+        messages = [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': [
                 {'type': 'text', 'text': user_text},
                 {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}},
             ]},
-        ],
+        ]
+    else:
+        messages = messages_override
+    payload = {
+        'model': resolve_vision_model(p),
+        'messages': messages,
         'stream': False,
         'temperature': p.temperature,
         # ds 视觉模型是推理模型：reasoning 会先吃掉一大段 token，
@@ -440,10 +457,23 @@ def _post_vision_request(
     return text
 
 
-def ask_about_screen(image, app_info: str, system_prompt: str, p, pet_name: str = "") -> str:
+def ask_about_screen(image, app_info: str, system_prompt: str, p, pet_name: str = "",
+                     user_text: str | None = None) -> str:
     """把截图（JPEG bytes）+ 前台窗口信息发给视觉模型，返回人设口吻的回应（非流式，一次拿整段）。
-    现为 _post_vision_request 的薄封装；历史兼容：传入 Path/str 时会读取文件 bytes。"""
+    现为 _post_vision_request 的薄封装；历史兼容：传入 Path/str 时会读取文件 bytes。
+    ``user_text`` 见 ``_post_vision_request``：给定即整段取代默认用户文本。"""
     jpeg_bytes = (
         image if isinstance(image, (bytes, bytearray)) else Path(image).read_bytes()
     )
-    return _post_vision_request(bytes(jpeg_bytes), app_info, system_prompt, p, pet_name=pet_name)
+    return _post_vision_request(bytes(jpeg_bytes), app_info, system_prompt, p,
+                                pet_name=pet_name, user_text=user_text)
+
+
+def post_vision_messages(messages: list, p) -> str:
+    """多轮视觉对话的出口：``messages`` 由调用方组好（首条用户消息可带图）。
+
+    端点解析、Key 纪律（独立视觉端点绝不见聊天 Key）、重试与解析全部与
+    :func:`ask_about_screen` 共用 ``_post_vision_request`` 的同一实现——
+    本函数只是"messages 自带来"的那一个入口（截图问答浮窗的多轮对话用）。
+    """
+    return _post_vision_request(b"", "", "", p, messages_override=messages)

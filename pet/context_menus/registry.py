@@ -41,8 +41,10 @@ from .shared import (
     add_agent_cost,
     add_music_lyric_align,
     add_music_next,
+    add_music_open_kugou,
     add_music_open_netease,
     add_music_open_qqmusic,
+    add_music_open_soda,
     add_music_pause,
     add_music_prev,
     add_music_quit,
@@ -52,6 +54,7 @@ from .shared import (
     add_quiet_mode_menu,
     add_quit,
     add_return_corner,
+    add_screen_capture_menu,
     add_spawn_pet,
     add_submenu,
     add_network_info,
@@ -65,6 +68,7 @@ from .shared import (
 
 ACTION_LABELS = {
     "ojingjing": "厉害了我的鲸", "chat": "AI 对话", "look_screen": "看看屏幕",
+    "screen_capture": "截图提问",
     "animations_hub": "播放动画", "character": "切换角色", "playback_speed": "播放速率",
     "size": "大小", "drag_physics": "拖动物理", "no_move": "不移动",
     "on_top": "窗口置顶", "autostart": "开机自启",
@@ -75,6 +79,8 @@ ACTION_LABELS = {
     "music_prev": "上一首",
     "music_quit": "退出音乐模式", "music_open_netease": "打开网易云并播放",
     "music_open_qqmusic": "打开QQ音乐并播放",
+    "music_open_kugou": "打开酷狗音乐并播放",
+    "music_open_soda": "打开汽水音乐并播放",
     "music_lyric_align": "歌词对齐",
     "agent_cost": "显示本轮消费",
     "quick_launch": "快捷启动", "balance": "DeepSeek 余额",
@@ -97,6 +103,7 @@ Enablement = Callable[[object], bool]
 
 ACTION_ICONS = {
     "ojingjing": "pet", "chat": "chat", "look_screen": "screen",
+    "screen_capture": "size",
     "animations_hub": "play", "character": "character", "playback_speed": "speed",
     "size": "size", "drag_physics": "physics", "no_move": "pause",
     "on_top": "pin", "autostart": "autostart",
@@ -105,7 +112,8 @@ ACTION_ICONS = {
     "golden_spin": "play", "edge_probe": "corner",
     "music_next": "play", "music_prev": "play", "music_quit": "stop", "agent_cost": "balance",
     "music": "play", "music_pause": "pause", "music_open_netease": "play",
-    "music_open_qqmusic": "play", "music_lyric_align": "play",
+    "music_open_qqmusic": "play", "music_open_kugou": "play",
+    "music_open_soda": "play", "music_lyric_align": "play",
     "quick_launch": "application", "balance": "balance", "harness": "harness",
     "memory_trim": "clear",
     "deepseek_web": "web", "check_update": "update", "github_project": "web",
@@ -288,6 +296,11 @@ class MenuActionRegistry:
             ),
             "chat": MenuActionSpec(_build_chat, _callback_available("on_open_chat")),
             "look_screen": MenuActionSpec(add_look_screen, _callback_available("on_look_screen")),
+            # 「截图」单一入口（框选识屏）：动作在覆盖层松手后的动作条上选，
+            # 注册表这一层只表达"宿主有没有这套面"。
+            "screen_capture": MenuActionSpec(
+                add_screen_capture_menu, _callback_available("on_screen_capture")
+            ),
             "animations_hub": MenuActionSpec(_build_animations),
             "character": MenuActionSpec(lambda menu, pet: build_character_menu(menu, pet)),
             "playback_speed": MenuActionSpec(lambda menu, pet: build_speed_menu(menu, pet)),
@@ -317,6 +330,11 @@ class MenuActionRegistry:
             ),
             "music_open_netease": MenuActionSpec(add_music_open_netease),
             "music_open_qqmusic": MenuActionSpec(add_music_open_qqmusic),
+            # 酷狗 / 汽水与上面两条同源：同一个建造器 + 同一个启动 worker，只有
+            # player_key 不同。可用性一律 True（入口位置由布局树保留），装没装由
+            # 运行时启用态表达（CONTEXT.md：Runtime Disabled 保留位置 + 解释原因）。
+            "music_open_kugou": MenuActionSpec(add_music_open_kugou),
+            "music_open_soda": MenuActionSpec(add_music_open_soda),
             # 平台门在 menu_layout 的 available_actions 过滤里生效（非 Windows
             # 整条不出现）；builder 自身也有同一道门，legacy 扁平布局直接调它。
             "memory_trim": MenuActionSpec(add_memory_trim, _memory_trim_available),

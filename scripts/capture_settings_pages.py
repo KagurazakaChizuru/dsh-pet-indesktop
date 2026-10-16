@@ -42,6 +42,20 @@ def _apply_dark_palette(app: QApplication) -> None:
     app.setPalette(palette)
 
 
+def _apply_light_palette(app: QApplication) -> None:
+    palette = QPalette(app.palette())
+    for role, color in ((QPalette.ColorRole.Window, "#fcfcfd"),
+                        (QPalette.ColorRole.WindowText, "#171717"),
+                        (QPalette.ColorRole.Base, "#ffffff"),
+                        (QPalette.ColorRole.Text, "#252525"),
+                        (QPalette.ColorRole.Button, "#ffffff"),
+                        (QPalette.ColorRole.ButtonText, "#252525"),
+                        (QPalette.ColorRole.Highlight, "#0a84ff"),
+                        (QPalette.ColorRole.HighlightedText, "#ffffff")):
+        palette.setColor(role, QColor(color))
+    app.setPalette(palette)
+
+
 def _apply_font_scale(root: QWidget, scale: float) -> None:
     if scale == 1.0:
         return
@@ -90,6 +104,8 @@ def capture(args: argparse.Namespace) -> None:
     app = QApplication.instance() or QApplication([])
     if args.dark:
         _apply_dark_palette(app)
+    elif getattr(args, "light", False):
+        _apply_light_palette(app)
     settings_mod.autostart_mod.is_enabled = lambda: False
     destination = Path(args.destination).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -263,7 +279,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("destination")
     parser.add_argument("--width", type=int, default=1100)
     parser.add_argument("--height", type=int, default=760)
-    parser.add_argument("--dark", action="store_true")
+    theme = parser.add_mutually_exclusive_group()
+    theme.add_argument("--dark", action="store_true")
+    theme.add_argument("--light", action="store_true")
     parser.add_argument("--expanded-ai", action="store_true")
     parser.add_argument("--font-scale", type=float, default=1.0)
     parser.add_argument("--extreme-copy", action="store_true")

@@ -152,8 +152,15 @@ def _own_fold_title(widget) -> str:
 
 
 def _row_text(row: SettingRow) -> str:
-    """既有索引口径：行 label + hint + objectName（小写，供子串匹配）。"""
-    return f"{row.label.text()} {row.hint_label.text()} {row.objectName()}".lower()
+    """既有索引口径：行 label + hint + objectName（小写，供子串匹配）。
+
+    **作用域标注也算进来**（``scope_note``，「影响所有桌宠」这类）：它原本拼在 hint
+    末尾、因此本来就在索引里（搜「所有桌宠」能命中那几行），拆成独立标注只是换了呈现
+    位置，不该从搜索里掉出去。标注不存在时是空串，索引口径逐字不变。
+    """
+    note = getattr(row, "scope_note", None)
+    note_text = note.text() if note is not None else ""
+    return f"{row.label.text()} {row.hint_label.text()} {note_text} {row.objectName()}".lower()
 
 
 def _alias_targets(query: str) -> set[str]:

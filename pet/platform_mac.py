@@ -101,3 +101,61 @@ def _mac_set_window_level(view_id: int, level: int) -> bool:
         return True
     except Exception:
         return False
+
+
+def _mac_set_hides_on_deactivate(view_id: int) -> bool:
+    """macOS 原生：把 NSWindow 的 ``hidesOnDeactivate`` 置 NO。
+
+    与 :func:`_keep_macos_tool_window_visible` 的 Qt 属性**并存**，不是替代：
+    Cocoa 在应用失活时 order out 窗口的真正判据就是这个原生属性，而 Qt 属性
+    ``WA_MacAlwaysShowToolWindow`` 在部分系统版本上被反馈为不再生效
+    （issue #262：macOS 26.2 上 ``[NSWindow hidesOnDeactivate]`` 仍为 YES）。
+    直接写原生属性与 Qt 版本无关，两条路只要有一条生效即可。
+
+    **必须在原生窗口就绪后调用**（``showEvent`` 里 ``winId()`` 才指向 NSView；
+    构造期调用拿到的是未就绪句柄）。返回值仅表示"是否下发成功"，失败不抛。
+
+    只在真实 cocoa 平台执行：offscreen/minimal 下 ``winId()`` 不是 NSView 指针，
+    objc_msgSend 会直接 SIGSEGV（无法被 try/except 捕获）——与
+    :func:`_mac_set_window_level` 同一口径，故本函数在测试环境下恒返回 False。
+    """
+    if sys.platform != 'darwin':
+        return False
+    try:
+        from PySide6.QtGui import QGuiApplication
+        if QGuiApplication.platformName() != 'cocoa':
+            return False
+    except Exception:
+        return False
+    try:
+        import ctypes
+        import ctypes.util
+
+        lib_path = ctypes.util.find_library('objc') or '/usr/lib/libobjc.A.dylib'
+        objc = ctypes.cdll.LoadLibrary(lib_path)
+
+        # SEL 是 64 位指针：ctypes 默认按 c_int 截断返回值会得到损坏的 SEL，
+        # ObjC runtime 随即 SIGSEGV（同 _mac_set_window_level 的既有结论）。
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        msg = objc.objc_msgSend
+        msg.restype = ctypes.c_void_p
+
+        sel_window = objc.sel_registerName(b'window')
+        sel_set_hides = objc.sel_registerName(b'setHidesOnDeactivate:')
+
+        # [view window] —— 无参，返回 NSWindow*
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        window = msg(ctypes.c_void_p(view_id), sel_window)
+        if not window:
+            return False
+
+        # [window setHidesOnDeactivate:NO] —— ObjC BOOL 是 1 字节，
+        # 必须 c_bool；借用 NSInteger 的 c_long 会按 8 字节读栈，实测会
+        # 写坏相邻 ivar 或直接段错误。
+        msg.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+        msg(ctypes.c_void_p(window), sel_set_hides, False)
+        return True
+    except Exception:
+        return False

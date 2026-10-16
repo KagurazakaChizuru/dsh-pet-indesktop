@@ -251,7 +251,7 @@ class SpriteSoundPlayer:
         self._play(self._config_volume("click_sound_volume", cfg),
                    "click_sound_enabled", cfg)
 
-    def on_collision(self, event, sprite=None) -> None:
+    def on_collision(self, event, sprite=None, *, world=None) -> None:
         """碰撞音效：j 闸门（真撞击量级）→ 音量 = ``collision_sound_volume``
         （旧契约：每次碰撞同一音量，无分档），门 = collision_sound_enabled
         （旧契约 window.py:3526，与点击门独立）。
@@ -262,8 +262,11 @@ class SpriteSoundPlayer:
 
         ``sprite`` = 本次碰撞的宠物（壳按事件成员 id 解析；旧版每进程播自己那只，
         单进程壳取参与碰撞的第一只宠物）。
+
+        ``world`` = 撞出这一事件的那个碰撞世界（多屏下逐屏一份，播放器只持一块屏
+        的世界做缺省）；不传就用构造期那个（单世界装配与历史一致）。
         """
-        if float(getattr(event, "j", 0.0) or 0.0) < self._hit_floor(event):
+        if float(getattr(event, "j", 0.0) or 0.0) < self._hit_floor(event, world):
             return
         if sprite is None:
             sprite = self._resolve_event_sprite(event)
@@ -271,16 +274,17 @@ class SpriteSoundPlayer:
         self._play(self._config_volume("collision_sound_volume", cfg),
                    "collision_sound_enabled", cfg)
 
-    def _hit_floor(self, event) -> float:
+    def _hit_floor(self, event, world=None) -> float:
         """该事件的音效闸门：pair 含静态成员用 ``static_hit_min_dv``，否则通用值。
 
         与 ``sprite_collision`` 的判定同源——世界侧对同一 pair 就是
         ``other_id in world._static_members`` 时取放宽档（``_apply_results``），
         静态成员集合没有公开访问器，只从世界登记表读；读不到就退回通用阈值
         （不猜、不新增机制）。世界对象缺失（``world=None``，直调/脚本场景）时
-        闸门为 0，与改动前一致。
+        闸门为 0，与改动前一致。``world`` 入参用于多屏：撞出事件的屏与构造期
+        缺省世界不同时以入参为准。
         """
-        world = self._world
+        world = self._world if world is None else world
         if world is None:
             return 0.0
         try:

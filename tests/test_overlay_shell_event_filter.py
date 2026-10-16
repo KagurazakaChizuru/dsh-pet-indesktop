@@ -172,7 +172,8 @@ def test_non_escape_key_is_not_consumed_and_keeps_aim():
 def test_escape_tolerates_overlay_without_slingshot():
     """无 overlay（构造期/已拆壳）时 Esc 不炸、不消费。"""
     shell = _make_shell()
-    shell.overlay = None
+    # 无 overlay 的形态 = 没有宿主（构造期/已拆壳）：``shell.overlay`` 由宿主派生
+    shell._hosts = []
     assert shell.eventFilter(None, _key(Qt.Key.Key_Escape)) is False
 
 

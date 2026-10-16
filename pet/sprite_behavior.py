@@ -596,8 +596,15 @@ class BehaviorController:
         飞行中被移除（托盘退出/换角色）还要补一次"落地"边沿：消费方（壳的
         飞行集合）靠边沿维护簿记，漏掉这一次就会永久留着这只已注销的 sprite
         （强引用 + 它的气泡门禁状态永远是"在飞"）。
+
+        圈末回调的挂接权一并交还：``_ensure_hooks`` 以 owner 判"是否已挂"，把
+        这只 sprite 交给**另一个**世界（跨屏移交宿主）时若仍记着本控制器，
+        新世界永不接管圈末续播（多圈移动/长拖拽在圈末冻结）。
         """
         st = self._states.pop(sprite, None)
+        if getattr(sprite, "_clip_finished_owner", None) is self:
+            sprite._clip_finished_cb = None
+            sprite._clip_finished_owner = None
         if st is None:
             return
         self._unpin_landing_idles(st)
@@ -672,7 +679,11 @@ class BehaviorController:
             # 进场时若恰在移动态（速度刚好低于静止阈值）：先收尾回待机，否则
             # 到点 snap 会把探头姿态一脚踹回走路目标点
             self._enter_idle(sprite, st, self._categories(sprite.library))
-        if not probing:
+        if not probing and getattr(sprite, "_clamp_rects", None) is None:
+            # 跨屏过渡（这只的合法域是多块屏的并集）期间不按本屏 bounds 硬钳：
+            # 身体还在缝上时钳一次就是第二次 snap，而它此刻的合法位置由 sprite
+            # 自己的域说了算（角点/空洞仍不可达）。收窄域的时机由壳按"身体已完整
+            # 落在某块屏内"决定，不由这里抢先。
             self._clamp_into_bounds(sprite)
         st.elapsed += dt
         if st.gap_remaining > 0.0:

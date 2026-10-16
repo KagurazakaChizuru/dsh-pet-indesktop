@@ -18,6 +18,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 import tests.test_sprite_menu_facade as fac
@@ -35,7 +36,7 @@ def _make_shell(tmp_path, values=None):
 
 def _migrate(shell):
     """按真实入口迁移到主屏（fake screen → primaryScreen）。"""
-    primary = app.primaryScreen()
+    primary = QGuiApplication.primaryScreen()
     old = shell.overlay
     shell._migrate_to_screen(primary)
     assert shell.overlay is not old, "前提：迁移确实重建了 overlay"

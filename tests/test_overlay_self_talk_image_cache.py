@@ -165,7 +165,9 @@ def test_dpr_change_rebuilds_cache_without_config_refresh(tmp_path):
         assert shell._self_talk_image_cache is cache_before
 
         # 换到 2× 屏：目标长边翻倍，缓存必须重建
-        shell._screen = cap.FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040), dpr=2.0)
+        # 屏信息归宿主持有：换屏就是换宿主那块屏（``_screen`` 是只读视图）
+        shell._main_host.screen = cap.FakeScreen(
+            (0, 0, 1920, 1080), (0, 0, 1920, 1040), dpr=2.0)
         shell._refresh_self_talk_image_cache_for_dpr()
         assert shell._self_talk_image_cache is not cache_before
         assert _wait_for(lambda: shell._self_talk_image_cache)

@@ -53,7 +53,7 @@ def _exec_settings(app, config, *, include_ai: bool = True, initial_page: str = 
 
 
 def _settings_instance_id(argv) -> str:
-    """从 --settings 附加参数里取 instance_id（缺省空 = 主配置）。
+    """从 --settings 附加参数里取 instance_id（缺省空 = 主宠，按 slot0 分流，#271）。
 
     进程内多窗时第二窗的 config 是
     config-slot-N.json，而进程级 DSH_PET_INSTANCE 仍是主窗的；主进程会显式
@@ -91,6 +91,11 @@ def _run_settings(config=None) -> int:
     # 设置进程只有设置窗一个窗口：关窗即退出，OS 立刻回收全部内存
     #（进程内设置页首开留下的字体/样式/模块高水位没有卸载 API，只能靠进程退出）。
     app.setQuitOnLastWindowClosed(True)
+    # 图片解码上限：设置页要用 QImageReader 读用户挑的头像/图片文件，超大图在
+    # Qt 默认上限（256 MB/张，本机实测）下读不出来。与 pet/app.py::main 同一处设定
+    # （这里的 QApplication 是本进程自己建的，静态设置不跨进程继承）。
+    from .qt_image_limits import apply_image_allocation_limit
+    apply_image_allocation_limit()
     if config is None:
         from .config import Config
 
@@ -107,6 +112,24 @@ def _run_settings(config=None) -> int:
     )
 
 
+def _run_ocr_worker() -> int:
+    """--ocr-worker：本地 OCR 的识别子进程（**不导入 pet.app，也不导入 PySide**）。
+
+    切片 5 把识别搬进独立进程，为的是"用完就丢"里的内存**真归零**——进程退出时
+    操作系统把所有 native 堆都收走。这条路径唯一的存在理由是省：它只该付
+    rapidocr / numpy / onnxruntime 的导入成本，多拖一个 Qt（实测约 0.2 s）就等于
+    每次识屏白加一段等待，所以路由必须在 ``from .app import main`` **之前**分流
+    （与 ``--settings`` / ``--uninstall-cleanup`` 同一范式），且 ocr_worker 自己
+    只 import 标准库。
+
+    冻结态下这条路由同样登记在 ``packaging/pet_entry.py``：那份入口才是 exe 的
+    ``__main__``，``pet/__main__.py`` 在冻结包里根本不参与启动。
+    """
+    from .screen_capture.ocr_worker import main as ocr_worker_main
+
+    return ocr_worker_main()
+
+
 def _main() -> int:
     # 卸载清理走无 GUI 路径：不导入 pet.app（避免拉起 QApplication/事件循环），
     # 并与两个冻结入口共用 pet.uninstall_cleanup.main——逐步诊断输出、配置目录留痕、
@@ -117,6 +140,9 @@ def _main() -> int:
     # 设置页独立进程同样不导入 pet.app（模块集合是主进程的子集，见模块 docstring）。
     if "--settings" in sys.argv:
         return _run_settings()
+    # OCR 识别子进程：同样不导入 pet.app，而且**连 Qt 都不导入**（见 _run_ocr_worker）。
+    if "--ocr-worker" in sys.argv:
+        return _run_ocr_worker()
     from .app import main as app_main
     return app_main()
 

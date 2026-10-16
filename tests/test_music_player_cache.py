@@ -12,12 +12,16 @@
 2. ``cached_player`` 的 found / not-found / cold 三态契约，``clear_cache`` 能清掉
    负缓存重新扫；
 3. 后台预热幂等、扫描不发生在调用线程；
-4. 点击路径的路径解析进 worker 线程，找不到时回 GUI 线程弹气泡（不静默 return）。
+4. 点击路径的路径解析进 worker 线程，找不到时回 GUI 线程弹气泡（不静默 return）；
+5. 四播放器（网易云/QQ音乐/酷狗/汽水）共用同一份注册表，检测仍是纯本地有界
+   查找（不联网、不全盘扫），手填路径失效时不回退自动搜索。
 """
 from __future__ import annotations
 
 import inspect
+import json
 import pathlib
+import sys
 import threading
 import time
 
@@ -176,11 +180,20 @@ def test_cold_cache_menu_build_never_scans_filesystem(monkeypatch):
         assert iterdir_calls == [], f"GUI 线程构建菜单时枚举了目录：{iterdir_calls}"
 
         by_text = {action.text(): action for action in _menu_actions(menu)}
-        for label in ("打开网易云音乐给主人放歌", "打开QQ音乐给主人放歌"):
-            action = by_text[label]
+        # 菜单条目由菜单侧维护：本用例钉的是「凡进了菜单的播放器，冷缓存下都必须
+        # 乐观启用、且各触发一次幂等预热」，不写死两键或四键，避免与菜单改动打架。
+        menu_keys = [
+            key
+            for key, (label, _exe, _dirs) in music_players.PLAYERS.items()
+            if f"打开{label}给主人放歌" in by_text
+        ]
+        assert {"netease", "qqmusic"} <= set(menu_keys), f"菜单里缺原有播放器：{sorted(by_text)}"
+        for key in menu_keys:
+            label = music_players.player_label(key)
+            action = by_text[f"打开{label}给主人放歌"]
             assert action.isEnabled() is True, f"冷缓存下应乐观启用：{label}"
             assert "找不到" not in action.toolTip(), "冷缓存不等于「找不到」，不该挂禁用理由"
-        assert warms == ["netease", "qqmusic"], "冷缓存下每个播放器各触发一次幂等后台预热"
+        assert sorted(warms) == sorted(menu_keys), "冷缓存下每个播放器各触发一次幂等后台预热"
     finally:
         # 定向同步销毁（docs/QT-LIFECYCLE-FULL-SUITE-STABILIZATION-2026-09.md §3.4）：
         # 菜单测试不许把 DeferredDelete / 排队事件留给后续用例的 processEvents。
@@ -292,6 +305,348 @@ def test_clear_cache_drops_negative_cache_and_allows_rescan(monkeypatch):
     assert music_players.cached_player("netease") == (music_players.CACHED_COLD, None)
     assert music_players.find_player("netease") == "D:/CloudMusic/cloudmusic.exe"
     assert calls == ["netease", "netease"], "清掉负缓存后必须真的重扫一次"
+
+
+# ------------------------------------------------ 四播放器注册表与有界本地检测
+
+# 新增播放器的键/可执行文件名/常见父目录名：右键菜单、设置页、config 清洗全部
+# 从 music_players.PLAYERS 取值，谁都不许另抄一份键表（同源）。
+_EXPECTED_PLAYERS = {
+    "netease": ("cloudmusic.exe", ("CloudMusic", "网易云音乐")),
+    "qqmusic": ("QQMusic.exe", ("QQMusic", "QQ音乐")),
+    "kugou": ("KuGou.exe", ("KuGou", "KGMusic", "酷狗音乐")),
+    "soda": ("SodaMusic.exe", ("SodaMusic", "汽水音乐")),
+}
+
+
+def test_registry_covers_four_players_with_known_exe_names():
+    """注册表就是四播放器的键源：酷狗 KuGou.exe、汽水 SodaMusic.exe 都在。"""
+    assert set(music_players.PLAYERS) == set(_EXPECTED_PLAYERS)
+    assert music_players.player_keys() == tuple(music_players.PLAYERS)
+    for key, (exe_name, dir_names) in _EXPECTED_PLAYERS.items():
+        label, registered_exe, registered_dirs = music_players.PLAYERS[key]
+        assert registered_exe == exe_name, key
+        assert set(dir_names) <= set(registered_dirs), f"{key} 少了常见安装目录名"
+        assert label and music_players.player_label(key) == label
+
+
+def _write_fake_install(root: pathlib.Path, *relative: str) -> pathlib.Path:
+    """按给定相对路径造一个假安装（只造目录与空 exe 文件）。"""
+    exe = root.joinpath(*relative)
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_bytes(b"")
+    return exe
+
+
+@pytest.mark.parametrize(
+    "player_key, relative",
+    [
+        ("kugou", ("KuGou", "KGMusic", "KuGou.exe")),   # 真实酷狗常见布局（多一层）
+        ("kugou", ("酷狗音乐", "KuGou.exe")),            # 中文安装目录名
+        ("soda", ("SodaMusic", "SodaMusic.exe")),       # 用户目录下的常见布局
+        ("soda", ("汽水音乐", "SodaMusic.exe")),
+        # 本机实测的真实汽水布局：安装目录名带空格，程序在版本号子目录里
+        # （%LOCALAPPDATA%\Programs\Soda Music\3.7.0\SodaMusic.exe）。
+        ("soda", ("Programs", "Soda Music", "3.7.0", "SodaMusic.exe")),
+    ],
+)
+def test_detection_finds_players_in_common_install_layouts(tmp_path, monkeypatch, player_key, relative):
+    """两种命名布局都要命中：候选根被收窄到 tmp，验证的是布局覆盖而非盘扫描。"""
+    exe = _write_fake_install(tmp_path, *relative)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(music_players, "_SEARCH_ROOTS", (str(tmp_path),))
+    monkeypatch.setattr(music_players, "_search", _REAL_SEARCH)  # 覆盖 conftest 的禁扫桩
+    music_players.clear_cache()
+
+    assert music_players.find_player(player_key) == str(exe)
+    assert music_players.cached_player(player_key) == (music_players.CACHED_FOUND, str(exe))
+
+
+def test_detection_ignores_unrelated_exe_names(tmp_path, monkeypatch):
+    """exe 名不符就不算命中：不靠「目录里有个音乐程序」猜，也不退化成全盘找。"""
+    _write_fake_install(tmp_path, "KuGou", "KuGouPro.exe")
+    _write_fake_install(tmp_path, "SodaMusic", "SodaMusicSetup.exe")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(music_players, "_SEARCH_ROOTS", (str(tmp_path),))
+    monkeypatch.setattr(music_players, "_search", _REAL_SEARCH)
+    music_players.clear_cache()
+
+    assert music_players.find_player("kugou") is None
+    assert music_players.find_player("soda") is None
+    assert music_players.cached_player("kugou") == (music_players.CACHED_MISSING, None)
+
+
+def test_versioned_install_probe_is_limited_to_registered_layouts(tmp_path, monkeypatch):
+    """版本目录探测只对登记的布局生效：别的播放器不会被顺手带进版本目录。"""
+    _write_fake_install(tmp_path, "Programs", "Soda Music", "3.7.0", "KuGou.exe")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(music_players, "_SEARCH_ROOTS", (str(tmp_path),))
+    monkeypatch.setattr(music_players, "_search", _REAL_SEARCH)
+    music_players.clear_cache()
+
+    assert music_players.find_player("kugou") is None, "酷狗不该被汽水的版本目录布局命中"
+    assert set(music_players._VERSIONED_INSTALL_DIRS) <= set(music_players.PLAYERS)
+
+
+# ------------------------------------- 版本化安装目录：挑「当前」的那一份（不是枚举首命中）
+#
+# 问题面（本机实测 2026-10-16）：``%LOCALAPPDATA%\Programs\Soda Music\`` 里除当前版本目录
+# ``3.7.0`` 外还留着安装器自己的 ``Packages``、卸载器与启动器等条目；多版本共存（升级后
+# 旧版本目录不会被删）时"目录里先被枚举到的那一个"**不是承诺**，而原实现取 iterdir 的首个
+# 命中——于是右键菜单可能启动一份旧版。安装器把当前在用的版本写在自己的安装描述文件里
+# （本机实测 ``launcher_config.json`` = ``{"app_name": "SodaMusic", "cur_path": "3.7.0"}``；
+# 这是安装布局描述，不是账号或凭据），所以：**先信 cur_path**（且只接受安装目录内的相对
+# 目录），配置缺失/损坏再按数字版本降序挑（``3.10`` 必须排在 ``3.7`` 前面——按字符串比会
+# 反过来），枚举条目数与文件读取都有上界，绝不为此深挖全盘。
+_SODA_INSTALL = ("Programs", "Soda Music")
+_SODA_EXE = "SodaMusic.exe"
+
+
+def _pin_enumeration(monkeypatch, directory: pathlib.Path, order) -> None:
+    """把 ``directory`` 的枚举顺序钉成 ``order``（其余条目排在后面）。
+
+    ``iterdir`` 的顺序不是承诺，而"选哪一份"的断言不能随它漂：钉住顺序才能把
+    「首命中」与「按版本挑」两种实现区分开，红/绿都确定。
+    """
+    original = pathlib.Path.iterdir
+    target = str(directory).lower()
+    rank = {str(name).lower(): index for index, name in enumerate(order)}
+
+    def iterdir(self):
+        entries = list(original(self))
+        if str(self).lower() != target:
+            return iter(entries)
+        return iter(sorted(entries, key=lambda p: (rank.get(p.name.lower(), len(rank)), p.name.lower())))
+
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+
+
+def _soda_install(tmp_path, monkeypatch, versions, *, order=None, config=None):
+    """造一个汽水安装目录（版本子目录 + 可选安装描述文件），返回 (安装目录, {版本: exe})。
+
+    ``config`` 为 dict 时按 JSON 写，为 bytes 时原样写（模拟损坏的安装描述），
+    ``None`` 表示安装目录里没有这份文件。
+    """
+    install_dir = tmp_path.joinpath(*_SODA_INSTALL)
+    exes = {
+        version: _write_fake_install(tmp_path, *_SODA_INSTALL, version, _SODA_EXE)
+        for version in versions
+    }
+    if config is not None:
+        raw = json.dumps(config, ensure_ascii=False).encode("utf-8") if isinstance(config, dict) else config
+        (install_dir / "launcher_config.json").write_bytes(raw)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(music_players, "_SEARCH_ROOTS", (str(tmp_path),))
+    monkeypatch.setattr(music_players, "_search", _REAL_SEARCH)  # 覆盖 conftest 的禁扫桩
+    music_players.clear_cache()
+    if order is not None:
+        _pin_enumeration(monkeypatch, install_dir, order)
+    return install_dir, exes
+
+
+@pytest.mark.parametrize("cur_path", ["3.7.0", "./3.7.0", "3.7.0/", "3.7.0//"])
+def test_launcher_current_version_wins_over_the_newer_sibling(tmp_path, monkeypatch, cur_path):
+    """``cur_path`` 说当前在用的是 3.7.0 就启动 3.7.0：枚举顺序与新版本都不该改写它。
+
+    红在何处（改前）：首命中即返回，而这里枚举把 3.10.0 排在前面 —— 启动的是一个
+    安装器**没有**声明为当前的目录。
+    """
+    install_dir, exes = _soda_install(
+        tmp_path, monkeypatch, ["3.7.0", "3.10.0"],
+        order=["3.10.0", "3.7.0"],  # 枚举先给"更高版本"，逼出"首命中"的偏差
+        config={"app_name": "SodaMusic", "cur_path": cur_path},
+    )
+    found = music_players.find_player("soda")
+    assert found == str(exes["3.7.0"]), f"没跟安装器声明的当前版本：{found}"
+    assert pathlib.Path(found).parent == install_dir / "3.7.0"
+
+
+def test_versioned_install_without_a_launcher_config_sorts_versions_numerically(tmp_path, monkeypatch):
+    """没有安装描述（老安装器 / 文件被删）时按数字版本降序：旧版枚举在前也得挑新版。"""
+    _install_dir, exes = _soda_install(
+        tmp_path, monkeypatch, ["3.7.0", "3.10.0"],
+        order=["3.7.0", "3.10.0"],  # 旧版排在前面（首命中会挑错的那个顺序）
+    )
+    assert music_players.find_player("soda") == str(exes["3.10.0"])
+
+
+@pytest.mark.parametrize(
+    "versions, expected",
+    [
+        (("3.7.0", "3.10.0", "3.9.0"), "3.10.0"),  # 字符串比会把 3.7 排到 3.10 前面
+        (("9.0", "10.0"), "10.0"),
+        (("2.0", "2.0.1"), "2.0.1"),
+        (("1.0", "2.0", "Packages"), "2.0"),  # 非版本名的目录不能靠名字取胜
+    ],
+)
+def test_versioned_install_picks_the_highest_numeric_version(tmp_path, monkeypatch, versions, expected):
+    """多版本共存时挑数字版本最高的那一个（枚举顺序固定为给定顺序）。"""
+    _install_dir, exes = _soda_install(tmp_path, monkeypatch, versions, order=list(versions))
+    assert music_players.find_player("soda") == str(exes[expected])
+
+
+@pytest.mark.parametrize(
+    "cur_path",
+    [
+        "../../../Windows/System32",   # 目录逃逸
+        "..\\..\\escape",              # 反斜杠形态的逃逸
+        "../escape",                   # 姊妹目录（里面真有一个同名 exe，用来当诱饵）
+        "C:\\Windows\\System32",       # 绝对路径
+        "/etc",                        # POSIX 绝对
+        "\\\\server\\share",           # UNC
+        "3.10.0:ads",                  # NTFS 备用数据流
+        ".. ",                         # Windows 会把尾随空格/点当 .. 处理
+        "3.9.9",                       # 目录不存在
+        "",                            # 空
+        "   ",
+        42,                            # 类型不对
+        None,
+        {"cur_path": "3.10.0"},        # 类型不对（嵌套字典）
+    ],
+)
+def test_launcher_current_version_rejects_escape_and_broken_values(tmp_path, monkeypatch, cur_path):
+    """越界/绝对/坏值的 ``cur_path`` 一律不采信：回退到**安装目录内**的数字版本排序。
+
+    ``../escape`` 的诱饵是真的存在的同名 exe——采信它就是"照配置文件去读任意路径"。
+    """
+    _write_fake_install(tmp_path, "Programs", "escape", _SODA_EXE)
+    install_dir, exes = _soda_install(
+        tmp_path, monkeypatch, ["3.7.0", "3.10.0"],
+        order=["3.10.0", "3.7.0"],
+        config={"app_name": "SodaMusic", "cur_path": cur_path},
+    )
+    found = music_players.find_player("soda")
+    assert found == str(exes["3.10.0"]), f"坏 cur_path 没有回退到安装目录内的版本排序：{found}"
+    assert pathlib.Path(found) == install_dir / "3.10.0" / _SODA_EXE
+
+
+def test_launcher_current_version_requires_the_exe_to_be_there(tmp_path, monkeypatch):
+    """``cur_path`` 指到真存在但没有 exe 的目录（半升级/残留）也算不可用：回退版本排序。"""
+    install_dir, exes = _soda_install(
+        tmp_path, monkeypatch, ["3.7.0", "3.10.0"],
+        order=["3.10.0", "3.7.0"],
+        config={"app_name": "SodaMusic", "cur_path": "staging"},
+    )
+    (install_dir / "staging").mkdir()
+    music_players.clear_cache()
+
+    assert music_players.find_player("soda") == str(exes["3.10.0"])
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{ not json",                 # 截断的 JSON
+        b"[]",                         # 不是对象
+        b'"3.7.0"',                    # 不是对象
+        b"",                           # 空文件
+        b'{"cur_path": 37}',           # 类型不对
+        b'{"app_name": "SodaMusic"}',  # 没有 cur_path
+        b'{"cur_path": "\xff\xfe"}',   # 不是合法 UTF-8
+        b"\x00\x01\x02",
+    ],
+)
+def test_corrupt_launcher_config_falls_back_to_numeric_order(tmp_path, monkeypatch, raw):
+    """损坏的安装描述不是异常、也不让挑选变任意：回退安装目录内的数字版本降序。"""
+    _install_dir, exes = _soda_install(
+        tmp_path, monkeypatch, ["3.7.0", "3.10.0"],
+        order=["3.10.0", "3.7.0"],
+        config=raw,
+    )
+    assert music_players.find_player("soda") == str(exes["3.10.0"])
+
+
+def test_oversized_launcher_config_is_treated_as_broken(tmp_path, monkeypatch):
+    """安装描述文件本身也有大小上界：异常大的文件按损坏处理，不整份读进来。"""
+    limit = music_players._LAUNCHER_CONFIG_MAX_BYTES
+    assert 0 < limit <= 1024 * 1024
+    _install_dir, exes = _soda_install(
+        tmp_path, monkeypatch, ["3.7.0", "3.10.0"],
+        order=["3.7.0", "3.10.0"],
+        config=b"{\"cur_path\": \"3.7.0\"" + b" " * (limit + 1) + b"}",
+    )
+    assert music_players.find_player("soda") == str(exes["3.10.0"])
+
+
+def test_versioned_install_enumeration_is_bounded(tmp_path, monkeypatch):
+    """条目数有上界：只看前 ``_VERSIONED_MAX_ENTRIES`` 条（安装目录不是版本仓库）。"""
+    install_dir, exes = _soda_install(
+        tmp_path, monkeypatch, ["3.7.0", "3.10.0", "9.9.9"],
+        order=["3.7.0", "3.10.0", "9.9.9"],
+    )
+    assert 0 < music_players._VERSIONED_MAX_ENTRIES <= 128
+    assert len(list(install_dir.iterdir())) < music_players._VERSIONED_MAX_ENTRIES
+    monkeypatch.setattr(music_players, "_VERSIONED_MAX_ENTRIES", 2)
+    music_players.clear_cache()
+
+    assert music_players.find_player("soda") == str(exes["3.10.0"]), (
+        "只看前 2 条时应在读到的两条里按数字降序挑：有界优先于猜中"
+    )
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("3.7.0", (3, 7, 0)),
+        ("10.0", (10, 0)),          # 数值比较：10 > 9，字符串比较会反过来
+        ("3.7", (3, 7)),
+        ("3.7.0", (3, 7, 0)),
+        ("1.", None),               # 空版本段
+        (".1", None),
+        ("3.7.0-beta", None),       # 带后缀的不当版本号解析（前缀匹配会误判）
+        ("v3", None),
+        ("³", None),                # isdigit() 为真但不是 ASCII 数字
+        ("٣.٤", None),              # 阿拉伯-印度数字
+        ("", None),
+        ("1" * 40, None),           # 超长名字
+    ],
+)
+def test_numeric_version_parsing_boundaries(name, expected):
+    """版本目录名的解析只认 ASCII 数字点分：``3.10`` 必须大于 ``3.7``，其余一律 None。"""
+    assert music_players._numeric_version(name) == expected
+
+
+def test_launcher_config_registry_stays_inside_the_player_registry():
+    """读安装描述的文件名按播放器登记，且登记面不许出现未注册的播放器。"""
+    assert set(music_players._LAUNCHER_CUR_PATH_FILES) <= set(music_players.PLAYERS)
+
+
+def test_detection_stays_local_and_bounded():
+    """检测是纯本地有界目录查找：不联网、不读注册表、不起进程，递归深度有上界。"""
+    source = pathlib.Path(music_players.__file__).read_text(encoding="utf-8")
+    imported = {
+        line.split()[1].split(".")[0]
+        for line in source.splitlines()
+        if line.startswith(("import ", "from "))
+    }
+    forbidden = {"socket", "urllib", "http", "requests", "aiohttp", "winreg", "subprocess"}
+    assert not imported & forbidden, f"检测模块引入了联网/注册表/进程能力：{sorted(imported & forbidden)}"
+    assert music_players._MAX_DEPTH <= 3, "目录递归深度失控（全盘扫描的前兆）"
+    assert len(music_players._SEARCH_ROOTS) <= 8, "候选根数量失控（全盘扫描的前兆）"
+
+
+@pytest.mark.parametrize("player_key", ["netease", "qqmusic", "kugou", "soda"])
+def test_manual_path_wins_and_missing_manual_never_falls_back(tmp_path, monkeypatch, player_key):
+    """四播放器同规：手填路径存在就用它；不存在返回 None，绝不静默回退自动搜索。"""
+    searches: list = []
+    monkeypatch.setattr(
+        music_players, "_search",
+        lambda key: (searches.append(key), str(tmp_path / "auto.exe"))[1],
+    )
+    music_players.clear_cache()
+
+    manual = tmp_path / f"{player_key}.exe"
+    manual.write_bytes(b"")
+    assert music_players.find_player(player_key, str(manual)) == str(manual)
+    assert music_players.cached_player(player_key, str(manual)) == (
+        music_players.CACHED_FOUND, str(manual))
+
+    missing = str(tmp_path / "missing.exe")
+    assert music_players.find_player(player_key, missing) is None
+    assert music_players.cached_player(player_key, missing) == (
+        music_players.CACHED_MISSING, None)
+    assert searches == [], "手填路径命中/失效都不该扫盘，更不能回退自动搜索"
+
 
 
 # ------------------------------------------------------------ 后台预热

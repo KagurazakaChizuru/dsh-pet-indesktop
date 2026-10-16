@@ -354,6 +354,43 @@ def test_subpixel_move_reports_while_frame_pending():
     assert len(calls) == 1, f"帧待上屏时不得吞掉上报，实际 {calls}"
 
 
+def test_spring_drag_subpixel_step_reports_dirty():
+    """拖拽弹簧（drag_physics 开）的亚像素步进也必须上屏：绘制落点是 float
+    pos（drawPixmap 支持亚像素），小步移动若被整数矩形报脏门槛吞掉，
+    拖拽跟手就掉帧。F-PERF P1 的跳报只适用非弹簧路径（慢速爬行/挤压）。"""
+    clip = FakeClip()
+    sprite = _make_sprite(clip)
+    assert sprite.bind_clip("walk") is True
+    sprite.advance(0.0)          # 消费首帧待上屏标记
+    sprite.drag_physics = True
+    calls = _dirty_recorder(sprite)
+    sprite.on_press(QPointF(0.0, 0.0))       # 压在 sprite 左上角：grab 偏移 (0,0)
+    sprite.begin_drag()
+    sprite.on_move(QPointF(1.3, 0.0))        # 目标仅 +1.3px
+    n0 = len(calls)
+    sprite.advance(0.016)                    # 弹簧首步 ~0.1px（亚像素）
+    assert 0.0 < sprite.pos.x() - 0.0 < 1.0, "前提：步进不足 1px"
+    assert len(calls) > n0, "弹簧拖拽的亚像素步进必须报脏上屏"
+
+
+def test_spring_drag_settles_and_stops_repainting():
+    """弹簧收敛后钉死在目标点、速度归零、不再报脏——渐近尾迹不许永远刷帧。"""
+    clip = FakeClip()
+    sprite = _make_sprite(clip)
+    assert sprite.bind_clip("walk") is True
+    sprite.advance(0.0)
+    sprite.drag_physics = True
+    sprite.on_press(QPointF(10.0, 10.0))
+    sprite.begin_drag()
+    sprite.on_move(QPointF(140.0, 110.0))
+    for _ in range(240):                     # 2s@120Hz 足够收敛
+        sprite.advance(1 / 120)
+    assert sprite.pos == QPointF(130.0, 100.0), f"收敛钉死目标点，实际 {sprite.pos}"
+    calls = _dirty_recorder(sprite)
+    sprite.advance(0.016)
+    assert calls == [], f"收敛后不得再报脏，实际 {calls}"
+
+
 def test_frame_arrival_still_reports_dirty():
     """帧到达（frameChanged）直驱重绘的报脏不变——慢速位移的抑制不得波及。"""
     clip = FakeClip()

@@ -110,6 +110,7 @@ _ROW_DEFAULT_PATHS: dict[str, str | tuple[str, float]] = {
     # 常规
     "autostart": "autostart_wanted",
     "stream_capture": "stream_capture_mode",
+    "cross_screen": "allow_cross_screen",
     # AI 对话·联网搜索（全局 web_search 设置；默认值快照由 _config_default_data 注入）
     "web_search_enabled": "chat.web_search.enabled",
     "web_search_engine": "chat.web_search.engine",

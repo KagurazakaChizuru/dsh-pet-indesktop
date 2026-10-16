@@ -7,14 +7,33 @@ from math import cos, pi, sin
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBitmap, QBrush, QColor, QIcon, QImageReader, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion
-from PySide6.QtWidgets import QMenu, QStyle
+from PySide6.QtGui import QBitmap, QBrush, QColor, QIcon, QImage, QImageReader, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRegion
+from PySide6.QtWidgets import QLineEdit, QMenu, QStyle
 
 
 CUSTOM_ICON_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff",
 })
 CUSTOM_ICON_MAX_BYTES = 5 * 1024 * 1024
+
+#: 设置窗导航图标的**静息 / 禁用**描边色，按**设置窗自己的主题**（浅/深）取值。
+#: 静息沿用聊天窗/菜单共有的那枚「静息灰」；禁用取静息色与表面的中间值——降对比但仍可读，
+#: 观感与 Qt 自己给深色菜单生成的淡化版相当。
+#: 选中态**不在这张表里**：它取设置窗的选中强调色（``settings_theme_qss.
+#: SETTINGS_SELECTION_ACCENT``，与侧栏那条 3px 左条同一个真值，浅色档为对比度压深过一档）。
+#: 只有设置窗表面（``modernStyle`` 标记）才拿三态；菜单与聊天窗仍拿单态，颜色不变。
+_SETTINGS_ICON_REST: dict[bool, str] = {False: "#595959", True: "#d6d6d6"}
+_SETTINGS_ICON_DISABLED: dict[bool, str] = {False: "#a6a8ac", True: "#7e7e82"}
+#: 静息态是画布本身（QIcon 的 Normal 图元），只有这两态是额外覆色出来的。
+_SETTINGS_ICON_MODES = (
+    (QIcon.Mode.Selected, "selected"),
+    (QIcon.Mode.Disabled, "disabled"),
+)
+
+#: 设置窗表面的图标请求记录：渲染时把 ``(名字, 尺寸)`` 记在**消费者控件**的这个动态属性上，
+#: 换主题后由 ``settings_widgets.refresh_settings_icons`` 按同一个名字与尺寸重画。
+#: 记录条件与读者见 :func:`_remember_themed_icon` 与 :func:`_icon_consumer`。
+THEMED_ICON_REQUEST = "themedIconRequest"
 
 
 def custom_icon_file_error(path: str | Path) -> str:
@@ -72,8 +91,8 @@ def custom_file_menu_icon(widget, spec: dict, size: int = 18) -> QIcon:
     return QIcon(canvas)
 
 
-def _icon_theme(widget) -> tuple[str, bool]:
-    """Resolve (menuStyle, modernDark) from the widget or its nearest ancestor.
+def _theme_signals(widget) -> tuple[str, bool, bool]:
+    """Resolve (menuStyle, dark, settings_surface) by walking the widget's ancestors.
 
     Settings and chat windows pin ``menuStyle=modern`` on the container so every
     icon rendered inside inherits the outline colour (#595959 on light surfaces,
@@ -82,20 +101,119 @@ def _icon_theme(widget) -> tuple[str, bool]:
     glyphs on the QSS-light chat surfaces (invisible close/minimize/add icons).
     Individual widgets may still flip ``modernDark`` (e.g. the accent send
     button) without restating the style.
+
+    The settings window is the one surface whose theme is **its own** rather than
+    the OS's: it publishes the theme it actually applied as ``settingsDark``
+    (``ModernSettingsDialog._apply_selected_theme``). That property is set *after*
+    the navigation icons are built, so ``modernStyle`` (the marker only that
+    window sets) additionally falls back to the settings theme's own default —
+    "follow the system" — via :func:`_settings_system_dark`. Without an explicit
+    signal and without the marker, the colour stays light: chat windows and
+    context menus keep exactly the ink they had before.
     """
     style = ""
     dark = False
+    explicit = False
+    settings_surface = False
     current = widget
     while current is not None:
         value = str(current.property("menuStyle") or "")
         if value:
             style = value
-        if current.property("modernDark"):
+        if not explicit and current.property("modernDark"):
             dark = True
-        if style and dark:
-            break
+            explicit = True
+        themed = current.property("settingsDark")
+        if not explicit and themed is not None:
+            # 最内层优先：设置窗自己挂的主题真值不该被外层窗口的 modernDark 覆盖。
+            dark = bool(themed)
+            explicit = True
+        if current.property("modernStyle"):
+            settings_surface = True
         current = current.parent()
+    if settings_surface and not explicit:
+        dark = _settings_system_dark()
+    return style, dark, settings_surface
+
+
+def _icon_theme(widget) -> tuple[str, bool]:
+    """(menuStyle, dark) —— 给取色/图标尺寸用的两元组视图（保留原有签名）。"""
+    style, dark, _settings_surface = _theme_signals(widget)
     return style, dark
+
+
+def _settings_system_dark() -> bool:
+    """设置窗「跟随系统」档的深浅判定，与设置窗 QSS 同源。
+
+    惰性导入：``settings_theme_qss`` 与本模块互相引用不成环（本模块顶层不 import 它），
+    而这条分支只在设置窗内的控件上才会走到，右键菜单/聊天窗永远不触发它。
+    """
+    from ..settings_theme_qss import settings_system_dark
+
+    return settings_system_dark()
+
+
+def _settings_icon_states(widget) -> dict[str, str] | None:
+    """设置窗内的图标要三态取色；菜单与聊天窗返回 None（保持单态、颜色不变）。"""
+    style, dark, settings_surface = _theme_signals(widget)
+    if style != "modern" or not settings_surface:
+        return None
+    dark = bool(dark)
+    return {
+        "rest": _SETTINGS_ICON_REST[dark],
+        "selected": _settings_selection_accent(dark),
+        "disabled": _SETTINGS_ICON_DISABLED[dark],
+    }
+
+
+def _settings_selection_accent(dark: bool) -> str:
+    """设置窗选中态的强调色（与 QSS 里那条 3px 左条同一个真值）。
+
+    惰性导入的理由同 :func:`_settings_system_dark`：本模块顶层不 import
+    ``settings_theme_qss``，而这条分支只在设置窗内的控件上才会走到。
+    """
+    from ..settings_theme_qss import settings_selection_accent
+
+    return settings_selection_accent(dark)
+
+
+def _remember_themed_icon(host, name: str, requested_size: int | None) -> None:
+    """在**能兑现的消费者**控件上记下这次图标请求（名字 + 有效尺寸）。
+
+    图标是画出来的位图——描边色在渲染那一刻烘进像素，换主题时 QSS 立刻重排、图标不会
+    自己换色，只有按同一个名字与尺寸重画一次（``settings_widgets.refresh_settings_icons``）。
+    记录因此挂在**消费者**（真正被 ``setIcon`` 的那个控件）上而不是别的宿主上：重画只能
+    写回消费者，记在别处等于记了一张没人能兑现的欠条。
+
+    **不在"这里是不是设置窗"上加条件**：消费者可能在挂上窗口**之前**就渲染了图标（页面
+    内容先独立构造、之后才挂进对话框），那一刻宿主链上根本没有 ``modernStyle``——按表面
+    判定去记，正好把这些图标漏掉（它们同时还会拿到应用调色板的墨色，实测是黑色）。记一次
+    的代价是写一个动态属性（实测 2.1 µs，不触发 polish/重排），读者只有设置窗。
+    """
+    size = int(requested_size) if requested_size else small_icon_size(host)
+    host.setProperty(THEMED_ICON_REQUEST, (str(name), size))
+
+
+def _icon_consumer(host) -> bool:
+    """这个宿主能否把图标写回去——能兑现才记（见 :func:`_remember_themed_icon`）。
+
+    控件走 ``setIcon``；搜索框这类没有 ``setIcon`` 的也算一个消费者（图标挂在它的
+    ``QAction`` 上，重画分支见 ``settings_widgets.refresh_settings_icons``）。菜单与
+    对话框本身不记：它们拿不到 Selected 图元、也没有 setIcon，记了没有读者。
+    """
+    return callable(getattr(host, "setIcon", None)) or isinstance(host, QLineEdit)
+
+
+def _tinted_pixmap(source: QPixmap, color: str) -> QPixmap:
+    """把单色线稿换成另一种描边色：按 alpha 整体覆色，抗锯齿边缘与 DPR 原样保留。"""
+    image = source.toImage().convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(image.rect(), QColor(color))
+    painter.end()
+    tinted = QPixmap.fromImage(image)
+    tinted.setDevicePixelRatio(source.devicePixelRatio())
+    return tinted
 
 
 def small_icon_size(menu: QMenu) -> int:
@@ -272,10 +390,18 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
         painter.drawEllipse(QPointF(8.0, 8.0), 5.8, 5.8)
         painter.drawArc(QRectF(4.0, 4.0, 8.0, 8.0), 90 * 16, 180 * 16)
         painter.drawLine(QPointF(8.0, 2.2), QPointF(8.0, 13.8))
-    elif name in {"back", "save"}:
+    elif name == "back":
         painter.drawLine(QPointF(13.5, 8.0), QPointF(3.0, 8.0))
         painter.drawLine(QPointF(3.0, 8.0), QPointF(7.0, 4.0))
         painter.drawLine(QPointF(3.0, 8.0), QPointF(7.0, 12.0))
+    elif name == "save":
+        # 软盘：闭合外框 + 顶部写入槽 + 底部标签块。「保存并退出」原先借的是返回箭头
+        # （语义相反），这枚才是保存。与其它图标同一 16 单位描边语言（细线、圆头、单色）。
+        painter.drawRoundedRect(QRectF(2.7, 2.2, 10.6, 11.6), 1.3, 1.3)
+        painter.drawLine(QPointF(5.9, 2.2), QPointF(5.9, 6.3))
+        painter.drawLine(QPointF(5.9, 6.3), QPointF(10.1, 6.3))
+        painter.drawLine(QPointF(10.1, 6.3), QPointF(10.1, 2.2))
+        painter.drawRoundedRect(QRectF(5.3, 9.9, 5.4, 3.9), 0.7, 0.7)
     elif name == "minimize":
         painter.drawLine(QPointF(3.0, 11.5), QPointF(13.0, 11.5))
     elif name == "clear":
@@ -311,6 +437,16 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
         ])
         painter.drawPolygon(pencil)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+    elif name == "info":
+        painter.drawEllipse(QRectF(1.5, 1.5, 13.0, 13.0))
+        painter.drawPoint(QPointF(8.0, 5.0))
+        painter.drawLine(QPointF(8.0, 7.5), QPointF(8.0, 11.0))
+    elif name == "external_link":
+        painter.drawLine(QPointF(8.0, 2.0), QPointF(14.0, 2.0))
+        painter.drawLine(QPointF(14.0, 2.0), QPointF(14.0, 8.0))
+        painter.drawLine(QPointF(14.0, 2.0), QPointF(7.0, 9.0))
+        path.moveTo(5.0, 3.0); path.lineTo(2.0, 3.0); path.lineTo(2.0, 14.0)
+        path.lineTo(13.0, 14.0); path.lineTo(13.0, 11.0); painter.drawPath(path)
     elif name == "copy":
         painter.drawRoundedRect(QRectF(5.0, 3.0, 8.0, 9.0), 1.3, 1.3)
         painter.drawRoundedRect(QRectF(2.5, 5.5, 8.0, 8.0), 1.3, 1.3)
@@ -356,7 +492,16 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
         painter.drawEllipse(QPointF(8.0, 8.0), 5.5, 5.5)
 
     painter.end()
-    return QIcon(pixmap)
+    icon = QIcon(pixmap)
+    states = _settings_icon_states(menu)
+    if states is not None:
+        # 设置窗内的图标：静息是画布本身，选中/禁用按同一 alpha 覆色。项视图、菜单都按
+        # QIcon::Mode 取图，所以侧栏选中行与禁用项无需额外接线就换色（见视觉规范 Icons）。
+        for mode, role in _SETTINGS_ICON_MODES:
+            icon.addPixmap(_tinted_pixmap(pixmap, states[role]), mode)
+    if _icon_consumer(menu):
+        _remember_themed_icon(menu, name, size)
+    return icon
 
 
 def vector_widget_icon(widget, name: str, size: int = 18) -> QIcon:

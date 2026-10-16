@@ -6,6 +6,7 @@
     {"type": "separator", "id": "default.separator-profile", "visible": true},
     {"type": "action", "id": "chat", "visible": true, "section": "interaction"},
     {"type": "action", "id": "look_screen", "visible": true, "section": "interaction"},
+    {"type": "action", "id": "screen_capture", "visible": true, "section": "interaction"},
     {"type": "separator", "id": "default.separator-interaction", "visible": true},
     {"type": "action", "id": "animations_hub", "visible": true, "section": "playback"},
     {"type": "action", "id": "character", "visible": true, "section": "playback"},
@@ -19,7 +20,9 @@
       {"type": "action", "id": "music_lyric_align", "visible": true},
       {"type": "separator", "id": "music.separator-launch", "visible": true},
       {"type": "action", "id": "music_open_netease", "visible": true},
-      {"type": "action", "id": "music_open_qqmusic", "visible": true}
+      {"type": "action", "id": "music_open_qqmusic", "visible": true},
+      {"type": "action", "id": "music_open_kugou", "visible": true},
+      {"type": "action", "id": "music_open_soda", "visible": true}
     ]},
     {"type": "separator", "id": "default.separator-playback", "visible": true},
     {

@@ -35,6 +35,11 @@ assets/characters/*/frameseq/
 # 不入库则干净克隆与 CI 构建拿不到它（打包门会因此中止，见
 # scripts/verify_presentmon.py）。来源、版本、sha256 与 MIT 许可文本见
 # THIRD_PARTY_NOTICES.md 第 6 节；这里的目录本身不被任何规则忽略，此段是说明而非白名单。
+#
+# resources/rapidocr_models/ 同理：三个 ONNX 模型（共 31.6 MB）是「截图提取文字」
+# 的本地 OCR 权重，pip 依赖（rapidocr）虽然自带同一批文件，但产品只从随包目录加载，
+# 不入库则干净克隆/CI 构建的包没有模型（打包门 scripts/verify_rapidocr_models.py
+# 会中止）。来源、sha256 与 Apache-2.0 许可文本见 THIRD_PARTY_NOTICES.md 第 7 节。
 
 # PyInstaller 构建产物
 build/
@@ -69,3 +74,13 @@ packaging/build_variant.py
 # 否则原地 import 门禁蹭到它假绿，且 PyInstaller --add-data 会把 junction 垃圾带进产物
 node_modules/
 dist-onedir-alt/
+
+# Android tools, signing material, and generated outputs
+android/.gradle/
+android/.kotlin/
+android/hs_err_pid*.log
+android/local.properties
+android/**/build/
+*.keystore
+*.jks
+dist-android/

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -411,27 +412,511 @@ def _all_groups(dialog) -> list[tuple[str, QWidget]]:
     return found
 
 
-def test_anchor_bar_appears_only_from_four_sections_up(tmp_path, monkeypatch):
-    """「当前页（或当前标签）≥4 个区」才显示跳转条：两三个区一眼扫得完。"""
+def _tab_layer_height(scroll: QScrollArea) -> int:
+    """页内标签域在**当前标签页**之上真实占掉的那一层（标签栏 + 容器布局间距）。
+
+    **量落版后的实测几何**（``tab_bar.height()`` + 容器布局自己的 ``spacing()``），不抄
+    产品那句口径、也不用 hint 相减：视口是**整块滚动内容**（标签容器）的视口，
+    漏掉这一层就会在 ``页高 <= 视口 < 页高 + 层高`` 这一小段上说"装得下"（实测 1100 宽、
+    桌宠／动作与碰撞：层高 52 = 标签栏 40 + 间距 12）。hint 相减（容器最小高 − 页最小高）
+    在"刚改过留白、布局还没落定"的一拍会被缓存值污染（实测量到 1336、真值 52），故取实测。
+    """
+    tabs = settings_page_guide.tab_container(scroll.widget())
+    if tabs is None:
+        return 0
+    layout = tabs.layout()
+    return tabs.tab_bar.height() + (layout.spacing() if layout is not None else 0)
+
+
+def _needed_height(scroll: QScrollArea) -> int:
+    """**整块滚动内容**的真实高度——测试自己量，不调被测函数自证。
+
+    **页尾留白不计入**：``_PastEndPadding`` 挂在内容布局的下外边距上（不是一块占位
+    控件），所以“真实内容高”要从量出来的高度里减掉它。这条正是产品的判据（见
+    ``settings_page_guide`` 的 ``_SettingsAnchorBar``）：留白**跟着视口**走，把它算进去
+    等于拿“跳转条自己造成的视口高度”回答“要不要显示跳转条”。
+
+    页内标签域要取**当前标签页**：内容自己就是 ``SettingsTabContainer`` 时 ``findChild``
+    找不到自己，退回容器会把内容高量成容器的高（实测 1750 vs 产品口径 1255）。
+    但**整块内容**才是滚动视口对着的那个东西，所以标签栏那一层要加回来
+    （:func:`_tab_layer_height`）：只量标签页自己，等于把产品的一个错口径复制进测试。
+    """
+    content = scroll.widget()
+    tabs = settings_page_guide.tab_container(content)
+    root = tabs.stack.currentWidget() if tabs is not None else content
+    bottom_margin = root.layout().contentsMargins().bottom()
+    page = max(
+        root.minimumSizeHint().height(),
+        root.heightForWidth(scroll.viewport().width()),
+    ) - bottom_margin
+    return page + _tab_layer_height(scroll)
+
+
+def _available_height(scroll: QScrollArea, bar: QWidget) -> int:
+    """判据里的可用高：当前视口 **加上跳转条自己占掉的那段**。
+
+    跳转条显着的时候视口已经被它压矮了一截；不加回来就等于把结果当输入（两种状态各自
+    自洽 ⇒ 往返抖）。判据因此在两个状态下取到同一个可用高。
+    """
+    return scroll.viewport().height() + (0 if bar.isHidden() else bar.height())
+
+
+def _expect_bar_hidden(bar: QWidget, blocks: list, scroll: QScrollArea) -> bool:
+    """按测得的几何算出跳转条该不该藏（与产品同一判据，但自己量）。"""
+    return not (len(blocks) >= 4 and _needed_height(scroll) > _available_height(scroll, bar))
+
+
+def _set_bar_hidden(bar, hidden: bool) -> None:
+    """强行把跳转条设成某个状态，然后把判据跑完（它推到下一拍，且要等布局落定）。"""
+    bar.setVisible(not hidden)
+    for _turn in range(3):
+        app.processEvents()
+
+
+def _settle(turns: int = 3) -> None:
+    """把布局推平：尺寸变化与跳转条的重判都要再落一拍（见 ``_SettingsAnchorBar``）。"""
+    for _turn in range(turns):
+        app.processEvents()
+
+
+def test_anchor_bar_shows_only_on_pages_that_actually_scroll(tmp_path, monkeypatch):
+    """「当前页（或当前标签）≥4 个区」**且内容真的超过视口**才显示跳转条。
+
+    短页（一屏看得完）上那条横排 chip 只是把页头重复一遍：它指向的每一个区都已经在
+    视口里，点它没有任何位移——用户要的是“短页不摆跳转条，长页才摆”。
+
+    **两个尺寸都要过**：720×500（最小窗口）下区数够的页几乎都真的装不下，只在这一档
+    量不到"短页不摆"这件事；1000×1000 下「常规」装得下、「语音」（6 区）装不下，
+    同一次装配里同时给出两种判据结果（区数按**实际构造**算：非 Windows 的常规只有 3 区，
+    那儿"不摆"是区数不够而不是短页，仍由本用例的动态判据覆盖）。
+    """
     dialog = _dialog(tmp_path, monkeypatch)
     try:
         dialog.resize(720, 500)
         dialog.show()
         app.processEvents()
-        shown, hidden = set(), set()
+        for width, height in ((720, 500), (1000, 1000)):
+            dialog.resize(width, height)
+            _settle()
+            for index in range(dialog.sidebar.count()):
+                domain = dialog.sidebar.item(index).text()
+                dialog.sidebar.setCurrentRow(index)
+                _settle()
+                bar = dialog.pages.widget(index).findChild(QWidget, "settingsPageAnchors")
+                assert bar is not None, f"「{domain}」页缺少跳转条（不足 4 区时它自己收起）"
+                blocks = _blocks_of(_content(dialog, domain))
+                assert len(_chips(bar)) == len(blocks), f"「{domain}」chip 数必须等于区数"
+                scroll = _page(dialog, domain).findChild(QScrollArea, "settingsScroll")
+                expected = _expect_bar_hidden(bar, blocks, scroll)
+                assert bar.isHidden() is expected, (
+                    f"{width}×{height}「{domain}」{len(blocks)} 个区、内容高 "
+                    f"{_needed_height(scroll)}px / 可用 {_available_height(scroll, bar)}px，"
+                    f"跳转条的显隐判反了")
+        # 1000×1000 下必须真的同时出现"该藏"和"该显"两档（否则本用例会假绿）。
+        tall_hidden, tall_shown = set(), set()
+        dialog.resize(1000, 1000)
+        _settle()
         for index in range(dialog.sidebar.count()):
             domain = dialog.sidebar.item(index).text()
             dialog.sidebar.setCurrentRow(index)
-            app.processEvents()
+            _settle()
             bar = dialog.pages.widget(index).findChild(QWidget, "settingsPageAnchors")
-            assert bar is not None, f"「{domain}」页缺少跳转条（不足 4 区时它自己收起）"
+            if bar is not None and not bar.isHidden():
+                tall_shown.add(domain)
+            else:
+                tall_hidden.add(domain)
+        assert tall_shown and tall_hidden, (
+            f"1000×1000 下只出现了一档（藏在 {sorted(tall_hidden)} / 显示 {sorted(tall_shown)}），"
+            f"本用例量不到短页与长页的差别")
+    finally:
+        dialog.close()
+
+
+def test_anchor_bar_converges_in_both_directions(tmp_path, monkeypatch):
+    """显隐是**收敛**的：把状态强行反过来，下一拍必须回到同一个答案（不来回抖）。
+
+    这就是“判定真实内容高度、不把页尾留白算进去、也不丢下自己占的那段”的用处：跳转条
+    自己占了页头一段高度，判据把它加回来之后与当前显隐无关，两个方向各只有一个不动点。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        # 1000×1000 下「常规」装得下（534px < 视口），「语音」装不下（2456px）——
+        # 一个对话框里同时拿到短页与长页两个样本。
+        dialog.resize(1000, 1000)
+        dialog.show()
+        app.processEvents()
+        # 一轮一个域（都停在**当前页**上：非当前页不参与布局，量不到真几何）。
+        for domain, expect_hidden in (("常规", True), ("语音", False)):
+            page, bar = _select(dialog, domain)
+            scroll = page.findChild(QScrollArea, "settingsScroll")
             blocks = _blocks_of(_content(dialog, domain))
-            assert len(_chips(bar)) == len(blocks), f"「{domain}」chip 数必须等于区数"
-            assert bar.isHidden() is (len(blocks) < 4), (
-                f"「{domain}」有 {len(blocks)} 个区，跳转条的显隐判反了")
-            (hidden if bar.isHidden() else shown).add(domain)
-        assert shown == {"AI 与对话", "自动化与联动", "语音"}
-        assert hidden == {"常规", "桌宠", "互动", "菜单", "桌面组件", "文件识别", "更新"}
+            assert _expect_bar_hidden(bar, blocks, scroll) is expect_hidden, (
+                f"前提：「{domain}」的显隐与量出来的几何不符（内容 {_needed_height(scroll)}px"
+                f" / 可用 {_available_height(scroll, bar)}px）")
+            for _round in range(3):  # 反复强行反过来：每次都要自己回到同一答案
+                _set_bar_hidden(bar, not expect_hidden)
+                assert bar.isHidden() is expect_hidden, (
+                    f"「{domain}」被强行设成相反状态之后没有回到 {expect_hidden}")
+    finally:
+        dialog.close()
+
+
+def test_anchor_bar_follows_the_window_height(tmp_path, monkeypatch):
+    """同一个域：窗口高到装得下就不摆跳转条，缩到装不下再摆回来。
+
+    加高那一档按**量出来的**开销算（``dialog.height() - 可用高`` = 页头 + 页边距 + 跳转条），
+    不写死"加多少像素够"：字体与平台不同，写死的常数今天恰好够、明天就成假绿。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(1000, 1000)
+        dialog.show()
+        app.processEvents()
+        page, bar = _select(dialog, "语音")
+        scroll = page.findChild(QScrollArea, "settingsScroll")
+        blocks = _blocks_of(_content(dialog, "语音"))
+        assert _expect_bar_hidden(bar, blocks, scroll) is False, (
+            f"前提：1000 高时语音域仍然装不下（内容 {_needed_height(scroll)}px / "
+            f"可用 {_available_height(scroll, bar)}px）")
+
+        overhead = dialog.height() - _available_height(scroll, bar)
+        dialog.resize(1000, _needed_height(scroll) + overhead + 120)
+        app.processEvents()
+        assert _needed_height(scroll) <= _available_height(scroll, bar), (
+            f"前提：加高到 {dialog.height()} 之后语音域装得下（内容 "
+            f"{_needed_height(scroll)}px / 可用 {_available_height(scroll, bar)}px）")
+        assert bar.isHidden() is True, "装得下的页面不该摆跳转条"
+
+        dialog.resize(720, 500)
+        app.processEvents()
+        assert _expect_bar_hidden(bar, blocks, scroll) is False
+        assert bar.isHidden() is False, "缩到装不下之后跳转条要回来"
+
+        dialog.resize(1000, _needed_height(scroll) + overhead + 120)
+        app.processEvents()
+        assert bar.isHidden() is True, "放大回去之后跳转条要收掉"
+    finally:
+        dialog.close()
+
+
+#: 临界几何（「跳转条藏掉之后视口才长回来」那一段）用哪个域页量。
+#:
+#: **必须是三平台都有 ``ANCHOR_MIN_BLOCKS`` 个以上「区」的页**：常规域的第 4 个区
+#: 「直播捕获（高级）」整组是 Windows 专属（``settings_pet_controls`` 的平台闸门），
+#: 非 Windows 上常规域只剩 3 个区 ⇒ 那一页的跳转条恒藏，量不到带（三端必红）。
+#: 「自动化与联动」三平台都够：非 Windows 6 个区（``_AUTOMATION_ORDER_WITHOUT_PROACTIVE``）、
+#: Windows 10 个区（``_AUTOMATION_ORDER``），两边都由顶层顺序用例钉着。
+BAND_DOMAIN = "自动化与联动"
+
+
+def _gap_band(tmp_path, monkeypatch, *, domain: str = BAND_DOMAIN, width: int = 1100):
+    """量出「跳转条自己那段高度」构成的双稳态带，返回 ``(带内起点窗口高, 带宽, 内容高)``。
+
+    带 = 隐态视口 ∈ ``[内容高, 内容高 + 跳转条高)`` 的那一段窗口高。这一段里判据的答案
+    是「藏」（藏掉就装得下），但藏掉那一拍视口还没长回来（量到的是 ``隐态视口 − 跳转条高``），
+    ``hidden`` 分支又不补自己那段 ⇒ 判据说装不下 ⇒ 又显示回来。实测 1100 宽、离屏平台下
+    正是 **1342…1369** 这一段（内容高 1264、跳转条自己 28px；非 Windows 腿这一页矮一成，
+    带跟着上移），这一段里旧实现停在显态、页尾多出 1236…1267px 空白。
+
+    两个量都按**实测几何**推，不写死像素：字体/平台一变，写死的尺寸今天落在带内、
+    明天就落在带外，用例会假绿。基准窗高也由实测反推（见下），不写死——不同的域页
+    内容高差着上千像素，写死一个"装得下"的高度只对某一页成立。
+    """
+    tall = _dialog(tmp_path, monkeypatch)
+    try:
+        tall.resize(width, 900)
+        tall.show()
+        _settle(4)
+        page, bar = _select(tall, domain)
+        scroll = page.findChild(QScrollArea, "settingsScroll")
+        # 先把基准窗拉到一个**按实测**装得下的高度：内容高 + 窗口开销（页头/页边距/
+        # 跳转条自己那段）。判据的前提是"装得下时它本来就不摆"，写死 900 只对短页成立。
+        needed = _needed_height(scroll)
+        overhead = tall.height() - scroll.viewport().height()
+        requested = needed + overhead + 60
+        tall.resize(width, requested)
+        _settle(6)
+        if tall.height() < requested:
+            # 真机平台会把顶层窗夹到屏幕高（离屏平台不夹，CI 与套件默认都走离屏）。
+            # 夹住就量不到带 —— 如实跳过，不伪装成产品缺陷。
+            pytest.skip(f"本机窗口拉不到这条带所需的窗口高（请求 {requested}、"
+                        f"实测夹到 {tall.height()}）；离屏平台下可量")
+        assert bar.isHidden() is True, "前提：基准窗里装得下，跳转条本来就不摆"
+        needed = _needed_height(scroll)
+        overhead = tall.height() - scroll.viewport().height()
+    finally:
+        tall.close()
+    short = _dialog(tmp_path, monkeypatch)
+    try:
+        short.resize(width, 520)
+        short.show()
+        _settle(4)
+        _page, bar = _select(short, domain)
+        assert bar.isHidden() is False, "前提：520 高时装不下，跳转条本来就在"
+        slack = bar.height()
+    finally:
+        short.close()
+    assert slack > 0, "跳转条必须真的占掉一段高度，否则量不到这条带"
+    return needed + overhead, slack, needed
+
+
+def _visibility_history(bar, turns: int = 10) -> list[bool]:
+    """连拍若干拍记下显隐（``True`` = 藏着）：用来钉住「两拍之间不许来回翻」。"""
+    marks = []
+    for _ in range(turns):
+        app.processEvents()
+        marks.append(bar.isHidden())
+    return marks
+
+
+def _assert_bar_matches_criterion(dialog, domain: str, *, note: str = "") -> None:
+    """判据在落定几何上必须与跳转条的实际显隐一致（测试自己量，不调被测函数自证）。"""
+    page, bar = _select(dialog, domain)
+    scroll = page.findChild(QScrollArea, "settingsScroll")
+    expected = _expect_bar_hidden(bar, _blocks_of(_content(dialog, domain)), scroll)
+    assert bar.isHidden() is expected, (
+        f"「{domain}」{note}：内容高 {_needed_height(scroll)}px / 可用 "
+        f"{_available_height(scroll, bar)}px，跳转条显隐判反了")
+
+
+def test_anchor_bar_does_not_stick_shown_inside_its_own_gap(tmp_path, monkeypatch):
+    """带内最坏点起、每一档都不许停在显态（跳过自己占的那 28px 再重判就是错的）。
+
+    视口在跳转条藏掉之后要长回自己那一段，但页头那次重排原本要等下一轮事件循环；
+    判据若在这一拍重判，量到的还是矮视口（``hidden`` 分支不补自己那段）⇒ 判据说装不下
+    ⇒ 又显示回来。两个稳态里会停在错的显态：用户看到一条该收起的跳转条，页尾还多出
+    一大块空白（1100 宽、「自动化与联动」实测：带内 1342…1369 停在显态，页尾空白
+    1236…1267px）。
+    """
+    base, slack, needed = _gap_band(tmp_path, monkeypatch)
+    for extra in range(0, slack, 6):
+        dialog = _dialog(tmp_path, monkeypatch)
+        try:
+            dialog.resize(1100, base + extra)
+            dialog.show()
+            _settle(6)
+            page, bar = _select(dialog, BAND_DOMAIN)
+            scroll = page.findChild(QScrollArea, "settingsScroll")
+            assert needed <= scroll.viewport().height() + (0 if bar.isHidden() else bar.height()), (
+                f"前提：1100×{base + extra} 装得下（内容 {needed}px / 可用 "
+                f"{_available_height(scroll, bar)}px）")
+            assert bar.isHidden() is True, (
+                f"1100×{base + extra}：装得下却停在显态（视口还没长回来就重判）")
+            assert _past_end_padding(dialog, BAND_DOMAIN) == 0, (
+                f"1100×{base + extra}：装得下的页面不该留页尾空白")
+            assert _visibility_history(bar) == [True] * 10, "稳定态不许来回翻"
+        finally:
+            dialog.close()
+
+
+def test_anchor_bar_converges_from_both_initial_states_inside_the_gap(tmp_path, monkeypatch):
+    """带内两种初始状态都要落到同一个答案。
+
+    - **新建**：按这个尺寸直接建窗（构造期判据自己走一遍；最坏点，隐态视口 == 内容高）；
+    - **带着显态拉大**：先在小窗口里把跳转条正常摆出来，再 resize 到带内上沿——这是
+      用户的真实路径（拉窗口），状态带着走，必须自己收掉。
+    """
+    base, slack, needed = _gap_band(tmp_path, monkeypatch)
+    for start in ("fresh", "carried"):
+        dialog = _dialog(tmp_path, monkeypatch)
+        try:
+            if start == "carried":
+                dialog.resize(1100, base - 200)
+                dialog.show()
+                _settle(6)
+                _page_widget, bar = _select(dialog, BAND_DOMAIN)
+                scroll = _page_widget.findChild(QScrollArea, "settingsScroll")
+                assert needed > scroll.viewport().height(), "前提：小窗口里装不下"
+                assert bar.isHidden() is False, "前提：小窗口里跳转条本来就摆着"
+                dialog.resize(1100, base + slack - 1)
+            else:
+                dialog.resize(1100, base)
+                dialog.show()
+            _settle(6)
+            _assert_bar_matches_criterion(dialog, BAND_DOMAIN, note=f"{start} 初始态")
+            _page_widget, bar = _select(dialog, BAND_DOMAIN)
+            assert bar.isHidden() is True, f"{start}：带内该收起来"
+            assert _visibility_history(bar) == [True] * 10, f"{start}：稳定态不许来回翻"
+        finally:
+            dialog.close()
+
+
+def test_anchor_bar_holds_across_jump_resize_and_domain_navigation(tmp_path, monkeypatch):
+    """按这个尺寸开窗 → 互动（点 chip 跳转 / 换页内标签）→ resize → 换域，判据一路成立。
+
+    这条链路每一步都会改页高或滚动范围：跳转会展开收起的高级组、换标签换一组区、
+    换域换一整页、resize 改视口。每一步之后都要重新收敛到「装得下就收、装不下才摆」，
+    不许停在上一轮的答案上——带内那一段正是最容易停错的地方。
+    """
+    base, _slack, _needed = _gap_band(tmp_path, monkeypatch)
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(1100, base)
+        dialog.show()
+        _settle(6)
+        # 开窗这一刀就是带内最坏点（视口还没长回来时判据会把自己显示回来）
+        _assert_bar_matches_criterion(dialog, BAND_DOMAIN, note="开窗")
+        # 互动 1：跳到收起的高级组（展开会改页高，滚动范围也跟着变）
+        _page_widget, bar = _select(dialog, "AI 与对话")
+        next(chip for chip in _chips(bar) if chip.text() == "生成参数（高级）").click()
+        _settle(4)
+        _assert_bar_matches_criterion(dialog, "AI 与对话", note="跳转后")
+        # 互动 2：换页内标签（每页一组区，显隐门槛按该标签重算）
+        _page_widget, bar = _select(dialog, "桌宠")
+        tabs = _page(dialog, "桌宠").findChild(SettingsTabContainer, "settingsTaskTabs")
+        for key in tabs.keys():
+            tabs.setCurrentKey(key)
+            _settle(4)
+            _assert_bar_matches_criterion(dialog, "桌宠", note=f"标签 {key}")
+        # resize：缩到装不下再拉回带内（状态带着走）
+        _page_widget, bar = _select(dialog, BAND_DOMAIN)
+        dialog.resize(1100, base - 200)
+        _settle(6)
+        _assert_bar_matches_criterion(dialog, BAND_DOMAIN, note="缩到装不下")
+        dialog.resize(1100, base)
+        _settle(6)
+        _assert_bar_matches_criterion(dialog, BAND_DOMAIN, note="拉回带内")
+        _page_widget, bar = _select(dialog, BAND_DOMAIN)
+        assert bar.isHidden() is True, "拉回带内之后该收起来"
+        assert _past_end_padding(dialog, BAND_DOMAIN) == 0, "装得下的页面不该留页尾空白"
+        # 导航：带内再换域、再换回来，答案不许跟着上一页走
+        for domain in ("互动", BAND_DOMAIN, "语音", BAND_DOMAIN):
+            _assert_bar_matches_criterion(dialog, domain, note="带内换域")
+        _page_widget, bar = _select(dialog, BAND_DOMAIN)
+        assert bar.isHidden() is True
+        assert _visibility_history(bar) == [True] * 10, "稳定态不许来回翻"
+    finally:
+        dialog.close()
+
+
+# ------------------------------------------------------- 页内标签域：整块内容的判据
+#: 页内标签域那条带用哪个标签页量：桌宠／动作与碰撞 6 个区，三平台都够
+#: （同域的 ``display_music`` 只有 3 个区，跳转条恒藏，量不出带；见
+#: ``test_anchor_bar_rebuilds_when_the_in_page_tab_changes``）。
+TAB_BAND_DOMAIN = "桌宠"
+TAB_BAND_KEY = "motion_collision"
+#: 带内用来验「一次点击顶对齐」的普通分区（不用先展开，位置又在页尾附近）。
+TAB_BAND_TARGET = "多开碰撞"
+
+
+def _tabs_of(dialog, domain: str) -> SettingsTabContainer:
+    """域页的页内标签容器（不是标签域就断言失败——本用法只在标签域上）。"""
+    scroll = _page(dialog, domain).findChild(QScrollArea, "settingsScroll")
+    tabs = settings_page_guide.tab_container(scroll.widget())
+    assert tabs is not None, f"「{domain}」应当是页内标签域"
+    return tabs
+
+
+def _tab_band(tmp_path, monkeypatch, *, width: int = 1100) -> tuple[int, int, int]:
+    """页内标签页那条「漏掉标签那一层」的带起点：``(起始窗口高, 标签页高, 层高)``。
+
+    带 = 隐态视口 ∈ ``[标签页高, 标签页高 + 层高)``：这一段里只量标签页的判据答「装得下」
+    而整块滚动内容（标签页 + 标签栏那一层）其实要滚。窗口高按**实测几何**推：
+    ``起始窗高 = 标签页高 + 隐态窗口开销``（开销要在跳转条不在的那一态量才是常数）。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(width, 900)
+        dialog.show()
+        _settle(4)
+        page, bar = _select(dialog, TAB_BAND_DOMAIN)
+        _tabs_of(dialog, TAB_BAND_DOMAIN).setCurrentKey(TAB_BAND_KEY)
+        _settle(4)
+        scroll = page.findChild(QScrollArea, "settingsScroll")
+        layer = _tab_layer_height(scroll)
+        page_height = _needed_height(scroll) - layer
+        # 先按实测把窗口拉到真的装得下（跳转条收起来），再在那一态量窗口开销。
+        requested = page_height + layer + (dialog.height() - scroll.viewport().height()) + 240
+        dialog.resize(width, requested)
+        _settle(6)
+        if dialog.height() < requested:
+            # 真机平台会把顶层窗夹到屏幕高（离屏平台不夹）：夹住就量不到带。
+            pytest.skip(f"本机窗口拉不到这条带所需的窗口高（请求 {requested}、"
+                        f"实测夹到 {dialog.height()}）；离屏平台下可量")
+        assert bar.isHidden() is True, "前提：基准窗里整块内容装得下，跳转条本来就不摆"
+        overhead = dialog.height() - scroll.viewport().height()
+    finally:
+        dialog.close()
+    assert layer > 0, "页内标签域必须有标签那一层，否则量不到这条带"
+    return page_height + overhead, page_height, layer
+
+
+def test_tab_page_bar_counts_the_tab_layer_not_just_the_page(tmp_path, monkeypatch):
+    """页内标签域：「装得下吗」按**整块滚动内容**答（标签页 + 标签栏那一层）。
+
+    只量当前标签页会漏掉标签容器上面那层「标签栏 + 间距」，于是 ``标签页高 <= 视口 <
+    整块内容高`` 这一小段答成"装得下"：跳转条收起来，而用户明明要滚才看得完（实测 1100 宽、
+    桌宠／动作与碰撞：标签页 1144、层高 52、整块 1196，窗口高 1222…1278）。
+
+    两种到达方向（从装得下的大窗缩进来 / 从装不下的小窗拉进来）都要落在"摆着"，
+    换标签再换回来也不许把答案带走。
+    """
+    start, page_height, layer = _tab_band(tmp_path, monkeypatch)
+    for how in ("down", "up"):
+        dialog = _dialog(tmp_path, monkeypatch)
+        try:
+            tall = how == "down"
+            dialog.resize(1100, start + (layer + 240 if tall else -240))
+            dialog.show()
+            _settle(6)
+            page, bar = _select(dialog, TAB_BAND_DOMAIN)
+            tabs = _tabs_of(dialog, TAB_BAND_DOMAIN)
+            tabs.setCurrentKey(TAB_BAND_KEY)
+            _settle(4)
+            scroll = page.findChild(QScrollArea, "settingsScroll")
+            assert bar.isHidden() is tall, (
+                f"前提：{'大窗里整块内容装得下' if tall else '小窗里整块内容装不下'}，"
+                f"跳转条该{'收起来' if tall else '摆着'}")
+
+            dialog.resize(1100, start)
+            _settle(6)
+            assert _needed_height(scroll) > _available_height(scroll, bar), (
+                f"前提：到达带内后整块内容仍超过视口（整块 {_needed_height(scroll)}px / 可用 "
+                f"{_available_height(scroll, bar)}px：标签页 {page_height}px + 层 {layer}px）")
+            assert bar.isHidden() is False, (
+                f"{how}：整块内容要滚，跳转条不该收起来（只量标签页会漏掉那 {layer}px）")
+            assert _visibility_history(bar) == [False] * 10, "稳定态不许来回翻"
+
+            # 换标签：门槛按该标签重算，答案不许跟着上一个标签走。
+            tabs.setCurrentKey("display_music")
+            _settle(4)
+            assert bar.isHidden() is True, "只有 3 个区的标签页不摆跳转条"
+            tabs.setCurrentKey(TAB_BAND_KEY)
+            _settle(4)
+            assert bar.isHidden() is False, "换回 6 个区的标签页要回来"
+        finally:
+            dialog.close()
+
+
+def test_tab_page_last_group_can_be_top_aligned_inside_that_band(tmp_path, monkeypatch):
+    """带内点页尾那几组的 chip 也要一次顶对齐：页尾留白同样按整块内容答「装不装得下」。
+
+    只量标签页时留白在这一段是 0，滚动范围只剩几十像素：跳转条摆着、点下去却顶不到
+    y=8（实测 1100 宽、桌宠／动作与碰撞、窗口高 1264：点「多开碰撞」只滚到 52，目标 979）。
+    """
+    start, _page_height, layer = _tab_band(tmp_path, monkeypatch)
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        dialog.resize(1100, start)
+        dialog.show()
+        _settle(6)
+        page, bar = _select(dialog, TAB_BAND_DOMAIN)
+        target = _section(dialog, TAB_BAND_DOMAIN, TAB_BAND_TARGET, TAB_BAND_KEY)
+        _settle(4)
+        scroll = page.findChild(QScrollArea, "settingsScroll")
+        assert bar.isHidden() is False, "前提：带内跳转条摆着"
+        assert _past_end_padding(dialog, TAB_BAND_DOMAIN, TAB_BAND_KEY) > 0, (
+            f"整块内容要滚，页尾留白不该是 0（标签页之外还有 {layer}px 的标签那一层）")
+        assert target.card.isHidden() is False, "前提：目标是不用先展开的普通分区"
+
+        want = target.mapTo(scroll.widget(), QPoint(0, 0)).y() - 8
+        next(chip for chip in _chips(bar) if chip.text() == TAB_BAND_TARGET).click()
+        _settle(4)
+        landed = scroll.verticalScrollBar().value()
+        assert landed == want, (
+            f"点「{TAB_BAND_TARGET}」后滚到 {landed}（目标 {want}）：滚动范围仍不够"
+            f"（maximum={scroll.verticalScrollBar().maximum()}）")
+        assert target.mapTo(scroll.viewport(), QPoint(0, 0)).y() == 8
     finally:
         dialog.close()
 
@@ -729,17 +1214,21 @@ def test_anchor_bar_and_descriptions_fit_the_compact_window(tmp_path, monkeypatc
 def _titles_absent_on_this_platform(dialog) -> set[str]:
     """本平台**不可能出现**的组标题（``SECTION_GUIDE`` 里的这些键不算过期）。
 
-    两处平台闸门，都由实际构造结果回答：
+    三处平台闸门，都由实际构造结果回答：
 
     - 主动识屏整页只在 Windows 构造 ⇒ 它的四组在本平台不存在；
     - 播放器高级组在「标题格式」行不存在时退化成不提标题格式的组名
-      （``settings_music.advanced_group_title``），另一个组名才是本平台的。
+      （``settings_music.advanced_group_title``），另一个组名才是本平台的；
+    - 「直播捕获（高级）」装的「直播捕获兼容」只在 Windows 建（可枚举的窗口是
+      Windows 专属），整组在本平台不存在。
     """
     absent = set()
     if not _has_proactive(dialog):
         absent |= _PROACTIVE_TITLES
     player_titles = {settings_music.PLAYER_GROUP_TITLE, settings_music.PLAYER_GROUP_TITLE_NO_FOOBAR}
     absent |= player_titles - {settings_music.advanced_group_title(dialog)}
+    if sys.platform != "win32":
+        absent.add("直播捕获（高级）")
     return absent
 
 

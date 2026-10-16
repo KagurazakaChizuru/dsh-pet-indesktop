@@ -3504,6 +3504,23 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
         if callable(self.on_look_synced):
             self.on_look_synced(user_text, text)
 
+    # ---- 截图（快速识屏 P0 切片 3：三个产品入口的窗口侧接线）------------------
+    def _screen_capture(self):
+        """三个截图动作的编排件（**本窗长期持有**）。
+
+        为什么挂在窗口上而不是每次右键现造：一次采集会话横跨菜单关闭（菜单触发
+        后立刻收起，覆盖层还在框选），编排件必须活得比菜单久。编排与依赖解析全在
+        ``pet/screen_capture/actions.py``（宿主面 duck-typed），这里只挂三个回调。
+        """
+        from .screen_capture.actions import actions_for
+
+        return actions_for(self)
+
+    @property
+    def on_screen_capture(self):
+        """「截图 → 框选识屏」：采集 → 覆盖层动作条选动作（提取/翻译/问答/复制）。"""
+        return lambda: self._screen_capture().run()
+
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         if self._context_menu_suppressed:
             self._context_menu_suppressed = False

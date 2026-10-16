@@ -394,11 +394,17 @@ def test_main_entry_delegates_uninstall_cleanup_without_qt_or_desktop_main(tmp_p
 
 
 def test_main_entry_dispatches_before_importing_app():
-    """静态顺序：分流必须早于 ``from .app import main``（漏了就变成普通桌宠启动）。"""
+    """静态顺序：分流必须早于 ``from .app import main``（漏了就变成普通桌宠启动）。
+
+    锚在**真正那一行代码**上（行首缩进的 ``from .app import main as app_main``），
+    不是"文件里任何地方出现过这串字"：上面几个 ``_run_*`` 的 docstring 里也会提到
+    这个导入（2026-10-14 切片 5 的 ``_run_ocr_worker`` 就是这么写红的），照字符串
+    取位置的话，一句注释就能让这条顺序断言失效。
+    """
     source = (ROOT / "pet" / "__main__.py").read_text(encoding="utf-8")
 
     dispatch_at = source.index('"--uninstall-cleanup" in sys.argv')
-    app_import_at = source.index("from .app import main")
+    app_import_at = source.index("\n    from .app import main as app_main")
     assert dispatch_at < app_import_at
     assert "from .uninstall_cleanup import main as uninstall_cleanup_main" in source
 

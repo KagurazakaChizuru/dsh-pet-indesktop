@@ -865,6 +865,10 @@ def test_overlay_fullscreen_exit_settles_after_overlay_is_shown(qapp):
     shell = type("Shell", (), {
         "_auto_hidden": False,
         "overlay": overlay,
+        # 整组显隐走宿主循环（多屏）：本桩只有这一张窗，三个入口都落到它上面
+        "_any_host_visible": lambda self: overlay.isVisible(),
+        "_show_all_hosts": lambda self: overlay.show(),
+        "_hide_all_hosts": lambda self: overlay.hide(),
         "_hide_bubble_for_visibility": lambda self: None,
         "_set_all_clips_paused": lambda self, on: None,
         "_pause_shared_subsystems": lambda self: None,
@@ -1069,7 +1073,9 @@ def test_quiet_controls_are_editable_on_the_child_page(qapp, tmp_path):
             child.quiet_minutes_select.findData(120))
         child.quiet_also_on_fullscreen_check.setChecked(True)
         assert child._write_config() is True
-        on_disk = json.loads(master.config.path.read_text(encoding="utf-8"))
+        # #271：空身份会话的配置面指向 config-slot-0.json（SlotRoutedConfig 的 path），
+        # 免打扰两键是全局键、落主配置——读盘要用主配置路径。
+        on_disk = json.loads(master.config._main.path.read_text(encoding="utf-8"))
         assert on_disk["quiet_minutes_default"] == 120, "子宠页改的键必须真正生效"
         assert on_disk["quiet_also_on_fullscreen"] is True
     finally:

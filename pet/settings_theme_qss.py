@@ -23,7 +23,16 @@ QPushButton#saveAndExit { color: #e4e4e9; }
 QPushButton#saveAndExit:hover { background: #33333c; }
 QListWidget#settingsSidebar::item { color: #b8b8c0; }
 QListWidget#settingsSidebar::item:hover { background: #2e2e36; color: #f0f0f5; }
-QListWidget#settingsSidebar::item:selected { background: #3a3a46; color: #ffffff; }
+/* 选中指示：3px 强调色左条（蓝色保留给选中，见视觉规范；色值由
+   SETTINGS_SELECTION_ACCENT 现算，浅色档为对比度压深过一档）。左侧内边距同步减 3px，
+   文字位置与未选中行逐像素一致，选中时不会左右跳。声明顺序在 :hover 之后——悬停
+   已选中行时仍按选中态画（同特异性下后者覆盖）。 */
+QListWidget#settingsSidebar::item:selected {
+    background: #3a3a46;
+    color: #ffffff;
+    border-left: 3px solid @selection-accent@;
+    padding-left: 7px;
+}
 QWidget#settingsTaskTabBar {
     background: #292930;
     border: none;
@@ -124,6 +133,39 @@ QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: #55555e
 QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover { background: #6a6a74; }
 """
 
+#: 设置窗**选中态**的强调色（选中图标 ink 与侧栏那条 3px 左条共用这一个真值，深浅各一档）。
+#:
+#: 为什么浅色档不用规范色：``#0a84ff`` 落在浅色选中行底 ``#e3e5e8`` 上只有 **2.89:1**，
+#: 达不到 WCAG 1.4.11 对图形对象要求的 3:1（同一底色上的 3px 左条同理）；压深到
+#: ``#0a7ae8`` 后是 3.35:1。深色档 ``#0a84ff`` 落在 ``#3a3a46`` 上是 3.07:1，已达标，
+#: 维持规范色不动。两档都只作用于**设置窗自己的选中态**：菜单与聊天窗拿不到 Selected
+#: 图元（见 ``context_menus.icons._settings_icon_states``），焦点环仍用规范色
+#: ``#0a84ff``（它落在白底/侧栏底色上，本来就 ≥3.6:1）。
+SETTINGS_SELECTION_ACCENT: dict[bool, str] = {False: "#0a7ae8", True: "#0a84ff"}
+
+
+def settings_selection_accent(dark: bool) -> str:
+    """设置窗选中态（图标 ink / 侧栏 3px 左条）的强调色，与 QSS 同源。"""
+    return SETTINGS_SELECTION_ACCENT[bool(dark)]
+
+
+def settings_system_dark() -> bool:
+    """设置窗「跟随系统」档的深浅判定。
+
+    设置窗 QSS（``_settings_stylesheet``）与设置窗内的矢量图标共用这一个真值：图标在
+    ``ModernSettingsDialog`` 应用主题**之前**就要渲染，那时窗口上还没有 ``settingsDark``，
+    只能按本档兜底；两处若各判一次，"跟随系统"下迟早会 QSS/图标不一致。
+    """
+    return _system_dark()
+
+
+#: 选中左条强调色在 QSS 字面量里的占位记号：组装时按档替换成 ``SETTINGS_SELECTION_ACCENT``
+#: （图标 ink 用的也是这一个真值，两处不可能各说各话）。用 ``str.replace`` 而不是 ``str.format``
+#: ——整份 QSS 满是 ``{}``。深浅两档各只有一条 ``::item:selected`` 规则，替换的是**完整规则**
+#: 里的一个声明：不新增规则、不改规则顺序。
+_SELECTION_BAR_TOKEN = "@selection-accent@"
+
+
 def _settings_stylesheet(theme: str = "system") -> str:
     """浅色基础 QSS + 显式控件文字色补丁；深色系统时追加深色覆盖段。"""
     light_patch = """
@@ -133,9 +175,12 @@ def _settings_stylesheet(theme: str = "system") -> str:
     """
     base = _LIGHT_SETTINGS_STYLESHEET + light_patch
     dark = theme == "dark" or (theme == "system" and _system_dark())
+    accent = settings_selection_accent(dark)
     if not dark:
-        return base + BROWSER_CONTROL_STYLESHEET
-    return base + _DARK_OVERRIDE + BROWSER_CONTROL_STYLESHEET + _DARK_BROWSER_OVERRIDE
+        return (base + BROWSER_CONTROL_STYLESHEET).replace(_SELECTION_BAR_TOKEN, accent)
+    return (base + _DARK_OVERRIDE + BROWSER_CONTROL_STYLESHEET
+            + _DARK_BROWSER_OVERRIDE).replace(_SELECTION_BAR_TOKEN, accent)
+
 
 _LIGHT_SETTINGS_STYLESHEET = """
 QDialog {
@@ -196,7 +241,9 @@ QListWidget#settingsSidebar::item {
     color: #4e4e4e;
 }
 QListWidget#settingsSidebar::item:hover {
-    background: #eceef1;
+    /* 悬停只是提示：贴向侧栏底色（#f7f7f8），不再和「已选中」(#e3e5e8) 抢同一档灰度。
+       原先 #eceef1 与选中态只差 9/255，悬停行看起来就像被选中的那一行。 */
+    background: #f1f2f4;
     color: #202020;
 }
 QWidget#settingsTaskTabBar {
@@ -235,6 +282,12 @@ QPushButton#settingsPageAnchor:focus { border-color: #0a84ff; }
 QListWidget#settingsSidebar::item:selected {
     background: #e3e5e8;
     color: #171717;
+    /* 选中指示：3px 强调色左条（蓝色保留给选中，见视觉规范；色值由
+       SETTINGS_SELECTION_ACCENT 现算，浅色档为对比度压深过一档）。左侧内边距同步减 3px，
+       文字位置与未选中行逐像素一致，选中时不会左右跳。声明顺序在 :hover 之后——悬停
+       已选中行时仍按选中态画（同特异性下后者覆盖）。 */
+    border-left: 3px solid @selection-accent@;
+    padding-left: 7px;
 }
 QLabel#pageTitle {
     font-size: 22px;

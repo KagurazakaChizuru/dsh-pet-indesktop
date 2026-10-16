@@ -17,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QObject, QPointF, QRect, QRectF, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 import pet.app as app_mod
@@ -243,15 +244,17 @@ def test_shell_library_character_fallback():
 
 # ---------------------------------------------------------------- tick 装配与顺序协议（M-2）
 def test_shell_assembles_process_level_tick_driver():
-    """M-2/T2：驱动器独立持有三控制器，overlay 只被驱动（不再挂 tick 钩子）。"""
+    """M-2/T2：驱动器独立持有时钟，仿真段按**屏宿主**分组（多屏），overlay 只被驱动。"""
     shell, _, _ = _make_shell()
     driver = shell.driver
+    host = shell._main_host
     assert driver is not None
     assert shell.overlay.tick_driver is driver          # 同一驱动器驱动本 overlay
     assert driver.overlays == [shell.overlay]
-    assert driver.behavior is shell.behavior
-    assert driver.collision is shell.collision
-    assert driver.physics is shell.physics
+    assert driver.hosts == [host]                       # 宿主即仿真分组的单位
+    assert host.behavior is shell.behavior
+    assert host.collision is shell.collision
+    assert host.physics is shell.physics
     # 产品 overlay 不再覆写兼容钩子（仿真段唯一入口 = 驱动器 tick_sim）
     assert "before_sprites_advance" not in type(shell.overlay).__dict__
 
@@ -267,9 +270,11 @@ def test_tick_order_behavior_collision_physics():
         def tick(self, sprites, dt):
             calls.append((self.name, list(sprites), dt))
 
-    # M-2 后控制器由驱动器持有：替换点从 shell 属性面移到驱动器装配点
-    shell.driver.set_controllers(Recorder("behavior"), Recorder("collision"),
-                                 Recorder("physics"))
+    # M-2 后控制器归宿主（多屏逐屏一份）：替换点从 shell 属性面移到宿主装配点
+    host = shell._main_host
+    host.behavior = Recorder("behavior")
+    host.collision = Recorder("collision")
+    host.physics = Recorder("physics")
     shell.overlay._on_tick(dt=0.016)  # 同步直调，不跑真 QTimer
 
     assert [c[0] for c in calls] == ["behavior", "collision", "physics"]
@@ -287,7 +292,8 @@ def test_start_stop_idempotent():
         def tick(self, sprites, dt):
             calls.append(1)
 
-    shell.behavior = shell.collision = shell.physics = Nop()
+    host = shell._main_host
+    host.behavior = host.collision = host.physics = Nop()
 
     assert not shell.overlay._timer.isActive()
     shell.start()
@@ -437,7 +443,9 @@ def test_screen_removed_rebuilds_overlay_on_primary():
     shell, _, _ = _make_shell(screen=fake)
     sprite = shell.sprite
     old_overlay = shell.overlay
-    primary = app.primaryScreen()
+    # 与产品同一取数源（壳按 QGuiApplication 类级 API 枚举屏；实例属性可被
+    # 别的用例的 monkeypatch 留下影子）
+    primary = QGuiApplication.primaryScreen()
 
     # 拖拽中拔屏：先收尾拖拽再迁移（v1.1 §10）
     sprite.dragging = True
@@ -635,15 +643,17 @@ def test_legacy_topology_also_builds_shared_subsystems(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- 边缘探头壳层接线
 def test_shell_wires_edge_probe_world():
-    """edge_probe 接线：世界挂 driver extras（tick 尾段）+ overlay 事件钩子 +
+    """edge_probe 接线：世界挂**本屏宿主**的 extras（tick 尾段）+ overlay 事件钩子 +
     碰撞真撞击监听 + sprite 移除注销 + 几何变化 bounds 同步。"""
     shell, screen, _ = _make_shell()
+    host = shell._main_host
     probe = shell._probe
     assert probe is not None
-    assert probe in shell.driver._extras
+    assert probe in host.extras
     assert shell.overlay.edge_probe is probe
-    # 碰撞监听已挂（真撞击链里有 probe 处理器）
-    assert shell._on_collision_probe in shell.collision._listeners
+    # 碰撞监听已挂（真撞击链里有 probe 处理器；经宿主世界分派）
+    assert any(cb.__name__ == "_on_collision_probe"
+               for cb in host.collision._listeners)
     # 几何变化 → probe bounds 同步
     from PySide6.QtCore import QRect
     new_bounds = QRect(0, 0, 1280, 720)
@@ -654,14 +664,15 @@ def test_shell_wires_edge_probe_world():
 
 
 def test_shell_wires_throw_egg_world():
-    """throw_egg 接线：世界挂 driver extras（probe 之后）+ 碰撞真撞击 arm 链 +
+    """throw_egg 接线：世界挂**本屏宿主**的 extras（probe 之后）+ 碰撞真撞击 arm 链 +
     sprite 移除注销 + bounds 同步。"""
     shell, screen, _ = _make_shell()
+    host = shell._main_host
     egg = shell._throw_egg
     assert egg is not None
-    assert egg in shell.driver._extras
+    assert egg in host.extras
     # extras 顺序：probe 先（cancel 会话）、egg 后（读物理结算速度）
-    assert shell.driver._extras.index(shell._probe) < shell.driver._extras.index(egg)
+    assert host.extras.index(shell._probe) < host.extras.index(egg)
     assert egg.forget in shell.overlay._sprite_removed_listeners
     from PySide6.QtCore import QRect
     new_bounds = QRect(0, 0, 1280, 720)

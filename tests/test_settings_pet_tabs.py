@@ -40,7 +40,10 @@ TAB1_ROWS = (
     "scale", "bubble_text_scale", "pet_opacity",
     "music_sing", "music_lyric", "music_lyric_lead",
 )
-TAB1_ADVANCED_ROWS = ("music_player_netease", "music_player_qqmusic", "music_player_detect")
+TAB1_ADVANCED_ROWS = (
+    "music_player_netease", "music_player_qqmusic", "music_player_kugou",
+    "music_player_soda", "music_player_detect",
+)
 TAB2_ROWS = (
     "playback_speed", "animation_gap", "idle_low_fps", "no_move",
     "drag_physics", "drop_gravity", "throw_strength", "slingshot_enabled",

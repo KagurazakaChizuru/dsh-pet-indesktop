@@ -43,6 +43,7 @@ from .config import (
 )
 from .context_menus.icons import (
     CUSTOM_ICON_SUFFIXES,
+    THEMED_ICON_REQUEST,
     vector_widget_icon,
 )
 from .context_menus.quick_launch import fitted_application_icon
@@ -422,7 +423,7 @@ class ImagePreviewDrawer(QFrame):
         self.close_button = QPushButton(self)
         self.close_button.setObjectName("imagePreviewClose")
         self.close_button.setFixedSize(28, 28)
-        self.close_button.setIcon(vector_widget_icon(self, "exit", 14))
+        self.close_button.setIcon(vector_widget_icon(self.close_button, "exit", 14))
         self.close_button.setAccessibleName("关闭图片预览")
         self.close_button.clicked.connect(self.hide)
         header = QHBoxLayout()
@@ -542,7 +543,7 @@ class ResourcePathPicker(QWidget):
             QPushButton("预览", self) if self.directory and image_preview else None
         )
         if self.preview_button is not None:
-            self.preview_button.setIcon(vector_widget_icon(self, "screen", 14))
+            self.preview_button.setIcon(vector_widget_icon(self.preview_button, "screen", 14))
             self.preview_button.clicked.connect(self._open_preview)
             path_row.addWidget(self.preview_button)
         path_row.addWidget(self.button)
@@ -954,6 +955,24 @@ class SettingRow(QFrame):
         self.modified_mark = QLabel("· 已修改", self)
         self.modified_mark.setObjectName("settingHint")
         self.modified_mark.hide()
+        # 作用域标注（「影响所有桌宠」这类）：从灰说明的末尾拆出来，**挂在标签这一行的右边**。
+        # 它与说明那句是两回事——说明讲"这一项做什么"，标注讲"改了谁受影响"，粘在一句话的
+        # 末尾读起来像说明的一部分（见 ``set_scope_note``）。为什么在同一行而不是独占一行：
+        # 它只值几个字，独占一行会让每一行的行高多出一整行——常规域带标注的那一行，800 宽下
+        # 页面就从"装得下"变成"要滚"，页头重新长出跳转条（短页不摆的判据被自己顶翻了）。
+        # **不换行（``setWordWrap(False)``）是必须的**，不是省事：同一行里有两个可换行标签时
+        # Qt 的 ``QLayout.heightForWidth`` 会退化成按当前几何求和（实测标签行量出 96px，而
+        # 标签自己只要 13px）——页内标签容器取各页的最大值，那份虚高会算进"内容超不超视口"，
+        # 于是从未显示过的隐藏标签页也能把整域的页高抬起来（实测 +103px）。只留标签一个
+        # 可换行项后判据回到标签自己。样式复用 settingHint 的小字，不新增 QSS 面；
+        # 前面那枚间隔点只是为了不让「随桌宠启动 dsh 服务」和整句「此设置影响所有桌宠。」连成一串。
+        self.scope_note = QLabel("", self)
+        self.scope_note.setObjectName("settingHint")
+        self.scope_note.setWordWrap(False)
+        self.scope_note.hide()
+        self.scope_separator = QLabel("·", self)
+        self.scope_separator.setObjectName("settingHint")
+        self.scope_separator.hide()
         self.default_reset_button = QPushButton("改回默认", self)
         self.default_reset_button.setObjectName("settingDefaultReset")
         self.default_reset_button.setAutoDefault(False)
@@ -965,6 +984,13 @@ class SettingRow(QFrame):
         # 一页里有几十个同名按钮，读屏必须能说清是改哪一项（Tab 到才听得懂）
         self.default_reset_button.setAccessibleName(f"把「{title}」改回默认值")
         self.default_reset_button.hide()
+        title_line = QHBoxLayout()
+        title_line.setContentsMargins(0, 0, 0, 0)
+        title_line.setSpacing(6)
+        title_line.addWidget(label)
+        title_line.addWidget(self.scope_separator)
+        title_line.addWidget(self.scope_note)
+        title_line.addStretch(1)
         mark_line = QHBoxLayout()
         mark_line.setContentsMargins(0, 0, 0, 0)
         mark_line.setSpacing(8)
@@ -975,7 +1001,7 @@ class SettingRow(QFrame):
             row = QVBoxLayout(self)
             row.setContentsMargins(16, 10, 16, 10)
             row.setSpacing(0)
-            row.addWidget(label)
+            row.addLayout(title_line)
             row.addWidget(hint_label)
             row.addLayout(mark_line)
             row.addSpacing(7)
@@ -989,7 +1015,7 @@ class SettingRow(QFrame):
             copy = QVBoxLayout()
             copy.setContentsMargins(0, 0, 0, 0)
             copy.setSpacing(2)
-            copy.addWidget(label)
+            copy.addLayout(title_line)
             copy.addWidget(hint_label)
             copy.addLayout(mark_line)
             copy.addStretch(1)
@@ -1000,6 +1026,44 @@ class SettingRow(QFrame):
         self.label = label
         self.hint_label = hint_label
         self.control = control
+
+    def set_scope_note(self, note: str) -> None:
+        """给本行挂上/摘掉作用域标注（「（影响所有桌宠）」这类）。
+
+        **为什么要从灰说明里拆出来**：这句原本拼在说明的末尾
+        （「登录系统后自动启动桌宠。（影响所有桌宠）」），读起来仍像在讲"这一项做什么"，
+        而它讲的是**改了谁受影响**——两件事该分开。拆法：
+
+        - 说明里**已经带着这句**时（文案表里逐字写着，如 ``STREAM_CAPTURE_RESTART_HINT``、
+          ``HARNESS_TARGET_HINT_*``）：从说明末尾削掉，挪到标注里。文案表因此仍是唯一
+          来源，不必在别处再抄一份。
+        - 说明里没有这句时（overlay 窗口级键是运行期按拓扑补的）：只挂标注。
+
+        **呈现位置是标签那一行的右边**（构造期就摆好，这里只切显隐；标注本身不换行，
+        理由见构造期那段注释）：独占一行会让每个带标注的行多占一整行——常规域 800 宽下
+        页面因此从"装得下"变"要滚"，页头重新长出跳转条。
+
+        **可访问性与搜索不许丢**：``accessibleDescription`` 保持"说明 + 标注"的全文
+        （它在构造期就从 hint 取过一次，删说明末尾时不能跟着丢），搜索索引读的也是
+        这一份（见 ``settings_search._row_text``）。``accessibleName`` 不动。
+
+        ``note`` 传空串等于摘掉标注（说明不动，摘不到原文就不还原——调用方只在
+        "本行本来就没有这句"时才该传空）。
+        """
+        note = str(note or "")
+        text = self.hint_label.text()
+        if note and text.rstrip().endswith(note):
+            self.hint_label.setText(text.rstrip()[: -len(note)].rstrip())
+        self.scope_note.setText(note)
+        self.scope_note.setVisible(bool(note))
+        self.scope_separator.setVisible(bool(note))
+        control = self.control
+        if control is None:
+            return
+        description = control.accessibleDescription()
+        if not note or note in description:
+            return
+        control.setAccessibleDescription(f"{description}{note}" if description else note)
 
     def set_default_state(self, default_text: str | None, *, can_reset: bool) -> None:
         """切换本行的「已修改」呈现；``default_text=None`` 表示当前值就是默认值。
@@ -1192,7 +1256,7 @@ class ResponsiveToggleActionRow(QWidget):
         self.updateGeometry()
 
 class SettingsCard(QFrame):
-    def __init__(self, rows: list[SettingRow], parent=None):
+    def __init__(self, rows: list[QWidget], parent=None):
         super().__init__(parent)
         self.setObjectName("settingsCard")
         self.rows = list(rows)
@@ -1256,7 +1320,7 @@ def _section_description_label(text: str, parent: QWidget) -> QLabel:
 
 
 class SettingsSection(QWidget):
-    def __init__(self, title: str, rows: list[SettingRow], parent=None, *, advanced: bool = False,
+    def __init__(self, title: str, rows: list[QWidget], parent=None, *, advanced: bool = False,
                  description: str = ""):
         super().__init__(parent)
         self.advanced = advanced
@@ -1487,12 +1551,237 @@ class _SettingsPageShell(QWidget):
         super().__init__(parent)
         self.content_max_width = int(content_max_width)
         self.heading_host: QWidget | None = None
+        self._scroll: QScrollArea | None = None
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        if self.heading_host is not None:
-            available = max(0, self.width() - 30 - 28)
-            self.heading_host.setFixedWidth(min(self.content_max_width, available))
+        if self._scroll is None:
+            self._scroll = self.findChild(QScrollArea, "settingsScroll")
+            if self._scroll is not None:
+                # 视口尺寸才是"内容能有多宽"的真值，而页刚装好时视口还没落定——只在
+                # 自己的 resizeEvent 里算会量到一个未布局的视口（实测页头塌成 34px）。
+                # 盯视口的 Resize：那一刻量到的就是内容当前能用的宽。
+                self._scroll.viewport().installEventFilter(self)
+        self._sync_heading_width()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
+        if (event.type() == QEvent.Type.Resize and self._scroll is not None
+                and watched is self._scroll.viewport()):
+            self._sync_heading_width()
+        return super().eventFilter(watched, event)
+
+    def _sync_heading_width(self) -> None:
+        """页头宽 = min(内容宽上限, 滚动视口宽)。
+
+        取**视口**宽（不是"页宽 − 页边距"）：竖滚动条占掉的那一条不在视口里，内容也就在
+        那以外的宽度里居中；页头若按页宽算，在有滚动条的页上会比内容宽出一条。宽度只是
+        上限（内容封顶见 CONTENT_READING_MAX_WIDTH），页头跟着同一个数走才是一条契约。
+        """
+        if self.heading_host is None:
+            return
+        viewport = self._scroll.viewport().width() if self._scroll is not None else 0
+        available = viewport if viewport > 0 else max(0, self.width() - 30 - 28)
+        self.heading_host.setFixedWidth(min(self.content_max_width, available))
+
+
+#: 表单内容的最大阅读宽度（页头标题与滚动内容共用这一个宽度契约）。
+#:
+#: **只管宽窗**：默认窗口 800×560 下内容宽只有 542px（用不到它），窄窗更用不到
+#: （``maximumWidth`` 只封顶、不撑宽，所以窄窗不会被它裁）。它约束的是超宽窗口——
+#: 表单是一列"标签 + 右侧控件"，拉到上千像素后一行里的标签与控件隔着一整屏，眼睛
+#: 读一行要横跨过去，控件也不再看得出属于哪一行。
+#:
+#: 取值实测过：把内容宽从 960 一路收到 700，「被迫改成竖排」的行数在十个域里**一个
+#: 都没变**（``.scratch/settings-polish2/probe_width.py``）——800 只是让行变短，不会
+#: 代价是换布局。例外是「菜单」域：布局编辑器要"编辑区 + 预览"两栏并排，自己在内容
+#: 上声明 ``contentMaxWidth=1240``（本常量只做默认值）。
+CONTENT_READING_MAX_WIDTH = 800
+
+#: 侧栏宽度令牌（见 references/visual-system.md 的 Layout 表）：默认字体下的固定宽度。
+#: 放大字体下按**内容**加宽（见 :class:`SettingsSidebarPane`），不缩字号、不裁文案。
+SIDEBAR_MIN_WIDTH = 200
+
+#: 侧栏导航图标与行高：图标按当前主题渲染一次、切主题时重画（见 :func:`refresh_settings_icons`）。
+SIDEBAR_ICON_SIZE = 16
+SIDEBAR_ROW_HEIGHT = 34
+
+#: 项里的矢量图标请求：``(名字, 尺寸)``。侧栏导航行与快捷启动行都存这一格——列表项不是
+#: 控件，没法走 ``themedIconRequest`` 动态属性，只能记在数据角色上。取 ``UserRole`` 之后的
+#: 第一格：侧栏项此前不存任何数据，快捷启动项用 ``UserRole`` 存应用字典，都不碰这里。
+THEMED_ICON_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+def settings_sidebar_item(host, label: str, icon_name: str) -> QListWidgetItem:
+    """建一个侧栏导航项：图标按 ``host`` 当前的主题渲染，并把请求记在项上。
+
+    记账是**为换主题准备的**：图标是画出来的位图，``ModernSettingsDialog`` 换主题只换
+    QSS，位图不会自己变色。``refresh_settings_icons`` 按这一格重画，所以侧栏行不需要
+    各自接线，新增一行也不会漏（见 ``context_menus.icons.THEMED_ICON_REQUEST``）。
+    """
+    item = QListWidgetItem(vector_widget_icon(host, icon_name, SIDEBAR_ICON_SIZE), label)
+    item.setData(THEMED_ICON_ROLE, (str(icon_name), SIDEBAR_ICON_SIZE))
+    item.setSizeHint(QSize(0, SIDEBAR_ROW_HEIGHT))
+    return item
+
+
+#: 「保存并退出」的保存时机说明（按钮 tooltip）。写的是**真的会发生的事**：
+#: 直接关窗（X / Esc）走的是同一条保存闸门；两个音效开关改一下立刻写盘；写入失败时
+#: 对话框会问「继续编辑 / 放弃未保存的改动并关闭」。
+#:
+#: 为什么是 tooltip 而不是「未保存」标记：表单控件自己持有草稿，全仓库没有「表单里的值
+#: 与磁盘不一样」的可靠信号（``Config.has_local_changes`` 比的是 Config 内存与最后一次
+#: 成功保存的基线，而编辑期间控件值根本不写进 Config；现有的「· 已修改」标记比的是
+#: **出厂默认**，不是盘上现值）。没有真信号就不许伪造一个，于是把保存时机说明白。
+SAVE_EXIT_TOOLTIP = (
+    "写入设置并关闭窗口。直接关窗（X 或 Esc）同样会保存；"
+    "「音效总开关」「点击音效」这类开关改一下就会立刻写盘；"
+    "写入失败时会问你是继续编辑，还是放弃未保存的改动并关闭。"
+)
+
+
+def settings_save_exit_button(pane, on_click) -> QPushButton:
+    """侧栏底部的「保存并退出」：软盘图标 + 保存时机说明 + 非默认钮。
+
+    外观（图标名字、tooltip、焦点旗标）与接线集中在这里，对话框只留一行——设置窗的行数
+    预算按文件约定校准（见 ``tests/test_architecture.py``），控件 chrome 归本模块。
+    回车不触发本钮：它是命令而非「默认动作」，误触等于提前落盘并关窗。
+    """
+    button = QPushButton("保存并退出", pane)
+    button.setObjectName("saveAndExit")
+    button.setIcon(vector_widget_icon(button, "save", 16))
+    button.setToolTip(SAVE_EXIT_TOOLTIP)
+    button.setAutoDefault(False)
+    button.setDefault(False)
+    button.clicked.connect(on_click)
+    return button
+
+
+def refresh_settings_icons(root) -> int:
+    """按 ``root``（设置窗）当前的主题重画它里面已渲染过的矢量图标，返回重画枚数。
+
+    **为什么需要这一步**：设置窗的图标是位图，描边色在渲染那一刻烘进像素；换主题时
+    QSS 立刻重排、图标不会自己换色。渲染入口把请求记在**消费者**上（``context_menus.icons``），
+    这里按同一个名字与尺寸重画一次——因此新增图标不用各自接线，也不会漏掉旧图标。
+
+    三种消费者各自的重画方式：
+
+    - **控件**（按钮、``SettingsMenuButton``…）：``setIcon`` 写回同一个控件（记录就挂在
+      消费者自己身上，见 ``_remember_themed_icon``）；
+    - **``QLineEdit``**：它没有 ``setIcon``，图标挂在左上角那个 action 上（设置窗里只有
+      搜索框这一处，图标是它唯一的 action）；
+    - **列表项**（侧栏导航行、快捷启动行）：项不是控件，请求记在 ``THEMED_ICON_ROLE`` 上。
+
+    成本实测（本机，7 次中位，见 ``.scratch/settings-navfix/VERIFICATION.md`` §6）：一次
+    调用约 16 ms = 全窗扫 3174 个控件的属性 5 ms + 重画 17 枚 8.5 ms + 侧栏/列表项约 3 ms；
+    开窗因此 +24 ms（595 → 619 ms），切一次主题 +21 ms（349 → 370 ms）。不新增系统调用/
+    网络/磁盘/线程。
+    """
+    redrawn = 0
+    for host in [root, *root.findChildren(QWidget)]:
+        request = host.property(THEMED_ICON_REQUEST)
+        if not request:
+            continue
+        name, size = request
+        icon = vector_widget_icon(host, str(name), int(size))
+        setter = getattr(host, "setIcon", None)
+        if callable(setter):
+            setter(icon)
+            redrawn += 1
+        elif isinstance(host, QLineEdit) and host.actions():
+            host.actions()[0].setIcon(icon)
+            redrawn += 1
+    for view in root.findChildren(QListWidget):
+        for index in range(view.count()):
+            item = view.item(index)
+            request = item.data(THEMED_ICON_ROLE)
+            if not request:
+                continue
+            name, size = request
+            item.setIcon(vector_widget_icon(view, str(name), int(size)))
+            redrawn += 1
+    return redrawn
+
+
+def sidebar_content_width(layout) -> int:
+    """侧栏内容需要的净宽度（不含容器自己的外边距与边框）。
+
+    为什么不能用 ``layout.minimumSize()``：搜索框与导航列表都是撑满列的控件，它们的
+    ``sizeHint`` 是 Qt 默认的「十七个字符宽」（实测 269px），拿它当依据会把侧栏顶到
+    290px——一条与内容无关的宽度。判据只看**不撑满**的控件（按钮 / 版本号这类按文案
+    取宽的），它们才是放大字体下真正会被压到裁字的那几个。
+    """
+    needed = 0
+    for index in range(layout.count()):
+        widget = layout.itemAt(index).widget()
+        if widget is None or widget.isHidden():
+            continue
+        # 撑满列的控件（导航列表、搜索框）宽度由列决定，不参与"需要多宽"。
+        if widget.sizePolicy().horizontalPolicy() == QSizePolicy.Policy.Expanding:
+            continue
+        needed = max(needed, widget.sizeHint().width())
+    return needed
+
+
+class SettingsSidebarPane(QFrame):
+    """设置窗侧栏容器：宽度 = ``max(200, 内容所需)``，且**跟着字体走**。
+
+    200px 是设计令牌（``SIDEBAR_MIN_WIDTH``），但按钮文案在放大字体下会长过它：实测
+    1.5 倍字体（20px）时侧栏按钮（「重置本宠设置…」）的 ``sizeHint`` 要 186px，而
+    200px 的侧栏内宽只有 175px——文字被省略号吃掉。宽度因此按内容算，默认字体下恒为
+    200（逐像素不变）。
+
+    **为什么盯事件而不是只算一次**：字号可能在构造之后才变大（系统/无障碍放大字体、
+    截图脚本的 ``--font-scale``）。逐控件 ``setFont`` 不会给本容器发 FontChange，但会让
+    父布局收到 ``LayoutRequest``；子控件换了样式表同理（``StyleChange``）。这几类事件任一
+    到达就重排一次重算——重算是幂等的，宽度没变时什么都不做，不会自激。
+
+    **重算必须推到下一拍事件循环**：``QDialog.setStyleSheet`` 会在样式重算过程中把
+    ``StyleChange`` 派发给每个子控件，在那一刻改自己的固定宽度会重入 Qt 的样式/布局失效
+    流程——本机实测直接 **access violation**（``_apply_selected_theme`` → ``setStyleSheet``，
+    ``tests/test_settings_reset_defaults.py`` 与 ``test_settings_sidebar_and_chrome.py``
+    都能复现）。推到下一拍既避开重入，语义也够用：宽度只在字号与布局落定之后才需要跟着变。
+    定时器挂在容器自己身上（child timer），容器销毁时一并销毁，不会回调到已析构的对象。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("sidebarPane")
+        self.setFixedWidth(SIDEBAR_MIN_WIDTH)
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setSingleShot(True)
+        self._sync_timer.setInterval(0)
+        self._sync_timer.timeout.connect(self._sync_width)
+
+    def event(self, event) -> bool:  # noqa: N802 - Qt API
+        if event.type() in (
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.StyleChange,
+            QEvent.Type.FontChange,
+            QEvent.Type.Show,
+        ):
+            self._schedule_sync()
+        return super().event(event)
+
+    def _schedule_sync(self) -> None:
+        if not self._sync_timer.isActive():
+            self._sync_timer.start()
+
+    def _sync_width(self) -> None:
+        layout = self.layout()
+        if layout is None:
+            return
+        margins = layout.contentsMargins()
+        # 内容之外还有两笔固定开销：布局的左右外边距（不进 ``contentsRect``），以及容器
+        # 自己的边框（QSS 里 ``QFrame#sidebarPane`` 有一条 1px 右边框，实测 200px 的侧栏
+        # 内容区只有 175px）。边框按「宽度 − 内容区宽度」量出来，不把 1px 写成字面量。
+        border = max(0, self.width() - self.contentsRect().width())
+        width = max(
+            SIDEBAR_MIN_WIDTH,
+            sidebar_content_width(layout) + margins.left() + margins.right() + border,
+        )
+        if width != self.maximumWidth():
+            self.setFixedWidth(width)
+
 
 def _line_edit(text: str = "", *, password: bool = False, width: int = 240) -> QLineEdit:
     edit = QLineEdit(text)
@@ -1549,7 +1838,7 @@ class QuickLaunchEditor(QWidget):
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setFixedHeight(64)
         self.add_button = SettingsMenuButton("添加", self)
-        self.add_button.setIcon(vector_widget_icon(self, "add", 15))
+        self.add_button.setIcon(vector_widget_icon(self.add_button, "add", 15))
         self.add_menu = configure_settings_action_popup(SettingsPopupMenu(self.add_button))
         self.choose_application_action = self.add_menu.addAction("选择应用…")
         self.add_default_action = self.add_menu.addAction("添加默认浏览器")
@@ -1557,7 +1846,7 @@ class QuickLaunchEditor(QWidget):
         self.add_default_action.triggered.connect(self._add_default_browser)
         self.add_button.setPopupMenu(self.add_menu)
         self.remove_button = QPushButton("移除所选", self)
-        self.remove_button.setIcon(vector_widget_icon(self, "remove", 15))
+        self.remove_button.setIcon(vector_widget_icon(self.remove_button, "remove", 15))
         self.remove_button.clicked.connect(self._remove_checked)
 
         toolbar = QHBoxLayout()
@@ -1579,8 +1868,12 @@ class QuickLaunchEditor(QWidget):
 
     def add_app(self, app: dict) -> None:
         app = dict(app)
+        # 矢量图标（默认浏览器 / 取不到系统图标时的兜底）要记下请求：列表项不是控件，换主题
+        # 时只能靠这一格重画（见 ``refresh_settings_icons``）。系统图标不记——那是别人画的。
+        request: tuple[str, int] | None = None
         if app.get("kind") == "default_browser":
-            icon = vector_widget_icon(self, "web", 22)
+            request = ("web", 22)
+            icon = vector_widget_icon(self, *request)
             app = {"name": str(app.get("name") or "默认浏览器"), "path": "", "kind": "default_browser"}
         else:
             path = str(app.get("path") or "")
@@ -1588,7 +1881,8 @@ class QuickLaunchEditor(QWidget):
                 return
             provider_icon = QFileIconProvider().icon(QFileInfo(path))
             if provider_icon.isNull():
-                icon = vector_widget_icon(self, "application", 17)
+                request = ("application", 17)
+                icon = vector_widget_icon(self, *request)
             else:
                 icon = fitted_application_icon(provider_icon, 22, self)
             app = {"name": str(app.get("name") or Path(path).stem), "path": path, "kind": "application"}
@@ -1596,6 +1890,8 @@ class QuickLaunchEditor(QWidget):
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
         item.setCheckState(Qt.CheckState.Unchecked)
         item.setData(Qt.ItemDataRole.UserRole, app)
+        if request is not None:
+            item.setData(THEMED_ICON_ROLE, request)
         item.setToolTip(app["path"] or "使用系统默认浏览器")
         item.setSizeHint(QSize(0, 52))
         self.list.addItem(item)

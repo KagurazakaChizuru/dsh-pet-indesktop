@@ -31,8 +31,11 @@ from tests.test_overlay_dead_switches import _make_shell
 app = QApplication.instance() or QApplication([])
 
 LEGACY_HINT = "让 OBS 等工具能够枚举并捕获桌宠窗口；OBS 捕获方式请选 Windows 10（1903 及以上），BitBlt 会是黑屏。"
-RESTART_HINT = (LEGACY_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
-                "（影响所有桌宠）")
+#: 重启级说明（行内那句）；作用域声明已从说明末尾拆成行内独立标注
+#: （``SettingRow.set_scope_note``：GLOBAL_SCOPE_ROWS 里登记着这一行与这句话）。
+RESTART_HINT = LEGACY_HINT + "重启后生效；重启时多只桌宠会先收拢为主宠物。"
+#: 行内独立标注里的作用域声明。
+SCOPE_ANNOTATION = "（影响所有桌宠）"
 
 
 def _build_dialog(tmp_path, monkeypatch, *, topology: str | None = None,
@@ -90,11 +93,26 @@ def _stream_capture_hint(tmp_path, monkeypatch, topology: str | None) -> str:
 
 
 def test_stream_capture_copy_is_restart_level_under_overlay_topology(tmp_path, monkeypatch):
-    """overlay（默认路径）：如实说明这是重启级切换（T4 口径）。"""
-    hint = _stream_capture_hint(tmp_path, monkeypatch, "overlay")
+    """overlay（默认路径）：如实说明这是重启级切换（T4 口径），作用域在行内标注里。"""
+    import pet.modern_settings_dialog as settings_mod
+    from pet import overlay_settings_command as cmd_mod
+
+    dialog = _build_dialog(tmp_path, monkeypatch, topology="overlay")
+    try:
+        row = dialog.findChild(settings_mod.SettingRow, "settingRow_stream_capture")
+        assert row is not None, "Windows 设置页必须有直播捕获兼容行"
+        hint = row.hint_label.text()
+        annotation = row.scope_note.text()
+        visible = row.scope_note.isHidden() is False
+    finally:
+        _close(dialog)
+        cmd_mod.reset_topology_snapshot()
     assert hint == RESTART_HINT
     assert "重启后生效" in hint
     assert "收拢为主宠物" in hint
+    # 作用域声明仍在行内可见——只是换了呈现位置（说明末尾 → 独立标注）。
+    assert annotation == SCOPE_ANNOTATION and visible
+    assert SCOPE_ANNOTATION not in hint
 
 
 def test_stream_capture_copy_same_restart_copy_when_already_checked(tmp_path, monkeypatch):

@@ -24,6 +24,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 from pet import platform_win
@@ -216,7 +217,7 @@ def test_tray_hide_and_screen_migration_stay_paired(tmp_path):
 
         old = shell.overlay
         old_ctl = old._input_controller          # 迁移前捕获：旧 overlay 自己的控制器
-        shell._migrate_to_screen(app.primaryScreen())
+        shell._migrate_to_screen(QGuiApplication.primaryScreen())
         assert shell.overlay is not old, "前提：迁移确实重建了 overlay"
         assert overlay_peripherals.visible_overlay_count() == base + 1, (
             "旧 overlay 必须从闸门里摘掉（hide/close 成对）")

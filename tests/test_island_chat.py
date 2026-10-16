@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QApplication
 
 from pet.app import AppShell
@@ -176,7 +177,9 @@ def test_island_chat_show_reply_display_only(tmp_path):
         before = list(bubble.session.messages)
         bubble.show_reply("你好呀")
         assert bubble._reply_full == "你好呀"
-        assert bubble.output.text() == "你好呀"
+        _doc = QTextDocument()
+        _doc.setHtml(bubble.output.text())   # 富文本信封 → 纯文本比对
+        assert _doc.toPlainText().rstrip("\n") == "你好呀"
         assert bubble._active_request_id is None
         assert list(bubble.session.messages) == before  # 不动会话历史
         assert not bubble.service.busy
@@ -678,7 +681,9 @@ def test_island_feedback_yields_to_inflight_request(tmp_path):
         provider.release.set()
         assert _pump_until(lambda: bubble._active_request_id is None), "回答未回到气泡"
 
-        assert bubble.output.text() == provider.reply, "AI 回答必须显示（不是反馈文案）"
+        _doc = QTextDocument()
+        _doc.setHtml(bubble.output.text())   # 富文本信封 → 纯文本比对
+        assert _doc.toPlainText().rstrip("\n") == provider.reply, "AI 回答必须显示（不是反馈文案）"
         bubble.store.flush()
         roles = [m["role"] for m in _disk_messages(bubble)]
         assert roles == ["user", "assistant"], f"AI 回答必须落库，实际 {roles}"

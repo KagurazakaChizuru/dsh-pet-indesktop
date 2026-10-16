@@ -205,16 +205,57 @@ def test_main_refuses_when_dependency_check_fails(slim, tmp_path, monkeypatch, c
 POLLUTED = [
     "_internal/django/__init__.py",
     "_internal/django/conf/global_settings.py",
-    "_internal/numpy/__init__.py",
-    "_internal/numpy.libs/libopenblas.dll",
     "_internal/hypothesis/core.py",
 ]
 
+#: numpy 自 2026-10-13 起是**随包必带的运行时依赖**（本地 OCR 直接 import 它），
+#: 不再是构建机污染。这组路径必须既不进违禁清单、也不进移除清单。
+NUMPY_RUNTIME = [
+    "_internal/numpy/__init__.py",
+    "_internal/numpy/_core/_multiarray_umath.cp311-win_amd64.pyd",
+    "_internal/numpy.libs/libopenblas64__v0.3.30-gcc_10_3_0.dll",
+]
+
+#: OpenCV 的 FFMPEG 视频后端（文件名带 opencv 版本号，实测 27.3 MB）。OCR 只用
+#: cv2 的图像算子，不碰视频 I/O；由 cv2.pyd 在首次 VideoCapture 时动态加载。
+OPENCV_VIDEOIO = "_internal/cv2/opencv_videoio_ffmpeg4130_64.dll"
+
 
 def test_find_forbidden_flags_build_env_pollution(slim):
-    """django/numpy/hypothesis 任一出现在 bundle 即命中（构建机环境污染硬闸）。"""
+    """django/hypothesis 任一出现在 bundle 即命中（构建机环境污染硬闸）。"""
     hits = slim.find_forbidden(FULL_BUNDLE + KEEP_ALWAYS + POLLUTED)
     assert set(hits) == set(POLLUTED)
+
+
+def test_find_forbidden_lets_numpy_through(slim):
+    """numpy 是产品依赖：硬闸不许再误杀它（留着＝每次构建都红在正常产物上）。"""
+    assert slim.find_forbidden(FULL_BUNDLE + NUMPY_RUNTIME) == []
+
+
+def test_numpy_is_not_removed_either(slim):
+    """另一头也要守住：numpy 既不能禁也不能删（删了冻结包 OCR 直接 import 失败）。"""
+    removals, _ = slim.plan_removals(FULL_BUNDLE + NUMPY_RUNTIME)
+    for rel in NUMPY_RUNTIME:
+        assert rel not in removals, rel
+
+
+def test_opencv_videoio_backend_is_removed(slim):
+    """视频后端进移除清单；同目录的 cv2.pyd 本身必须留着（OCR 全靠它）。"""
+    rels = FULL_BUNDLE + [OPENCV_VIDEOIO, "_internal/cv2/cv2.pyd"]
+
+    removals, _ = slim.plan_removals(rels)
+
+    assert OPENCV_VIDEOIO in removals
+    assert "_internal/cv2/cv2.pyd" not in removals
+
+
+def test_opencv_videoio_glob_survives_a_version_bump(slim):
+    """opencv 换版本会换 DLL 名：白名单必须按通配命中（否则瘦身悄悄失效）。"""
+    newer = "_internal/cv2/opencv_videoio_ffmpeg4200_64.dll"
+
+    removals, _ = slim.plan_removals(FULL_BUNDLE + [newer])
+
+    assert newer in removals
 
 
 def test_find_forbidden_clean_bundle_passes(slim):

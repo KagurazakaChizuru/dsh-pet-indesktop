@@ -5,9 +5,12 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -128,8 +131,8 @@ def test_fetch_lyrics_prefers_higher_priority_source(monkeypatch):
     lrclib_lines = [LyricLine(1.0, "来自lrclib")]
 
     monkeypatch.setattr(music_lyric, "_SOURCES", (
-        ("qq", lambda t, a: qq_lines),
-        ("lrclib", lambda t, a: lrclib_lines),
+        ("qq", lambda t, a, **k: qq_lines),
+        ("lrclib", lambda t, a, **k: lrclib_lines),
     ))
     monkeypatch.setattr(music_lyric, "_write_cache", lambda *a, **k: None)
     monkeypatch.setattr(music_lyric, "_read_cache", lambda *a, **k: None)
@@ -142,8 +145,8 @@ def test_fetch_lyrics_falls_back_to_lower_priority(monkeypatch):
     lrclib_lines = [LyricLine(2.0, "来自lrclib")]
 
     monkeypatch.setattr(music_lyric, "_SOURCES", (
-        ("qq", lambda t, a: None),
-        ("lrclib", lambda t, a: lrclib_lines),
+        ("qq", lambda t, a, **k: None),
+        ("lrclib", lambda t, a, **k: lrclib_lines),
     ))
     monkeypatch.setattr(music_lyric, "_write_cache", lambda *a, **k: None)
     monkeypatch.setattr(music_lyric, "_read_cache", lambda *a, **k: None)
@@ -153,12 +156,12 @@ def test_fetch_lyrics_falls_back_to_lower_priority(monkeypatch):
 
 def test_fetch_lyrics_survives_source_exception(monkeypatch):
     """某个源抛异常不能拖垮整体，应继续尝试后续源。"""
-    def boom(title, artist):
+    def boom(title, artist, **kwargs):
         raise RuntimeError("接口炸了")
 
     expected = [LyricLine(1.0, "ok")]
     monkeypatch.setattr(music_lyric, "_SOURCES", (
-        ("boom", boom), ("good", lambda t, a: expected),
+        ("boom", boom), ("good", lambda t, a, **k: expected),
     ))
     monkeypatch.setattr(music_lyric, "_write_cache", lambda *a, **k: None)
     monkeypatch.setattr(music_lyric, "_read_cache", lambda *a, **k: None)
@@ -167,7 +170,7 @@ def test_fetch_lyrics_survives_source_exception(monkeypatch):
 
 
 def test_fetch_lyrics_returns_none_when_all_fail(monkeypatch):
-    monkeypatch.setattr(music_lyric, "_SOURCES", (("none", lambda t, a: None),))
+    monkeypatch.setattr(music_lyric, "_SOURCES", (("none", lambda t, a, **k: None),))
     monkeypatch.setattr(music_lyric, "_read_cache", lambda *a, **k: None)
     assert music_lyric.fetch_lyrics("歌", "手") is None
 
@@ -658,7 +661,7 @@ class _CfgStub:
 def _only_source(monkeypatch, lines):
     """把三源压成一个立即返回的假源（绕过网络）。"""
     lyrics = Lyrics(lines=tuple(lines))
-    monkeypatch.setattr(music_lyric, "_SOURCES", (("qq", lambda t, a: lyrics),))
+    monkeypatch.setattr(music_lyric, "_SOURCES", (("qq", lambda t, a, **k: lyrics),))
     monkeypatch.setattr(music_lyric, "_read_cache", lambda *a, **k: None)
 
 
@@ -1439,10 +1442,15 @@ class _RecordingOpener:
 
 
 def _stub_urllib(monkeypatch, opener):
-    """把 urllib 的 opener 构造换成记录桩，并假装系统里配着代理。"""
+    """把 urllib 的 opener 构造换成记录桩，并假装系统里配着代理。
+
+    ``proxy_bypass`` 一并钉成 False：真实现会去读用户注册表，测试不该依赖它
+    （命中绕过名单时"代理路"实际是直连，见 ``_fallback_proxy``）。
+    """
     monkeypatch.setattr(
         urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:12450"}
     )
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
     built: list[tuple] = []
 
     def build(*handlers):
@@ -1459,6 +1467,9 @@ def test_lyric_request_bypasses_system_proxy(monkeypatch):
     2026-09-22 实机事故：系统代理（VPN 全局模式 127.0.0.1:12450）下三个源
     单次 20~41 秒，全部超过 HTTP_TIMEOUT，于是每首未缓存曲目都以「0 行」收场
     （日志 `歌词取词完成: ... -> 0行, 耗时 9.00s`）。直连实测 0.25~3.5 秒。
+
+    **直连是首选路线，这一点不因 2026-10-16 的有界回退而变**：直连成功时
+    只有一次传输尝试，系统代理一次都不碰（见 ``_RouteStub`` 用例）。
     """
     opener = _RecordingOpener({"ok": 1})
     built = _stub_urllib(monkeypatch, opener)
@@ -1491,9 +1502,13 @@ def test_lyric_request_failure_is_logged_at_warning(monkeypatch, caplog):
     assert any("music.163.com" in m and "TimeoutError" in m for m in messages), messages
 
 
-def test_bypassing_system_proxy_is_logged_once(monkeypatch, caplog):
-    """「绕过了系统代理」只记一行、且带上代理地址，供下次一眼定位。"""
-    monkeypatch.setattr(music_lyric, "_proxy_bypass_logged", False)
+def test_system_proxy_route_policy_is_logged_once(monkeypatch, caplog):
+    """配了系统代理时每个进程只记一行路线策略，**不回显代理地址/凭据**。
+
+    日志经常被整段贴进 issue 与报告里，代理串（可能带 ``user:pass@``）属于
+    用户环境信息，只说明"走哪条路"就够定位了。
+    """
+    monkeypatch.setattr(music_lyric, "_route_logged", False)
     opener = _RecordingOpener({"ok": 1})
     _stub_urllib(monkeypatch, opener)
 
@@ -1503,7 +1518,542 @@ def test_bypassing_system_proxy_is_logged_once(monkeypatch, caplog):
 
     hits = [r.getMessage() for r in caplog.records if "系统代理" in r.getMessage()]
     assert len(hits) == 1, hits
-    assert "127.0.0.1:12450" in hits[0], hits[0]
+    assert "直连" in hits[0], hits[0]
+    assert "127.0.0.1:12450" not in hits[0], hits[0]
+
+
+# ------------------------------------------- 有界路线回退（2026-10-16 汽水歌词）
+#
+# 现场事实（`.scratch/soda-lyrics/REPORT.md` 与部署实例日志）：同 URL、同一分钟，
+# QQ 源**直连恒 HTTP 500**，而**走系统代理 200 并真的取回歌词**（36 行）。固定单一
+# 路线的歌词链因此对"只有代理能出网"的一半用户永久 0 行——用户看到的就是
+# 「歌名在、歌词不在」。修法：直连仍是首选，只在**传输失败或 500/502/504**
+# 且本机确有系统代理、且还剩够用预算时，**回退一次**。
+#
+# 下面这些用例全部离线（opener 桩 + 受控时钟），覆盖用户点名的形状。
+
+
+class _LyricClock:
+    """受控时钟：只替换 ``pet.music_lyric`` 里的 monotonic，其余透传。"""
+
+    def __init__(self, now: float = 1000.0):
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _http_error(code: int, *, retry_after: str | None = None) -> urllib.error.HTTPError:
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    return urllib.error.HTTPError(
+        "https://c.y.qq.com/x", code, f"HTTP Error {code}", headers, None
+    )
+
+
+class _RouteStub:
+    """按**路线**分发的 opener 桩：直连一条、系统代理一条，各自一张响应表。
+
+    ``build_opener`` 收到 ``ProxyHandler({})`` 判为直连，收到非空代理判为回退；
+    每次调用都记 ``(路线, URL, 超时)``，因此"试了几次、走的哪条、每次给了多少
+    超时"三件事都能被断言。
+
+    ``proxies`` 直接决定"系统里配着什么"（默认 http+https 都配好），用来钉
+    "``no`` / 其它协议不算代理"这一类形状；``bypass`` 钉系统代理绕过表——两者
+    都是真实现会读的用户环境，测试里一律替身化。
+    """
+
+    def __init__(self, monkeypatch, *, direct, proxy_responses=None,
+                 proxy: str | None = "http://127.0.0.1:12450",
+                 proxies: dict | None = None, bypass: bool = False,
+                 clock: _LyricClock | None = None, advance: float = 0.0):
+        self.direct = list(direct)
+        self.proxy = list(proxy_responses or [])
+        self.clock = clock
+        self.advance = advance
+        self.calls: list[tuple[str, str, float | None]] = []
+        if proxies is None:
+            proxies = {"http": proxy, "https": proxy} if proxy else {}
+        monkeypatch.setattr(urllib.request, "getproxies", lambda: dict(proxies))
+        monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: bypass)
+        monkeypatch.setattr(urllib.request, "build_opener", self._build)
+
+    def _build(self, *handlers):
+        proxies = [h.proxies for h in handlers if isinstance(h, urllib.request.ProxyHandler)]
+        route = "代理" if (proxies and proxies[0]) else "直连"
+        return _RouteOpener(self, route)
+
+    def routes_of(self, url_part: str) -> list[str]:
+        return [route for route, url, _ in self.calls if url_part in url]
+
+    def timeouts_of(self, url_part: str) -> list[float | None]:
+        return [timeout for _, url, timeout in self.calls if url_part in url]
+
+    def _dispatch(self, route: str, request, timeout):
+        url = getattr(request, "full_url", str(request))
+        self.calls.append((route, url, timeout))
+        if self.clock is not None:
+            self.clock.now += self.advance
+        table = self.direct if route == "直连" else self.proxy
+        for prefix, result in table:
+            if prefix in url:
+                if isinstance(result, Exception):
+                    raise result
+                return _FakeResponse(json.dumps(result).encode("utf-8"))
+        raise AssertionError(f"{route} 路线没有录制这个 URL: {url}")
+
+
+class _RouteOpener:
+    def __init__(self, stub: _RouteStub, route: str) -> None:
+        self._stub = stub
+        self._route = route
+
+    def open(self, request, timeout=None):
+        return self._stub._dispatch(self._route, request, timeout)
+
+
+_URL = "https://c.y.qq.com/soso/x"
+
+
+def test_direct_success_is_one_attempt_and_never_touches_proxy(monkeypatch):
+    """直连成功：恰好一次传输尝试，代理路线一次都不碰。"""
+    stub = _RouteStub(monkeypatch, direct=[("c.y.qq.com", {"ok": 1})])
+
+    assert music_lyric._http_get_json(_URL) == {"ok": 1}
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+
+
+def test_no_system_proxy_means_no_fallback(monkeypatch):
+    """本机没配系统代理：只有直连一条路，失败就是失败（不凭空造第二次请求）。"""
+    stub = _RouteStub(
+        monkeypatch, proxy=None,
+        direct=[("c.y.qq.com", urllib.error.URLError("连接被拒"))],
+    )
+
+    assert music_lyric._http_get_json(_URL) is None
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+
+
+def test_no_proxy_entry_alone_is_not_a_fallback_route(monkeypatch, caplog):
+    """``getproxies()`` 只给了 ``no``（绕过名单）时，不算"有代理"。
+
+    ``no`` 是 ``NO_PROXY`` 的绕过名单、不是代理；把它当第二条路会让"回退"实际
+    还是同一发直连，日志也会谎称走了代理。
+    """
+    stub = _RouteStub(
+        monkeypatch, proxies={"no": "c.y.qq.com,localhost"},
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("proxies", [
+    {"ftp": "http://127.0.0.1:12450"},                    # 只有其它协议的代理
+    {"http": "http://127.0.0.1:12450"},                   # https 目标配了 http 代理
+    {"all": "http://127.0.0.1:12450"},                    # all_proxy 不是 urllib 的代理条目
+    {"no": "localhost", "ftp": "http://127.0.0.1:12450"},
+])
+def test_proxy_for_other_scheme_does_not_count(monkeypatch, caplog, proxies):
+    """URL 实际协议（https）没有代理时不回退：``ProxyHandler`` 本来就分派不到，
+    再打一次等于重复直连。"""
+    stub = _RouteStub(
+        monkeypatch, proxies=proxies,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_proxy_bypass_hit_is_not_a_second_route(monkeypatch, caplog):
+    """命中系统代理绕过表的 URL：那条"代理路"其实就是直连，不能算回退。
+
+    ``ProxyHandler.proxy_open`` 会在 ``proxy_bypass`` 命中时直接放行成直连，
+    所以这里必须**只试一次**，且日志不许出现"回退系统代理成功"——即便替身代理
+    本来能返回 200。
+    """
+    stub = _RouteStub(
+        monkeypatch, bypass=True,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_fallback_success_logs_proxy_only_when_it_really_used_it(monkeypatch, caplog):
+    """成功日志不谎称代理：真走了代理才有那一行；直连成功时一行都没有。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": "via-proxy"})],
+    )
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) == {"ok": "via-proxy"}
+    hits = [r.getMessage() for r in caplog.records if "回退系统代理成功" in r.getMessage()]
+    assert len(hits) == 1, hits
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+    caplog.clear()
+    direct_stub = _RouteStub(monkeypatch, direct=[("c.y.qq.com", {"ok": 1})])
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) == {"ok": 1}
+    assert "回退系统代理成功" not in "\n".join(r.getMessage() for r in caplog.records)
+    assert [route for route, _, _ in direct_stub.calls] == ["直连"], direct_stub.calls
+
+
+def test_transport_failure_falls_back_to_system_proxy_once(monkeypatch):
+    """直连传输失败 + 本机有系统代理 → 回退一次，且回退真的走代理。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", urllib.error.URLError("隧道不通"))],
+        proxy_responses=[("c.y.qq.com", {"ok": "via-proxy"})],
+    )
+
+    assert music_lyric._http_get_json(_URL) == {"ok": "via-proxy"}
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+    assert stub.routes_of("c.y.qq.com") == ["直连", "代理"]
+
+
+@pytest.mark.parametrize("code", [500, 502, 504])
+def test_gateway_statuses_fall_back_to_system_proxy(monkeypatch, code):
+    """500/502/504（服务端内部错误 / 上游网关错误 / 网关超时）：直连这条路
+    可能坏了，允许换系统代理再试一次。无 Retry-After 时才换。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(code))],
+        proxy_responses=[("c.y.qq.com", {"ok": code})],
+    )
+
+    assert music_lyric._http_get_json(_URL) == {"ok": code}
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+
+@pytest.mark.parametrize("retry_after", [
+    "30",                                   # 整数秒
+    "Wed, 21 Oct 2026 07:28:00 GMT",        # HTTP 日期
+    "not-a-number",                         # 解析不了的值
+    "",                                      # 头存在但值为空
+])
+@pytest.mark.parametrize("code", [500, 502, 504])
+def test_retry_after_header_blocks_fallback_even_on_gateway_statuses(
+    monkeypatch, caplog, code, retry_after
+):
+    """5xx 带上 ``Retry-After`` 一律不换路。
+
+    服务端在 5xx 里也常给这个头（整数秒或 HTTP 日期），它的意思就是"过一会儿再
+    打"；立刻从另一条路重打同样违背该请求。此前这里只看状态码，日志写着"不换路、
+    不重试"，实际却换路打了一遍。
+    """
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(code, retry_after=retry_after))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert music_lyric._http_get_json(_URL) is None
+
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("Retry-After" in m for m in messages), messages
+
+
+def test_gateway_status_without_retry_after_still_falls_back(monkeypatch):
+    """对照：同一个 502 只要**没有** Retry-After 头，回退照常发生。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(502))],
+        proxy_responses=[("c.y.qq.com", {"ok": "via-proxy"})],
+    )
+
+    assert music_lyric._http_get_json(_URL) == {"ok": "via-proxy"}
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+
+@pytest.mark.parametrize("code", [401, 403, 404, 429, 503])
+def test_rejection_and_throttle_statuses_do_not_switch_route(monkeypatch, code):
+    """对方的明确答复（权限 / 不存在 / 限流）不换路：换条路重打只是再挨一次。
+
+    401/403 权限与风控、404 不存在、429/503 限流——这些都是"路由无关"的
+    结果，回退只会白打一发，还多违背一次服务端的 Retry-After 请求。
+    """
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(code))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    assert music_lyric._http_get_json(_URL) is None
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+
+
+def test_throttle_retry_after_is_surfaced_in_log(monkeypatch, caplog):
+    """限流响应里的 Retry-After 写进日志（本模块对该响应既不换路也不重试）。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", _http_error(429, retry_after="30"))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert music_lyric._http_get_json(_URL) is None
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    assert any("Retry-After: 30" in m for m in messages), messages
+
+
+def test_both_routes_failing_are_both_reported(monkeypatch, caplog):
+    """两条路都失败：返回 None，日志里两条路的异常类型都可辨（不写异常文本）。"""
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", urllib.error.URLError("隧道不通"))],
+        proxy_responses=[("c.y.qq.com", _http_error(502))],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert music_lyric._http_get_json(_URL) is None
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+    hit = [m for m in messages if "c.y.qq.com" in m]
+    assert hit, messages
+    assert any("直连 URLError" in m and "系统代理 HTTPError HTTP 502" in m for m in hit), hit
+    assert "隧道不通" not in hit[0], hit[0]
+
+
+def test_exception_text_never_reaches_the_log(monkeypatch, caplog):
+    """异常**文本**不落日志：它可能夹带内部代理地址甚至凭据。
+
+    ``URLError``/``http.client.InvalidURL`` 的消息是拼接出来的，例如
+    ``<urlopen error Unable to connect to proxy http://alice:s3cr3t@proxy.internal:8080>``；
+    日志经常被整段外贴，所以只留异常类型 + HTTP 状态 + Retry-After。
+    """
+    secret = "http://alice:s3cr3t@proxy.internal:8080"
+    stub = _RouteStub(
+        monkeypatch,
+        direct=[("c.y.qq.com", urllib.error.URLError(f"<urlopen error tunnel to {secret} refused>"))],
+        proxy_responses=[
+            ("c.y.qq.com", http.client.InvalidURL(f"no host given in proxy {secret}"))
+        ],
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        assert music_lyric._http_get_json(_URL) is None
+
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "proxy.internal" not in joined, joined
+    assert "alice" not in joined and "s3cr3t" not in joined, joined
+    assert "tunnel to" not in joined, joined
+    # 两条路仍可辨
+    assert "直连 URLError" in joined and "系统代理 InvalidURL" in joined, joined
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+
+def test_fallback_shares_the_deadline_budget_instead_of_doubling(monkeypatch):
+    """直连与回退共享同一份预算：回退拿到的是**剩余**部分，不是第二次完整超时。
+
+    否则一次请求会变成 2×HTTP_TIMEOUT，``fetch_lyrics`` 的 9 秒死线会把整趟
+    取词判死——"修了路线反而更慢、还是 0 行"。
+    """
+    clock = _LyricClock(1000.0)
+    monkeypatch.setattr(music_lyric, "time", clock)
+    stub = _RouteStub(
+        monkeypatch, clock=clock, advance=3.0,
+        direct=[("c.y.qq.com", urllib.error.URLError("隧道不通"))],
+        proxy_responses=[("c.y.qq.com", {"ok": 1})],
+    )
+
+    assert music_lyric._http_get_json(_URL, deadline=clock.now + music_lyric.HTTP_TIMEOUT) == {"ok": 1}
+    direct_timeout, proxy_timeout = stub.timeouts_of("c.y.qq.com")
+    assert direct_timeout == music_lyric.HTTP_TIMEOUT, stub.calls
+    # 直连已经花掉 3 秒，回退只能拿剩下的 5 秒（不是又一份 8 秒）
+    assert proxy_timeout == pytest.approx(music_lyric.HTTP_TIMEOUT - 3.0), stub.calls
+    assert 3.0 + proxy_timeout <= music_lyric.HTTP_TIMEOUT + 1e-6, stub.calls
+
+
+def test_fallback_is_skipped_when_remaining_budget_is_gone(monkeypatch, caplog):
+    """剩余预算不够一次尝试时不要再发请求：注定超时的那发只会白等。"""
+    clock = _LyricClock(1000.0)
+    monkeypatch.setattr(music_lyric, "time", clock)
+    stub = _RouteStub(
+        monkeypatch, clock=clock, advance=8.0,
+        direct=[("c.y.qq.com", urllib.error.URLError("读超时"))],
+        proxy_responses=[("c.y.qq.com", {"ok": "不该被请求"})],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = music_lyric._http_get_json(
+            _URL, deadline=clock.now + music_lyric.HTTP_TIMEOUT
+        )
+
+    assert result is None
+    assert [route for route, _, _ in stub.calls] == ["直连"], stub.calls
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("预算" in m for m in messages), messages
+
+
+def test_exhausted_deadline_sends_no_request_at_all(monkeypatch, caplog):
+    """截止时刻已过：一次请求都不发，直接按失败收场。"""
+    clock = _LyricClock(1000.0)
+    monkeypatch.setattr(music_lyric, "time", clock)
+    stub = _RouteStub(
+        monkeypatch, direct=[("c.y.qq.com", {"ok": 1})],
+        proxy_responses=[("c.y.qq.com", {"ok": 1})],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert music_lyric._http_get_json(_URL, deadline=clock.now - 0.5) is None
+
+    assert stub.calls == [], stub.calls
+
+
+def test_proxy_address_and_credentials_never_reach_the_log(monkeypatch, caplog):
+    """两条路都失败时，日志不许出现代理地址与凭据。"""
+    proxy = "http://alice:s3cr3t@127.0.0.1:12450"
+    stub = _RouteStub(
+        monkeypatch, proxy=proxy,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", urllib.error.URLError("代理隧道不通"))],
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        assert music_lyric._http_get_json(_URL) is None
+
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "127.0.0.1:12450" not in joined, joined
+    assert "alice" not in joined and "s3cr3t" not in joined, joined
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+
+def test_proxy_address_never_reaches_the_route_log(monkeypatch, caplog):
+    """回退成功那条 INFO 也不许带上代理地址。"""
+    proxy = "http://alice:s3cr3t@127.0.0.1:12450"
+    stub = _RouteStub(
+        monkeypatch, proxy=proxy,
+        direct=[("c.y.qq.com", _http_error(500))],
+        proxy_responses=[("c.y.qq.com", {"ok": 1})],
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert music_lyric._http_get_json(_URL) == {"ok": 1}
+
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "系统代理" in joined, joined
+    assert "127.0.0.1:12450" not in joined and "s3cr3t" not in joined, joined
+    assert [route for route, _, _ in stub.calls] == ["直连", "代理"], stub.calls
+
+
+# ------------------------------- 汽水曲目：真实元数据 → 歌词（离线集成回归）
+#
+# 元数据取自 2026-10-16 只读 SMTC 采样与 `.scratch/soda-lyrics/REPORT.md`：
+# app_id=汽水音乐、title=「荒(一念间天荒仙灭)」、artist=「莫小檀」，该曲在网易云
+# 曲库与 lrclib 里都没有、**只有 QQ 有**，而 QQ 直连恒 500（代理同分钟 200 → 36 行）。
+# 因此这一条链路"是死是活"完全取决于两个形状：QQ 搜索命中 songmid、以及
+# 直连 500 时敢不敢再走一次代理。
+#
+# 诚实边界：QQ 响应**结构**按代码读到的字段写（data.song.list[].songmid/singer、
+# lyric 明细的 payload["lyric"]），songmid `0009sdl21zLVyO` 与歌手名 `莫小檀` 是
+# REPORT.md §4 记录的真实取值；**歌词正文没有落盘**（只有"36 行"的计数证据），
+# 故正文用形态等价的替身，断言按替身的行数走，不冒充真实歌词内容。
+
+_SODA_TITLE = "荒(一念间天荒仙灭)"
+_SODA_ARTIST = "莫小檀"
+_SODA_SONGMID = "0009sdl21zLVyO"
+_QQ_SEARCH_SODA = {
+    "code": 0,
+    "data": {"song": {"list": [
+        {"songmid": _SODA_SONGMID, "songname": _SODA_TITLE, "singer": [{"name": _SODA_ARTIST}]},
+    ]}},
+}
+_QQ_LYRIC_SODA = {
+    "retcode": 0,
+    "lyric": (
+        "[ti:荒(一念间天荒仙灭)]\n[ar:莫小檀]\n"
+        "[00:00.00]荒(一念间天荒仙灭) - 莫小檀\n"
+        "[00:12.34]第一句\n[00:24.00]第二句\n[00:36.00]第三句\n"
+    ),
+}
+
+
+class TestSodaTrackOfflineIntegration:
+    """汽水在播曲目：真实 title/artist 走完"取词 → 路线回退 → 解析"整条链。"""
+
+    @staticmethod
+    def _stub_sources(monkeypatch, *, direct_table, proxy_table):
+        """三源全部用录制响应打桩：QQ 有词，lrclib/网易云都判未命中。"""
+        return _RouteStub(
+            monkeypatch,
+            direct=direct_table,
+            proxy_responses=proxy_table,
+        )
+
+    def test_qq_direct_500_gets_lyrics_after_proxy_fallback(self, monkeypatch, tmp_path):
+        """本条即症状回归：直连 500 时，回退系统代理才拿得到这首的歌词。"""
+        monkeypatch.setattr(music_lyric, "cache_dir", lambda: tmp_path)
+        stub = self._stub_sources(
+            monkeypatch,
+            direct_table=[
+                ("client_search_cp", _http_error(500)),
+                ("fcg_query_lyric_new", _http_error(500)),
+                ("lrclib.net", _http_error(404)),
+                ("music.163.com/api/cloudsearch", {"result": {"songs": []}}),
+            ],
+            proxy_table=[
+                ("client_search_cp", _QQ_SEARCH_SODA),
+                ("fcg_query_lyric_new", _QQ_LYRIC_SODA),
+                ("lrclib.net", _http_error(404)),
+                ("music.163.com/api/cloudsearch", {"result": {"songs": []}}),
+            ],
+        )
+
+        lyrics = music_lyric.fetch_lyrics(_SODA_TITLE, _SODA_ARTIST)
+
+        assert lyrics is not None and len(lyrics.lines) == 4, lyrics
+        assert [line.text for line in lyrics.lines][-3:] == ["第一句", "第二句", "第三句"]
+        # 搜索请求带着真实 SMTC 元数据（歌名 + 歌手）出去
+        search_url = next(u for r, u, _ in stub.calls if "client_search_cp" in u)
+        assert urllib.parse.quote(f"{_SODA_TITLE} {_SODA_ARTIST}") in search_url
+        # 命中录制的 songmid → 明细请求带的是它，不是别的歌
+        assert any(_SODA_SONGMID in u for _, u, _ in stub.calls), stub.calls
+        # 两条路都试过：直连先失败，回退系统代理成事
+        assert stub.routes_of("client_search_cp") == ["直连", "代理"], stub.calls
+        assert stub.routes_of("fcg_query_lyric_new") == ["直连", "代理"], stub.calls
+
+    def test_same_track_without_proxy_route_gets_nothing(self, monkeypatch, tmp_path):
+        """对照：没有系统代理可回退时，这条链路就是 0 行（本次修的就是这个）。"""
+        monkeypatch.setattr(music_lyric, "cache_dir", lambda: tmp_path)
+        stub = self._stub_sources(
+            monkeypatch,
+            direct_table=[
+                ("client_search_cp", _http_error(500)),
+                ("fcg_query_lyric_new", _http_error(500)),
+                ("lrclib.net", _http_error(404)),
+                ("music.163.com/api/cloudsearch", {"result": {"songs": []}}),
+            ],
+            proxy_table=[],
+        )
+        monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+
+        assert music_lyric.fetch_lyrics(_SODA_TITLE, _SODA_ARTIST) is None
+        assert set(stub.routes_of("client_search_cp")) == {"直连"}, stub.calls
 
 
 
@@ -1629,6 +2179,9 @@ class TestPendingPlaybackIsBoundPerRequest:
 
         # A 开始取词 → 快切 B → 再切回 A（A 在 _loading 早退，不重建上下文）
         monkeypatch.setattr(ctl, "_lyric_query", lambda t, a, p: (t, a))
+        # 取词线程只驱动 _loading / pending 记账，本用例不验网络：真上线会往三个
+        # 歌词源（以及有系统代理时的回退路线）发真实请求，属于测试不该碰的边界。
+        monkeypatch.setattr(ctl, "_fetch_worker", lambda *a, **k: None)
         ctl._start_track("keyA", "歌A", "手A", pb_a, now=100.0)
         ctl._start_track("keyB", "歌B", "手B", pb_b, now=101.0)
         ctl._start_track("keyA", "歌A", "手A", pb_a, now=102.0)   # _loading 命中，早退
@@ -2146,3 +2699,56 @@ def test_cooldown_pause_is_still_deducted_without_reported_progress(monkeypatch)
 
     # 441 - 100 - 30 = 311（冷却期的 300s 算作播放——无进度源只能这么估，本修复没改）
     assert ctrl._tracker.position(441.0) == pytest.approx(311.0)
+
+
+def test_name_matches_multi_artist_separator_variants():
+    """多歌手分隔符归一：酷狗报「、」歌词源写「/」，两侧都是多歌手时逐段比对。"""
+    # 实机样本（酷狗 20.1 SMTC → 网易云歌词源）
+    assert music_lyric._name_matches("FLOW/GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW、GRANRODEO", "FLOW/GRANRODEO")
+    assert music_lyric._name_matches("周杰伦/蔡依林", "周杰伦、蔡依林")
+    assert music_lyric._name_matches("FLOW feat. GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW, GRANRODEO", "FLOW、GRANRODEO")
+
+
+def test_name_matches_multi_artist_does_not_overreach():
+    """单侧无分隔符保持原语义；两侧多歌手但谁都不沾边不误判。"""
+    assert not music_lyric._name_matches("周杰伦", "林俊杰、蔡依林")
+    assert not music_lyric._name_matches("A", "B、C")
+    assert not music_lyric._name_matches("FLOW/GRANRODEO", "MUSE、Aimer")
+
+
+def test_name_matches_feat_split_never_shreds_single_names():
+    """feat/ft 必须带词边界（盲审 P1）：swift/craft/daft punk 这类含 ft/feat
+    字母序列的单名不得被拆碎成"多歌手形态"，碎片子串不得乱命中。"""
+    for single in ("Taylor Swift", "Craft", "Daft Punk", "Soft Cell", "Leftfield",
+                   "Featherstone"):
+        # 单名 vs 多歌手：单侧无分隔符，不许借碎片命中
+        assert not music_lyric._name_matches(single, "林俊杰、蔡依林"), single
+    # 碎片假阳性实案（ops5.5 审查实测）：'cra' 不得借 'raf' 碎片命中
+    assert not music_lyric._name_matches("Craft/Lift", "Soft、Raft")
+    # 逐段相等：任一段相等即命中（"BTS/Halsey" 与 "BTS、Coldplay" 共有 'bts' 段）
+    assert music_lyric._name_matches("BTS/Halsey", "BTS、Coldplay")
+    assert not music_lyric._name_matches("BTS/Halsey", "BT、Coldplay")  # 'bt' 不是 'bts'
+    # feat 的正常形态仍认（词边界 + 可选句点）
+    assert music_lyric._name_matches("FLOW feat. GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW ft GRANRODEO", "FLOW/GRANRODEO")
+
+
+def test_name_matches_feat_split_has_both_word_boundaries():
+    """feat/ft 双侧词边界（astra 盲审）：Featherstone→herstone、FTIsland→island
+    这类词首拆碎不得发生，拆出的碎片不得参与命中。"""
+    assert not music_lyric._name_matches("Featherstone/Alpha", "Herstone、Beta")
+    assert not music_lyric._name_matches("FTIsland/Alpha", "Island、Beta")
+    # 左侧边界（消融：去掉 feat/ft 前的 \b 时这三条必须转红）：没有左边界时
+    # "ft" 在单词内部就被当分隔符切，"Daft Punk"→"Da"+"Punk"、
+    # "Swift Lefty"→"Swi"+"Lefty"、"Soft Cell"→"So"+"Cell"——切出的碎片跟对侧
+    # 真多歌手串里的段相等，单名就被误认成多歌手命中。
+    assert not music_lyric._name_matches("Daft Punk", "Da、Punk")
+    assert not music_lyric._name_matches("Swift Lefty", "Swi、X")
+    assert not music_lyric._name_matches("Soft Cell", "So、胖胖")
+    # 正例仍认：独立 feat 标记（含无空格/带句点形态）
+    assert music_lyric._name_matches("FLOW feat. GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW feat.GRANRODEO", "FLOW、GRANRODEO")
+    assert music_lyric._name_matches("FLOW ft GRANRODEO", "FLOW/GRANRODEO")
+    assert music_lyric._name_matches("FLOW ft. GRANRODEO", "FLOW/GRANRODEO")

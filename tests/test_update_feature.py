@@ -43,15 +43,20 @@ def test_settings_update_page_does_not_write_config(tmp_path, monkeypatch):
     config = Config(tmp_path)
     before = config.path.read_bytes() if config.path.exists() else None
     page = UpdatePage(config, include_chat=False)
+    # 模拟版本必须比当前 __version__ 新（版本号会随发布上涨，写死必腐坏）
+    from pet import __version__ as _cur
+    _parts = [int(x) for x in _cur.split(".")]
+    _parts[-1] += 1
+    newer = ".".join(str(x) for x in _parts)
     release = {
-        "version": "4.3.0",
+        "version": newer,
         "notes": "notes",
         "assets": {},
         "asset_details": {},
         "html_url": "https://github.com/MerZlin/dsh-pet-indesktop/releases",
     }
     page._on_check_finished(release)
-    assert page.status_label.text().startswith("发现 v4.3.0")
+    assert page.status_label.text().startswith(f"发现 v{newer}")
     after = config.path.read_bytes() if config.path.exists() else None
     assert after == before
     page.close()

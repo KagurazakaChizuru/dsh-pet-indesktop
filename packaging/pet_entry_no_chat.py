@@ -21,6 +21,12 @@ if "--settings" in sys.argv:
 
     sys.exit(_run_settings())
 
+if "--ocr-worker" in sys.argv:
+    # 同 pet_entry.py：本地 OCR 的识别子进程，必须在 import pet.app 之前分流。
+    from pet.__main__ import _run_ocr_worker
+
+    sys.exit(_run_ocr_worker())
+
 from pet.app import main
 
 if __name__ == "__main__":

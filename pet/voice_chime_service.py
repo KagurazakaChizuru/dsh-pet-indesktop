@@ -94,6 +94,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import tts, tts_secrets
+from .tts_diagnostics import missing_dependency_hint
 from .voice_chime import (
     build_bubble_sentence,
     build_chime_sentence,
@@ -1517,7 +1518,7 @@ class VoiceChimeService:
                 logger.exception("桌面通知失败")
 
     def _notify_missing_tts(self) -> None:
-        msg = "语音报时需要 edge-tts 库：请运行 pip install edge-tts 后重试"
+        msg = missing_dependency_hint()
         logger.warning(msg)
         self._bubble(msg)
 

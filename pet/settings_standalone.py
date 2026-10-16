@@ -23,6 +23,8 @@ from __future__ import annotations
 import importlib.util
 import logging
 
+from .tts_diagnostics import missing_dependency_hint
+
 logger = logging.getLogger(__name__)
 
 # 惰性构造的独立进程通道子类缓存（模块顶层不 import voice_chime_service）。
@@ -130,7 +132,7 @@ def _guard_voice_preview(dialog) -> None:
     if button is None:
         return
     button.setEnabled(False)
-    button.setToolTip("独立设置进程试听需要 edge-tts 库：请运行 pip install edge-tts 后重试")
+    button.setToolTip(missing_dependency_hint())
 
 
 def preview_voice_chime(dialog, text: str = "") -> None:

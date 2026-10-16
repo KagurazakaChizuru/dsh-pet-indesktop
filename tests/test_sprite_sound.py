@@ -45,6 +45,11 @@ def _player(monkeypatch, values=None, hit_min_dv=100.0, clock=None):
                         lambda path, volume: plays.append(volume) or True)
     monkeypatch.setattr(click_sound, "resolve_click_sound_candidates",
                         lambda pack, data_dir=None: ["/tmp/click.wav"])
+    # 先把上一条用例延后提交的那一声抽干再清表：播放走
+    # ``QTimer.singleShot(0)`` 且音效池是进程级的，别处（如撞出真碰撞的用例）
+    # 排下的播放会落在本用例的第一次 ``_pump`` 里，混进"我的动作响了几声"。
+    _pump()
+    plays.clear()
     world = SimpleNamespace(hit_min_dv=hit_min_dv)
     player = SpriteSoundPlayer(_Cfg(values), world,
                                clock=clock or (lambda: 1000.0))
@@ -513,7 +518,9 @@ def test_shell_click_feedback_and_collision_listener(tmp_path, monkeypatch):
         # 的 test_click_sound_uses_clicked_sprite_config 因此红过）。
         _pump()
         # 碰撞监听器已挂接
-        assert shell._sound.on_collision in shell.collision._listeners
+        # 碰撞监听器已挂接：共享播放器经壳按事件所在屏的世界分派（多屏逐屏一份
+        # 世界，播放器只持一块屏做缺省）
+        assert shell._on_collision_sound in shell.collision._listeners
     finally:
         shell._delete_runtime_marker()
 

@@ -32,6 +32,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import pet.window as window_mod  # noqa: E402
@@ -52,7 +53,13 @@ QUEUE_LIMIT_BASELINE = 64
 # ---------------------------------------------------------------- 脚手架
 @pytest.fixture
 def probes(monkeypatch):
-    """记录全部 ``show_text``（含时长）与全部音效播放。"""
+    """记录全部 ``show_text``（含时长）与全部音效播放。
+
+    音效统计**只算本用例自己提交的**：``SpriteSoundPlayer`` 把播放推迟到下一轮
+    事件循环（``QTimer.singleShot(0)``，见 ``_submit``），而音效池是进程级的，
+    上一条用例撞出来的那一声会落在本用例的事件循环里。先冲一次事件循环再清表，
+    "迁移不得出声"这条断言测的才是本用例的动作。
+    """
     shown: list[dict] = []
     sounds: list[object] = []
     original = PetSpeechBubble.show_text
@@ -65,6 +72,8 @@ def probes(monkeypatch):
     monkeypatch.setattr(PetSpeechBubble, "show_text", recording_show_text)
     monkeypatch.setattr(click_sound.ClickSoundPool, "play_sound",
                         lambda self, path, volume=1.0: sounds.append(path) or True)
+    app.processEvents()          # 冲掉上一条用例延后提交的播放
+    sounds.clear()
     return shown, sounds
 
 
@@ -463,7 +472,7 @@ def test_screen_migration_rehangs_alert_and_resolve_by_id_works(tmp_path, probes
         assert _copies(shell, ALERT_TEXT) == [_bubble_of(shell, child)]
         assert [item["id"] for item in shell._alert_queue] == ["q1"]
 
-        shell._migrate_to_screen(app.primaryScreen())
+        shell._migrate_to_screen(QGuiApplication.primaryScreen())
         app.processEvents()
 
         assert shell._bubble_followers.get(child) is not follower_before, \
@@ -538,7 +547,7 @@ def test_carrier_bubble_hidden_wired_once_across_rebinds(tmp_path, probes):
         app.processEvents()
         assert shell._alert_current["id"] == "n1"
 
-        shell._migrate_to_screen(app.primaryScreen())
+        shell._migrate_to_screen(QGuiApplication.primaryScreen())
         app.processEvents()
         assert shell._alert_current["id"] == "n1"
         assert _copies(shell, QUEUED_TEXT) == [_bubble_of(shell, child)]

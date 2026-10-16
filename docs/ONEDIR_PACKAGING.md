@@ -11,6 +11,9 @@ AIGC:
 
 # onedir 打包流水线（绿色版 zip + Inno Setup 安装包）
 
+Android 原生测试包使用独立 Gradle 工程，共用角色素材；其工具链、资源导出和
+验收见 [Android 悬浮桌宠](ANDROID.md)，不使用下述 PyInstaller 流程。
+
 目标：**运行期零解压**——不再产生 `C:\...\Temp\_MEIxxxxxx` 缓存。
 
 - onefile：每次启动把全部素材解压到系统临时目录；崩溃/强杀/断电残留；启动慢（GIF 版 800MB 每次全解压）
@@ -19,7 +22,8 @@ AIGC:
 ## 一、构建 onedir + zip 绿色版
 
 应用图标由待机封面帧生成（`python scripts/make_icon.py` → `assets/icon.ico`），
-exe 与安装包共用；换形象后重新生成即可。
+exe、运行期窗口图标与安装包共用同一份；换形象后重新生成即可（见下面
+[运行期应用图标](#运行期应用图标assetsiconico三端都带)）。
 
 ```powershell
 # 全部变体：
@@ -36,15 +40,79 @@ dist-onedir\dsh-pet-standalone-webm-chat-portable.zip
 
 绿色版用法：解压 zip 到任意盘（E:\、D:\、U 盘均可），双击 exe 即用；无安装、无缓存。
 
+### 语音依赖门禁（4.3.1）
+
+4.3.1 的语音依赖门禁在三端构建中均强制执行：构建前运行
+`python scripts/verify_bundle_tts.py --environment`，要求已安装的 edge-tts 满足
+`requirements.txt` 的 `>=7.3.1,<8`；冻结后运行同脚本的 `--app-dir` 检查，
+同时核对模块闭包、包内发行元数据和构建环境版本。旧版本、缺元数据或版本不一致
+均中止打包。环境依赖可用 `python -m pip install -r requirements.txt` 更新。
+不能只在系统 Python 升级：必须用实际运行 PyInstaller 的解释器安装和检查。
+协议变更的旧版 403 对照及真实试听证据见
+[4.3.1 交付报告](PR-REPORT-DESKTOP-431-2026-10-16.md)。
+
 ### 包体瘦身（默认开启，`-SkipSlim` 可关闭）
 
 构建在 Qt runtime 复制之后、中文编码自检之前自动执行 `python scripts\slim_bundle.py`：
 
-- **移除白名单**：Qt Quick/QML 栈（`Qt6Quick` / `Qt6Qml*`）、`Qt6VirtualKeyboard` + 平台输入法插件、`Qt6OpenGL`、`Qt6Pdf` + `qpdf.dll` 图像插件、`opengl32sw.dll`、非中英 `*.qm` 翻译（保留 12 个中英）、PIL `_avif` 扩展 —— 合计 124 文件 / 53 MB；
+- **移除白名单**：Qt Quick/QML 栈（`Qt6Quick` / `Qt6Qml*`）、`Qt6VirtualKeyboard` + 平台输入法插件、`Qt6OpenGL`、`Qt6Pdf` + `qpdf.dll` 图像插件、`opengl32sw.dll`、非中英 `*.qm` 翻译（保留 12 个中英）、PIL `_avif` 扩展、OpenCV 的 FFMPEG 视频后端（`_internal/cv2/opencv_videoio_ffmpeg*.dll`，本机实测 28 MB —— 本地 OCR 只用 cv2 的图像算子，不碰视频 I/O；删掉后冻结包 OCR 实测照常认出文字，见下文「随包的本地 OCR 模型」）—— 合计 125 文件 / 81 MB；
 - **安全校验**：移除前做依赖闭包校验（pefile 反向 import 检测，保留的二进制若仍引用待删文件即中止）与必需清单校验（核心运行文件齐全），任一失败即中止构建；
 - **效果**：onedir 目录 309 MB → 256 MB，portable zip 176.2 MB → 146.5 MB（−12.8%）；
+  **注意口径**：上表与这组数字都是 **2026-09 的实测**（当时的包体还没有本地 OCR 的
+  numpy / cv2 依赖）。本地 OCR 把它们带回包之后，产品变体**没有重测过**体积；
+  手边有实测数字的是 OCR 探针包（2026-10-13，`--console` 最小依赖，不是产品变体）：
+  `du -sm` 334 MB，删掉那一个 OpenCV 视频后端（28 MB）后 306 MB，移除清单命中
+  100 项、违例 0（证据：`.scratch/screen-capture/build_ocr_hidden.out`）。
+  产品变体下次出包时应该顺手量一遍并回填这里，而不是继续引用 2026-09 的数字；
 - 后续需要完整 Qt 栈（例如启用 QML 界面）时加 `-SkipSlim`；
 - 冒烟建议：把配置切到 `voice_chime_schedule=every_minute` 启动 exe，确认 `%APPDATA%\dsh-pet-standalone-<variant>\voice_chime_cache` 新增 mp3（edge-tts 合成落盘），验证完恢复配置。
+
+### 运行期应用图标：`assets/icon.ico`（三端都带）
+
+`--icon assets/icon.ico`（Windows）/ `--icon assets/icon.icns`（macOS）只决定
+**可执行文件 / `.app` 的图标资源**；窗口标题栏那一个图标是运行期由
+`pet/application_icon.py::load_application_icon()` 从 `<_MEIPASS>/assets/icon.ico`
+读出来的（源码运行时取仓库根的同一相对路径）。所以这一份本身**也必须进包**，
+三个构建脚本各有一行：
+
+| 脚本 | 那一行 |
+|---|---|
+| `scripts/build_onedir.ps1` | `--add-data "assets\icon.ico;assets"` |
+| `scripts/build_macos.sh` | `--add-data "assets/icon.ico:assets"` |
+| `scripts/build_linux.sh` | `--add-data "assets/icon.ico:assets"` |
+
+- **为什么 `--icon` 不算数**：它写的是**文件图标**，冻结进程里窗口图标读的是
+  `_MEIPASS` 布局；而**漏掉这一行不会有任何构建报错**——包照出、图标静默没有。
+  （反过来，源文件**不存在**时 PyInstaller 会直接报 `Unable to find '<源>'` 并中止
+  构建：本机实测 6.22.2，文件源与目录源都是这个行为。所以这里不需要再加一道存在性
+  门，要守的是"这一行在不在、指向对不对"。）
+- **真机实测的落点**：`--add-data "assets/icon.ico;assets"` 在冻结进程里就是
+  `<_MEIPASS>/assets/icon.ico`（onedir 的 `_MEIPASS` = 安装目录里的 `_internal`；
+  本机用只带这一行的最小 onedir 探针包实测：产物 `_internal/assets/icon.ico`
+  419 110 字节，冻结进程里 `is_file()` 为真）。
+- **macOS 上它同样在 `_MEIPASS` 里看得见（源码级推断，未在 Mac 上跑）**：
+  PyInstaller 6 把**数据**目录放 `Contents/Resources`，再把整个目录交叉链接（符号
+  链接）回 `Contents/Frameworks`，而 `sys._MEIPASS` 就是 `Contents/Frameworks`
+  ——两条规则写在同一段源码注释里（`PyInstaller/building/osx.py`，本机装的是
+  6.22.2）。`verify_rapidocr_models.py` 找产物时同时试
+  `Contents/Resources/<rel>` 与 `Contents/Frameworks/<rel>`，正是同一机制的既有证据。
+  Linux 无此层，`_MEIPASS` 就是产物根。
+- **Linux 上更要靠它**：PyInstaller 在 Linux 忽略 `--icon`（见 `build-linux.yml`
+  的说明），窗口/任务栏图标只能来自这条 `--add-data`。
+- **图标本体是构建期生成的**：`scripts/make_icon.py` 从待机封面帧出
+  `assets/icon.ico`（Windows 构建第 [0/3] 步；macOS 另跑 `--icns` 出 `.icns`；
+  Linux 不重生成，随包用的就是入库的那一份）。入库的是**多尺寸** ICO（实测 10 档：
+  256/128/96/64/48/40/32/24/20/16，419 110 字节），只为保证干净克隆与 CI 能构建
+  （`.gitignore` 里是白名单）。
+- **安装包不用额外条目**：`packaging/dsh-pet.iss` 的 `[Files]` 递归拷整个 onedir
+  目录，`SetupIconFile` 另用同一份 ICO 作安装包图标。
+- **契约测试**：`tests/test_application_icon.py` 钉住三件事——三端脚本里的
+  `--add-data` 真的挂在 PyInstaller 调用上、目标目录等于产品常量
+  `pet/application_icon.py::APPLICATION_ICON_RELATIVE_PATH`（`("assets", "icon.ico")`，
+  唯一真相源，脚本里不抄第二份路径）、多尺寸与生成器 `make_icon.ICON_SIZES` 一致；
+  顺带钉住"没有 Qt GUI 应用时不许构造 QIcon"（真实崩溃形态：无应用时
+  `QIcon(<文件>)` 让进程以退出码 127 死掉，空的 `QIcon()` 无碍）与
+  "缺件/坏件只回退成空图标、不抛异常"。
 
 ### 随包分发的第三方二进制：`resources/presentmon/`
 
@@ -79,6 +147,67 @@ dist-onedir\dsh-pet-standalone-webm-chat-portable.zip
   然后 `python scripts/verify_presentmon.py` 自证；许可文本从同一 release 的源码树取
   `LICENSE.txt`。构建过程本身**不联网**：仓库带二进制，CI 与干净克隆才能离线复现，
   这也是本仓库对「构建必需二进制」的既有处置方式（同 `assets/icon.ico`）。
+
+### 随包的本地 OCR 模型：`resources/rapidocr_models/`
+
+「截图提取文字」（快速识屏）走**随包**的三个 ONNX 模型，加载路径上没有任何下载分支：
+
+| 文件 | 说明 |
+|---|---|
+| `resources/rapidocr_models/PP-OCRv6_det_small.onnx` | 文本检测（9.5 MiB），sha256 `090f04ab…f94f` |
+| `resources/rapidocr_models/PP-OCRv6_rec_small.onnx` | 文本识别（20.2 MiB），sha256 `6f327246…4884` |
+| `resources/rapidocr_models/ch_ppocr_mobile_v2.0_cls_mobile.onnx` | 方向分类（0.6 MiB），sha256 `e47acedf…215c` |
+| `resources/rapidocr_models/LICENSE.txt`、`MODEL_LICENSES.md` | 上游 Apache-2.0 全文与模型许可/出处声明（逐字节拷贝，随模型进包） |
+| `resources/rapidocr_models/NOTICE.md` | 本目录的出处与许可说明（本项目编写） |
+
+三个 ONNX 合计 **30.3 MiB / 31.7 MB**（31 749 509 字节，2026-10-13 实测；
+`du -sm` 报 31 MB），加上许可证与说明三份文本共 22 659 字节。
+
+- **三端都带**：`--add-data "resources/rapidocr_models;…"` 写在三个构建脚本里
+  （`build_onedir.ps1` / `build_linux.sh` / `build_macos.sh`），四个变体都有。
+- **引擎模块本身还要 hidden-import**（2026-10-13 交叉审查 B1）：截图的引擎走的是
+  **动态 seam**——`pet/screen_capture/actions.py::_resolve_engine` 用 `importlib` 按
+  字符串（`OCR_MODULE = "ocr"`）解析 `pet.screen_capture.ocr`，仓库 `pet/` 下没有一处
+  静态 import 指向它，PyInstaller 的静态分析从入口摸不到。少了这条参数，模型与配置
+  都在包里、**引擎模块不在**：冻结包里解析不出引擎，产品不崩，只是右键
+  「截图 → 提取文字」永远置灰（本机实测：不带那条参数的包 `ocr_engine_available()`
+  为假，带上的包认出字，见 `.scratch/screen-capture/build_ocr_hidden.out`）。
+  三个构建脚本因此都带 `--hidden-import pet.screen_capture.ocr`
+  （守卫：`tests/test_screen_capture_packaging.py`）。
+  **它还决定整条依赖链在不在包里**：`rapidocr` / `cv2` / `numpy` / `onnxruntime` 都是
+  靠 `ocr.py` 的静态 import 才进图的。OCR 探针包实测：不带的产物 200 MB（本地 OCR
+  整条链都不在，却还扛着 31 MB 用不上的模型），带上的 334 MB——**这条 hidden-import
+  是本地 OCR 在冻结包里是否存在的那一个开关**；本地 OCR 在包里的边际体积 ≈ 134 MB
+  （含 31 MB 模型；探针包口径，非产品变体）。
+- **还要带 rapidocr 的两份配置数据**：`config.yaml` / `default_models.yaml` 从已装的
+  `rapidocr` 包里显式取（构建脚本用 `python -c "import rapidocr; …"` 解析包目录），
+  落点 `_internal/rapidocr/`（macOS 的 `.app` 按 bundle 规范落在 `Contents/Resources/`
+  下同名路径——产物侧的门按"存在性"找这两处，不按平台猜）。不这么做的话冻结包里引擎
+  连构造都失败（2026-10-13 实测）；
+  而用 `--collect-data rapidocr` 会把它 wheel 自带的同一批 30.3 MiB 模型**再收一份**，
+  所以只补这两份 yaml。
+- **判据只有一份，来自 `pet/screen_capture/ocr.py`**（`MODEL_FILES` / `MODEL_SHA256` /
+  `MODEL_RELATIVE_DIR`）**与 `actions.py` 的 seam**（`OCR_MODULE`，脚本用
+  `required_bundle_modules()` 现算，不抄第二份字面量）。缺件或换版不会让程序崩，
+  只会让识别静默变差（错字/漏行）或直接报「请重新安装」，所以必须在打包阶段拦住。
+- **两道门 × 三端的实际接线**（`scripts/verify_rapidocr_models.py`）：
+  1. **构建前**：`python scripts/verify_rapidocr_models.py` 校验源目录里的三个模型
+     （三端都有，排在 PyInstaller 之前）；
+  2. **产物里**：`python scripts/verify_rapidocr_models.py --app-dir <产物根>` 从**产物**
+     里判三件事——引擎模块在不在产物的模块图里（读内嵌 PYZ 的 TOC，读不出来即判失败）、
+     模型在不在且 sha256 对不对、rapidocr 的两份配置在不在。三端脚本都调了它
+     （Windows 在 `build_onedir.ps1`，Linux/macOS 在各自 shell 脚本里）。
+  **真机跑过的只有 Windows**：`--app-dir` 在 Windows 上实测过（正例与反例都跑过，
+  见 `.scratch/screen-capture/build_ocr_hidden.out`）；Linux/macOS 那一行是按同一份
+  实现接的线，**从未在本机构建或运行过**（本机是 Windows），别把它当作已验证。
+- **`numpy` / `cv2` 不再是「构建机环境污染」**：本地 OCR 直接 import numpy、rapidocr
+  直接 import cv2，两者都是随包依赖（`requirements.txt` 已声明）。构建脚本的
+  `--exclude-module` 与 `slim_bundle.py` 的 `FORBIDDEN_GLOBS` 里的 numpy 条目都已删除
+  ——留着会让**每一次**构建红在一个完全正常的产物上；而排除它们曾让冻结包的 OCR
+  全线不可用（2026-10-13 实测，v3 变体）。
+- **升级模型**：换文件后同时改 `pet/screen_capture/ocr.py` 的 `MODEL_FILES` /
+  `MODEL_SHA256`、本节的表格与 `THIRD_PARTY_NOTICES.md` 第 7 节。文件名自带版本号
+  （`PP-OCRv6_*`）就是为了不让「同名不同版」成为静默替换。
 
 ### 游戏帧率的采集权限（不随包分发任何提权组件）
 
@@ -135,9 +264,24 @@ E:\tools\InnoSetup6\ISCC.exe /DMyAppShortName=dsh-pet-standalone-gif /DMyAppExeN
 5. `_internal\resources\presentmon\` 下有采集后端与它的 `LICENSE.txt`（构建期已自动校验
    名称 / sha256 / x86-64，见上面「随包分发的第三方二进制」）
 6. `_internal\resources\` 下**没有** `fps-helper\`（提权助手已归档，不随包）
-7. **FPS 开关打开、当前账户不在 `Performance Log Users` 组时**：岛上那段不显示任何数字，
+7. `_internal\resources\rapidocr_models\` 下有三个 `.onnx` 与 `LICENSE.txt` /
+   `MODEL_LICENSES.md`，`_internal\rapidocr\` 下有 `config.yaml` /
+   `default_models.yaml`（构建期已自动校验模型名称 / sha256，见上面「随包的本地 OCR 模型」）；
+   点一次「截图 → 提取文字」应能认出选区里的文字。
+   **注意**：上面那三样是**资源**，看得见；第二件致命的东西是**引擎模块本身**
+   （`pet.screen_capture.ocr`，动态 seam 的目标，只在产物内嵌的 PYZ 里，目录里看不到），
+   它由 `verify_rapidocr_models.py --app-dir` 从模块图里读出来判——手工冒烟时如果
+   「提取文字」是灰的，先跑这条门，别再去看模型目录（模型全在也照样会灰）
+8. **FPS 开关打开、当前账户不在 `Performance Log Users` 组时**：岛上那段不显示任何数字，
    而是采集链路自己的权限原文；设置页帧率段出现「授予采集权限…」按钮
    （本机没有验证过真实加组后的采集，见上面「游戏帧率的采集权限」）
+9. `_internal\assets\icon.ico` 在包里（419 110 字节、10 档尺寸），启动后窗口标题栏
+   是桌宠图标而不是系统通用图标。缺了这一件产品不崩、构建也不报错，只是图标静默
+   消失，所以接线由 `tests/test_application_icon.py` 的打包契约测试守住
+   （见上面「运行期应用图标」）。
+   **本机实测**（真实 `windows` 平台插件，非 offscreen）：`setWindowIcon(load_application_icon())`
+   之后 `WM_GETICON(ICON_BIG)` 拿到真实 HICON 句柄，不调那一行时 big/small 都返回 0
+   （= 系统通用图标）；标题栏截图见 `.scratch/appicon/titlebar.png`。
 
 ## 四、无 Chat 变体兼容性
 

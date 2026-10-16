@@ -217,3 +217,66 @@ def test_look_worker_receives_snapshot_and_does_not_mutate_shared_config(monkeyp
     # 共享对象未被污染改写
     assert shared_provider.api_key == "unresolved_or_empty"
 
+
+def test_post_vision_messages_keeps_the_endpoint_and_key_discipline(monkeypatch):
+    """messages 自带的入口（截图问答的多轮浮窗）走同一条路：端点解析、Key 纪律、
+    重试全共用，只有组包权交给调用方。
+
+    两半都验：配了独立视觉端点/视觉 Key 时带对端点和 Key；**没配视觉 Key 时一次
+    请求都不发**（聊天 Key 绝不能被带到独立视觉端点上）。组好的 messages 原样发出
+    ——这条入口的整个意义就在"整条由调用方提供"。
+    """
+    import json
+
+    import pytest
+
+    from pet import vision
+    from pet.chat.models import ProviderConfig
+
+    captured = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResponse(
+            {"choices": [{"message": {"content": "像是日报模板"}, "finish_reason": "stop"}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    messages = [
+        {"role": "system", "content": "人设台词"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "这是什么？"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAAA"}},
+        ]},
+    ]
+    p = ProviderConfig.from_dict("test", {
+        "model": "deepseek-v4-flash",
+        "api_key": "sk-chat-secret",
+        "vision_same_as_chat": False,
+        "vision_base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "vision_api_key": "sk-vision-secret",
+    })
+
+    assert vision.post_vision_messages(messages, p) == "像是日报模板"
+    assert captured["url"] == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    assert captured["headers"].get("Authorization") == "Bearer sk-vision-secret"
+    assert captured["body"]["messages"] == messages, "调用方组好的整条 messages 必须原样发出"
+    assert captured["body"]["stream"] is False
+
+    # 另一半：独立视觉端点 + 空视觉 Key ⇒ 直接报错，一个请求都不发
+    captured.clear()
+    bare = ProviderConfig.from_dict("test", {
+        "model": "deepseek-v4-flash",
+        "api_key": "sk-chat-secret",
+        "vision_same_as_chat": False,
+        "vision_base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "vision_api_key": "",
+        "vision_api_key_ref": "",
+    })
+    with pytest.raises(vision.VisionError) as exc_info:
+        vision.post_vision_messages(messages, bare)
+    assert "独立视觉服务未配置 API Key" in str(exc_info.value)
+    assert captured == {}, "视觉 Key 缺失时绝不应发起请求（聊天 Key 不得外发）"
+

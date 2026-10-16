@@ -1870,11 +1870,14 @@ def test_tts_worker_reports_missing_edge_tts_instead_of_raising(tmp_path, monkey
     assert [item[2] for item in seen] == [svc_mod.EDGE_TTS_MISSING]
 
 
-def test_service_bubbles_install_hint_when_edge_tts_import_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize("frozen", [False, True])
+def test_service_bubbles_install_hint_when_edge_tts_import_fails(tmp_path, monkeypatch, frozen):
     """服务收到 EDGE_TTS_MISSING → 走既有「请 pip install edge-tts」降级文案。"""
     import pet.voice_chime_service as svc_mod
 
     service, app, _cfg = _service(tmp_path, monkeypatch)
+    import sys
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
 
     class _MissingWorker:
         def __init__(self, text, attempts, paths, on_done) -> None:
@@ -1889,7 +1892,11 @@ def test_service_bubbles_install_hint_when_edge_tts_import_fails(tmp_path, monke
     service._fire("现在是上午九点整。", datetime(2026, 9, 15, 9, 0))
 
     assert app.win.bubbles, "缺 edge-tts 时必须给用户可见提示（不能静默）"
-    assert "pip install edge-tts" in app.win.bubbles[-1][0]
+    hint = app.win.bubbles[-1][0]
+    if frozen:
+        assert "更新" in hint and "pip install" not in hint
+    else:
+        assert "pip install edge-tts" in hint
 
 
 def test_fire_blocked_by_busy_queues_and_plays_after_synthesis_completes(tmp_path, monkeypatch):

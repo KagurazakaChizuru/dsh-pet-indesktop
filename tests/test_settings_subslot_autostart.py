@@ -36,7 +36,7 @@ def test_modern_settings_dialog_keeps_autostart_editable_for_every_pet(
 
 
 def test_autostart_row_hint_states_the_global_scope_on_a_pet_page(app, tmp_path):
-    """行说明也要说清作用域：子宠页不再写"仅主桌宠可设置"。"""
+    """行说明也要说清作用域：作用域是行内独立标注，且不再写"仅主桌宠可设置"。"""
     from pet.modern_settings_dialog import SettingRow
 
     cfg = route_settings_config(Config(tmp_path, instance_id="slot-1"))
@@ -44,7 +44,8 @@ def test_autostart_row_hint_states_the_global_scope_on_a_pet_page(app, tmp_path)
     try:
         row = dialog.findChild(SettingRow, "settingRow_autostart")
         assert row is not None
-        assert "影响所有桌宠" in row.hint_label.text()
+        assert "影响所有桌宠" in row.scope_note.text()
+        assert row.scope_note.isHidden() is False, "标注要真的呈现"
         assert "仅主桌宠可设置" not in row.hint_label.text()
     finally:
         dialog.close()

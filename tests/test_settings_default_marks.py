@@ -352,7 +352,11 @@ def test_sub_pet_page_keeps_autostart_editable_with_its_scope_stated(tmp_path, m
         _reveal(dialog, autostart)
         assert autostart.control.isEnabled() is True, "任意宠都能编辑全局的开机自启"
         assert "影响所有桌宠" in autostart.control.toolTip()
-        assert "影响所有桌宠" in autostart.hint_label.text()
+        # 作用域是行内**独立标注**（不再粘在灰说明末尾），读屏说明仍是"说明 + 标注"全文。
+        assert "影响所有桌宠" in autostart.scope_note.text()
+        assert autostart.scope_note.isHidden() is False, "标注要真的呈现"
+        assert "影响所有桌宠" not in autostart.hint_label.text(), "不许还粘在说明末尾"
+        assert "影响所有桌宠" in autostart.control.accessibleDescription()
 
         autostart.control.setChecked(True)
         app.processEvents()

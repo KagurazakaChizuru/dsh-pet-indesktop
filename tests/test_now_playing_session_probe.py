@@ -172,7 +172,11 @@ def test_os_request_happens_on_probe_thread_not_the_caller(monkeypatch):
     assert _wait_until(lambda: records), "探针应在一个宽预算内完成首次采样"
 
     assert caller not in records, f"调用线程自己查了 SMTC：{records}"
-    assert records == ["smtc-session-probe"], records
+    # 只断言「非空且每一次采样都在探针线程」：产品采样间隔是 20ms，而等待窗口
+    # 只保证"看到第一条记录"，合法地可能已经采到两次（CI 实测
+    # `['smtc-session-probe', 'smtc-session-probe']`）——钉死成恰好一次是测试过严，
+    # 不是产品缺陷。调用线程出现在记录里（同步采样消融态）仍然立刻红。
+    assert set(records) == {"smtc-session-probe"}, records
 
 
 def test_fresh_cache_read_never_touches_the_os(monkeypatch):

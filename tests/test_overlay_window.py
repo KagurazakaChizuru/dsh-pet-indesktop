@@ -422,6 +422,9 @@ def test_pet_sprite_drag_protocol():
     clip = FakeClip()
     sprite = PetSprite(FakeLibrary(clip), pos=QPointF(50, 50), scale=0.5)
     sprite.bind_clip("fake")
+    # 本条验拖拽协议（点击候选/升级/松手放下），跟手方式不归它管：
+    # drag_physics 关 = 1:1 直跟（弹簧跟随有 test_sprite_physics.py 专测）
+    sprite.drag_physics = False
     sprite.set_velocity(QPointF(120, 0))
     # 固定假钟：轨迹样本时间戳相同 → 初速不可估算 → 静止放下，
     # 不依赖真实时间流逝（时序测试纪律）
@@ -706,3 +709,84 @@ def test_rotated_sprite_at_misses_off_pixel_inside_bounds():
     probe = QPoint(int(clear.x()), int(clear.y()))
     assert bounds.contains(probe)
     assert overlay.sprite_at(probe) is None
+
+
+# ---------------------------------------------------------------- macOS 失活可见性
+def test_overlay_tool_window_stays_visible_when_application_deactivates(monkeypatch):
+    """回归：overlay 合成窗带 ``Qt.Tool``，Cocoa 在应用失活时会自动 order out 它。
+
+    真机症状（macOS，overlay 默认拓扑）：切到任何其他应用后整只桌宠从桌面消失，
+    点 Dock 图标把应用激活回来才重现——窗口只是被移出屏幕，进程并没退出。
+
+    legacy ``PetWindow`` 一直调用 ``_keep_macos_tool_window_visible``
+    （pet/window.py），overlay 新架构落成时漏了这条，故本用例守在
+    ``OverlayWindow`` 构造处：darwin 上必须已经带上
+    ``WA_MacAlwaysShowToolWindow``。
+
+    断言走**真实构造的窗口**（不是源码文本）：漏调用时
+    ``testAttribute`` 为 False，红。
+    """
+    import pet.platform_mac as platform_mac
+
+    monkeypatch.setattr(platform_mac.sys, "platform", "darwin")
+    overlay = OverlayWindow()
+    try:
+        assert overlay.testAttribute(
+            Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow) is True
+    finally:
+        overlay.close()
+        overlay.deleteLater()
+
+
+def test_overlay_window_keeps_qt_tool_flag():
+    """前提守卫：上面那条修复只在窗口仍是 ``Qt.Tool`` 时才有意义。
+
+    若将来有人把 overlay 改成普通 ``Window``（例：为捕获软件可枚举），
+    macOS 失活隐藏的问题会自然消失，但同时也不该再依赖那个属性——
+    这条用例让那次改动必须显式面对它，而不是悄悄绕过。
+    """
+    overlay = OverlayWindow()
+    try:
+        assert overlay.windowFlags() & Qt.WindowType.Tool
+    finally:
+        overlay.close()
+        overlay.deleteLater()
+
+
+def test_overlay_show_event_pushes_native_hides_on_deactivate(monkeypatch):
+    """回归：``showEvent`` 必须下发原生 ``setHidesOnDeactivate:NO``（issue #262）。
+
+    为什么不能只靠构造期的 Qt 属性 ``WA_MacAlwaysShowToolWindow``：issue #262
+    （macOS 26.2 真机）反馈该属性不再生效、``[NSWindow hidesOnDeactivate]`` 仍为
+    YES，而原生属性才是 Cocoa 失活 order out 的**真正判据**。故两条路并存，这条
+    用例守住原生那一条：把 helper 换掉，断言 ``show()`` 确实调到了它。
+
+    不去 patch ``sys.platform``（那是全进程级改动、会污染同测其他分支）——helper
+    在非 cocoa 平台本身就是安全 no-op，所以调用点无条件调用，本用例在 offscreen
+    下同样成立。
+    """
+    import pet.overlay_window as overlay_mod
+
+    seen: list[int] = []
+    monkeypatch.setattr(overlay_mod, "_mac_set_hides_on_deactivate",
+                        lambda view_id: seen.append(view_id))
+    overlay = OverlayWindow()
+    try:
+        overlay.show()
+        assert seen, "showEvent 没有下发原生 setHidesOnDeactivate:NO"
+    finally:
+        overlay.close()
+        overlay.deleteLater()
+
+
+def test_mac_set_hides_on_deactivate_is_safe_off_cocoa():
+    """offscreen/minimal 下必须恒返回 False 且不碰 objc。
+
+    这条不是"顺手写的空断言"：``_mac_set_window_level`` 的既有结论是
+    offscreen 下 ``winId()`` 不是 NSView 指针，objc_msgSend 会**直接 SIGSEGV**
+    （try/except 捕不到）。故新 helper 必须与它同口径地先判平台——本用例就是那道
+    防线：一旦有人把平台判定删掉，这里会以进程崩溃而不是断言失败的形式暴露。
+    """
+    from pet.platform_mac import _mac_set_hides_on_deactivate
+
+    assert _mac_set_hides_on_deactivate(0) is False

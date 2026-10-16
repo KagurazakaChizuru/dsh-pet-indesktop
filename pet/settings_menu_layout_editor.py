@@ -111,7 +111,7 @@ class MenuLayoutEditor(QWidget):
         preview_layout.addWidget(self.preview)
 
         self.order_button = SettingsMenuButton("排序", self)
-        self.order_button.setIcon(vector_widget_icon(self, "edit", 14))
+        self.order_button.setIcon(vector_widget_icon(self.order_button, "edit", 14))
         self.order_menu = configure_settings_action_popup(SettingsPopupMenu(self.order_button))
         self.move_up_action = self.order_menu.addAction("上移")
         self.move_down_action = self.order_menu.addAction("下移")
@@ -120,13 +120,13 @@ class MenuLayoutEditor(QWidget):
         self.order_button.setPopupMenu(self.order_menu)
 
         self.move_button = SettingsMenuButton("移动到", self)
-        self.move_button.setIcon(vector_widget_icon(self, "multi_select", 14))
+        self.move_button.setIcon(vector_widget_icon(self.move_button, "multi_select", 14))
         self.move_menu = configure_settings_action_popup(SettingsPopupMenu(self.move_button))
         self.move_menu.aboutToShow.connect(self._rebuild_move_menu)
         self.move_button.setPopupMenu(self.move_menu)
 
         self.submenu_button = SettingsMenuButton("插入", self)
-        self.submenu_button.setIcon(vector_widget_icon(self, "add", 14))
+        self.submenu_button.setIcon(vector_widget_icon(self.submenu_button, "add", 14))
         self.submenu_menu = configure_settings_action_popup(SettingsPopupMenu(self.submenu_button))
         self.new_submenu_action = self.submenu_menu.addAction("新建子菜单…")
         self.insert_separator_action = self.submenu_menu.addAction("插入分割线")
@@ -135,7 +135,7 @@ class MenuLayoutEditor(QWidget):
         self.submenu_button.setPopupMenu(self.submenu_menu)
 
         self.customize_button = SettingsMenuButton("自定义", self)
-        self.customize_button.setIcon(vector_widget_icon(self, "edit", 14))
+        self.customize_button.setIcon(vector_widget_icon(self.customize_button, "edit", 14))
         self.customize_menu = configure_settings_action_popup(SettingsPopupMenu(self.customize_button))
         self.rename_action = self.customize_menu.addAction("更换别名…")
         self.change_icon_action = self.customize_menu.addAction("选择内置图标…")
@@ -163,7 +163,7 @@ class MenuLayoutEditor(QWidget):
         self.customize_button.setPopupMenu(self.customize_menu)
 
         self.more_button = SettingsMenuButton("更多", self)
-        self.more_button.setIcon(vector_widget_icon(self, "more", 14))
+        self.more_button.setIcon(vector_widget_icon(self.more_button, "more", 14))
         self.more_menu = configure_settings_action_popup(SettingsPopupMenu(self.more_button))
         self.delete_submenu_action = self.more_menu.addAction("删除所选子菜单…")
         self.delete_separator_action = self.more_menu.addAction("删除所选分割线")

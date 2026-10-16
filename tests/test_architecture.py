@@ -257,8 +257,22 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 2026-10-14 再上调到 2508：节日页的行从构造起就挂在页面自己的持有容器里（无父的
 # SettingRow 一旦 setVisible 就是顶层窗口，会闪小窗），于是它们的行**也要**在域装配
 # 前登记进 claimed，否则会掉进「待分类（开发期）」（+3）。
-# 按文件约定预算只随实测校准，不为达标压缩行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2508
+# 2026-10-16 上调到 2515（设置页外观打磨分批，本文件净 +14）：窗口图标两处接线（import
+# +1、setWindowIcon 与注释 +3）、侧栏容器换成按字体算宽的 SettingsSidebarPane（-1，主体
+# 在 pet/settings_widgets.py）与两处行距下调（配对注释 +5）、常规域的高级组装配（+1 与其
+# 分层口径注释 +5）。控件本体、宽度计算与组描述分别落在 settings_widgets /
+# settings_page_guide，本文件只留装配与接线。**同批第二轮把预算内余量用掉、回到 2515**：
+# 「光标隐藏时自动穿透」从高级组移回「窗口与系统」、高级组只剩「直播捕获兼容」、默认最大
+# 阅读宽度换成 CONTENT_READING_MAX_WIDTH（import +1）、开机自启的范围声明改由
+# settings_pet_controls 的作用域 pass 拆成行内标注（-2），其余靠收掉几处重复注释对齐。
+# 2026-10-16 上调到 2526（允许桌宠跨屏开关，本文件净 +11）：常规域「窗口与系统」
+# 多一行（行装配 8 行 + claim 表加一个 id + 保存回写 2 行）。控件本体与两条说明
+# 文案落在 settings_pet_controls（`CROSS_SCREEN_HINT` 与作用域登记），本文件只留
+# 装配与接线；行内文案表仍是唯一来源。按文件约定预算只随实测校准，不为达标压缩
+# 行宽/合并语句；拆分仍是待办。
+# 2026-10-17 整合 PR267 后实测 2533（两侧叠加：该支的 2508 与 main 的 2526 都已被取代，
+# 合并后真值是 2533 = 2526 + 该支 TTS provider 化的净 +7）。仍按文件约定只随实测校准。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2533
 
 
 def _read(name: str) -> str:
@@ -305,6 +319,33 @@ def test_decode_fanout_does_not_depend_on_window_or_player():
     for banned in ("pet.window", "pet.webm_clip", "from .window", "from .webm_clip",
                    "import window", "import webm_clip"):
         assert banned not in src, f"decode_fanout 反向依赖 {banned}，破坏单向依赖"
+
+
+# TTS provider 层（pet/tts/）的机器化守卫（2026-10-17 加入）：provider 是可被第三方
+# 照抄的模板（docs/ADDING-A-TTS-PROVIDER.md），两条红线写在 pet/tts/base.py 的模块
+# 文档里——① 顶层不得 import Qt；② 可选/重量级依赖（edge_tts、aiohttp…）只能延迟到
+# synth() 里 import。违反的代价是「每个用户白付这笔 import」或「无 Qt 环境测不了」，
+# 所以这里把它守住：只扫模块顶层（不含函数体内的延迟 import）。
+_PET_TTS_TOP_LEVEL_BANNED = (
+    "PySide6", "PyQt",            # provider 是纯逻辑 + 一层 IO，不许碰 Qt
+    "edge_tts", "aiohttp", "requests",  # 可选/重量级依赖：必须延迟到 synth() 内
+)
+
+
+def test_tts_providers_keep_top_level_imports_light():
+    providers = sorted((PET_DIR / "tts").glob("*.py"))
+    assert providers, "pet/tts/ 下应当有 provider 模块（别把守卫扫空了还不自知）"
+    offenders: list[str] = []
+    for path in providers:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.startswith(("import ", "from ")):
+                continue  # 只扫顶层：函数体内的延迟 import 缩进了，不在此列
+            if any(banned in line for banned in _PET_TTS_TOP_LEVEL_BANNED):
+                offenders.append(f"pet/tts/{path.name}:{number}: {line.strip()}")
+    assert not offenders, (
+        "pet/tts/*.py 顶层引入了 Qt 或重量级/可选依赖（见 pet/tts/base.py 的写 provider 红线）：\n"
+        + "\n".join(offenders)
+    )
 
 
 # 多进程多宠退役层（PHASE4_DESIGN.md §3 T6 清单，4.4a 停用 / 4.4b 删除）。

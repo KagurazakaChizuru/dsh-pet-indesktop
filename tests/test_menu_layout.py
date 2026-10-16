@@ -15,6 +15,7 @@ def test_modern_default_v1_has_compact_root_and_safety_actions():
         "default.separator-profile",
         "chat",
         "look_screen",
+        "screen_capture",
         "default.separator-interaction",
         "animations_hub",
         "character",
@@ -307,6 +308,7 @@ def test_missing_user_layout_resolves_versioned_default():
         "ojingjing",
         "chat",
         "look_screen",
+        "screen_capture",
         "animations_hub",
         "character",
         "playback_speed",
@@ -329,6 +331,8 @@ def test_missing_user_layout_resolves_versioned_default():
         "music_lyric_align",
         "music_open_netease",
         "music_open_qqmusic",
+        "music_open_kugou",
+        "music_open_soda",
         "golden_spin",
         "edge_probe",
         "quick_launch",
@@ -366,6 +370,7 @@ def test_missing_user_layout_resolves_versioned_default():
         "ojingjing",
         "chat",
         "look_screen",
+        "screen_capture",
         "animations_hub",
         "character",
         "playback_speed",
@@ -531,6 +536,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
         "厉害了我的鲸",
         "AI 对话",
         "看看屏幕",
+        "截图提问",
         "播放动画",
         "切换角色",
         "播放速率",
@@ -558,7 +564,7 @@ def test_default_layout_populates_real_qmenu_hierarchy(monkeypatch):
     rendered = ["|" if action.isSeparator() else action.text() for action in menu.actions()]
     expected_rendered = [
         "厉害了我的鲸", "|",
-        "AI 对话", "看看屏幕", "|",
+        "AI 对话", "看看屏幕", "截图提问", "|",
         "播放动画", "切换角色", "播放速率", "大小", "音乐", "|",
         "桌宠控制", "快捷启动", "|",
         "工具与帮助", "Agent 联动", "|",
@@ -1343,6 +1349,9 @@ def test_network_info_entry_status_follows_its_setting(tmp_path, monkeypatch):
 
     off_cfg = Config(tmp_path / "off")
     off_cfg.set("network_info_menu_enabled", False)
+    # #271：空身份会话按 slot0 分流，全局键读的是路由视图另建的主配置（初值只取盘），
+    # 内存预置不再可见——预置必须落盘。
+    assert off_cfg.save() is True
     dialog = ModernSettingsDialog(off_cfg, include_ai=True)
     try:
         item = dialog.menu_layout_editor.item_for_action("network_info")
@@ -1427,11 +1436,19 @@ def test_advanced_setting_groups_use_single_collapsed_disclosure_layer(tmp_path,
 
 
 def test_ai_settings_content_expands_to_the_shared_page_width(tmp_path, monkeypatch):
+    """AI 域的内容跟页头共用同一个宽度契约，不是自己缩成一条窄列。
+
+    契约 = ``min(CONTENT_READING_MAX_WIDTH, 滚动视口宽)``：宽窗下内容被阅读宽度封顶
+    （见 ``settings_widgets.CONTENT_READING_MAX_WIDTH``），窄窗下就是视口宽。"共用"
+    在这里的判据是**与页头逐像素同宽**——页头与内容是同一条宽度契约的两个呈现面
+    （``_SettingsPageShell``）。
+    """
     from PySide6.QtWidgets import QApplication
 
     from pet import modern_settings_dialog as settings_mod
     from pet.config import Config
     from pet.modern_settings_dialog import ModernSettingsDialog
+    from pet.settings_widgets import CONTENT_READING_MAX_WIDTH
 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
@@ -1439,11 +1456,17 @@ def test_ai_settings_content_expands_to_the_shared_page_width(tmp_path, monkeypa
     dialog.resize(1100, 760)
     dialog.sidebar.setCurrentRow(5)
     dialog.show()
-    app.processEvents()
+    for _turn in range(3):  # 页头宽度跟着视口走，布局要多落一拍（见 _SettingsPageShell）
+        app.processEvents()
 
     ai_domain = dialog.findChild(settings_mod.QWidget, "settingsDomain_ai")
     assert ai_domain is not None
-    assert ai_domain.width() >= ai_domain.parentWidget().width() - 2
+    page = dialog.pages.currentWidget()
+    header = page.findChild(settings_mod.QWidget, "pageHeader")
+    expected = min(CONTENT_READING_MAX_WIDTH, ai_domain.parentWidget().width())
+    assert ai_domain.width() == expected, (
+        f"AI 域内容宽 {ai_domain.width()}px ≠ 共用契约 {expected}px")
+    assert header.width() == expected, "页头与内容必须同宽（一个契约两处呈现）"
     assert not dialog.ai_page.isVisible()
     dialog.reject()
     app.processEvents()
@@ -1481,6 +1504,12 @@ def test_settings_visual_hierarchy_uses_shared_product_tokens(tmp_path, monkeypa
 
 
 def test_wide_settings_title_tracks_the_centered_page_content(tmp_path, monkeypatch):
+    """页头标题跟着内容走：宽窗留白两侧对称，标题不漂到自己的位置上。
+
+    判据是**同宽**（页头与内容取同一个宽度契约，见 ``_SettingsPageShell``）；左边缘
+    允许"半个滚动条"的差——页头由页布局居中、内容由滚动视口居中，两条链天生差
+    ``滚动条宽 / 2``（有滚动条的页上 4px，无滚动条的页上逐像素相等）。
+    """
     from PySide6.QtCore import QPoint
     from PySide6.QtWidgets import QApplication, QScrollArea
 
@@ -1495,15 +1524,21 @@ def test_wide_settings_title_tracks_the_centered_page_content(tmp_path, monkeypa
     dialog.show()
     app.processEvents()
 
-    page = dialog.pages.currentWidget()
-    title = page.findChild(settings_mod.QLabel, "pageTitle")
-    scroll = page.findChild(QScrollArea, "settingsScroll")
-    content = scroll.widget()
-    assert title.mapTo(page, QPoint(0, 0)).x() == content.mapTo(page, QPoint(0, 0)).x()
-
-    dialog.resize(720, 700)
-    app.processEvents()
-    assert title.mapTo(page, QPoint(0, 0)).x() == content.mapTo(page, QPoint(0, 0)).x()
+    for width, height in ((1600, 900), (720, 700)):
+        dialog.resize(width, height)
+        for _turn in range(3):  # 页头宽度跟着视口走，布局要多落一拍
+            app.processEvents()
+        page = dialog.pages.currentWidget()
+        title = page.findChild(settings_mod.QLabel, "pageTitle")
+        scroll = page.findChild(QScrollArea, "settingsScroll")
+        content = scroll.widget()
+        title_x = title.mapTo(page, QPoint(0, 0)).x()
+        content_x = content.mapTo(page, QPoint(0, 0)).x()
+        extent = max(0, scroll.width() - scroll.viewport().width())
+        assert abs(title_x - content_x) <= extent, (
+            f"{width}×{height}：标题 {title_x} 与内容 {content_x} 错开超过滚动条宽 {extent}")
+        assert title.width() == content.width(), (
+            f"{width}×{height}：标题 {title.width()}px / 内容 {content.width()}px 不同宽")
     dialog.reject()
     app.processEvents()
 
@@ -1523,7 +1558,11 @@ def test_setting_rows_name_and_describe_their_controls_for_accessibility(tmp_pat
     assert row.label.buddy() is row.control
     assert row.label.wordWrap()
     assert row.control.accessibleName() == row.label.text()
-    assert row.control.accessibleDescription() == row.hint_label.text()
+    # 可访问说明 = 行内**全部**可读文案：说明 + 作用域标注（标注只是从说明末尾换到独立
+    # 一行呈现，读屏听到的内容不许因此变少，见 SettingRow.set_scope_note）。
+    assert row.control.accessibleDescription() == (
+        row.hint_label.text() + row.scope_note.text())
+    assert "影响所有桌宠" in row.control.accessibleDescription()
     assert "QPushButton:focus" in dialog.styleSheet()
 
     dialog.reject()
@@ -2789,3 +2828,405 @@ def test_system_font_stack_matches_platform():
     )
     assert "," not in custom, f"自选字体被拼成多族: {custom}"
     assert "Consolas" in custom
+
+
+def test_screen_capture_menu_entry_keeps_shared_vector_icon():
+    """「截图提问」菜单项继续用 shared 矢量图标，不挂任何位图品牌素材。"""
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    QApplication.instance() or QApplication([])
+
+    from pet.context_menus.icons import vector_menu_icon
+    from pet.context_menus.shared import add_screen_capture_menu
+
+    class _Pet:
+        def on_screen_capture(self):
+            pass
+
+    menu = QMenu()
+    action = add_screen_capture_menu(menu, _Pet())
+    assert action is not None
+    assert action.icon().pixmap(16, 16).toImage() == vector_menu_icon(menu, "size").pixmap(16, 16).toImage()
+    menu.deleteLater()
+
+    bare = QMenu()
+    assert add_screen_capture_menu(bare, _Pet(), icons=False).icon().isNull()
+    bare.deleteLater()
+
+
+# --------------------------------------------------- 音乐：四播放器启动入口
+# 2026-10-16：原先菜单里只有「打开网易云 / QQ音乐并播放」两个入口，酷狗与汽水
+# 缺失（用户点名的缺口）。四个入口必须**同源**：同一个 ``_music_player_builder``
+# 建造器 + 同一个 ``_launch_player_and_play`` worker，只有 player_key 不同；
+# 因此路径解析、冷缓存乐观启用、后台预热、负缓存置灰、手填路径失效提示这几条语义
+# 由共享代码一次性给出，新键不该各写一遍。
+
+_PLAYER_KEYS = ("netease", "qqmusic", "kugou", "soda")
+
+
+def _player_entry_labels() -> dict[str, str]:
+    """播放器键 → 菜单项文案（文案取自 ``music_players`` 注册表的显示名）。"""
+    from pet import music_players
+
+    return {
+        key: f"打开{music_players.player_label(key)}给主人放歌"
+        for key in _PLAYER_KEYS
+    }
+
+
+def _full_menu_pet(values=None):
+    """构建整棵真实菜单用的最小宿主替身（口径同 test_default_layout_...）。"""
+    from PySide6.QtGui import QPixmap
+
+    class _Cfg:
+        def __init__(self, seed):
+            self.values = dict(seed)
+
+        def get(self, key, default=None):
+            return self.values.get(key, default)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+        def save(self):
+            return None
+
+    class _Pet:
+        cfg = _Cfg({
+            "context_menu_layout": None,
+            "character": "shenshen",
+            "on_top": True,
+            "agent_link": {},
+            "music_lyric_enabled": True,
+            **(values or {}),
+        })
+        idles = ["待机"]
+        turns = moves = clicks = acts = []
+        playback_speed = scale = 1.0
+        drag_physics = no_move = mouse_through = False
+
+        def icon_pixmap(self, size=64):
+            pixmap = QPixmap(size, size)
+            pixmap.fill()
+            return pixmap
+
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: None
+
+    return _Pet()
+
+
+def _build_full_menu(monkeypatch, pet):
+    """按默认布局建一棵真实菜单（窗口侧与 overlay 侧共用这一条路径）。"""
+    from PySide6.QtWidgets import QApplication, QMenu
+
+    from pet import catalog
+    from pet.context_menu import populate_context_menu
+    from pet.context_menus import shared
+
+    monkeypatch.setattr(shared.autostart_mod, "is_enabled", lambda: False)
+    monkeypatch.setattr(catalog, "list_available_characters", lambda: ["shenshen"])
+    QApplication.instance() or QApplication([])
+    menu = QMenu()
+    populate_context_menu(menu, pet)
+    return menu
+
+
+def _music_entries(menu) -> dict:
+    """音乐子菜单：文案 → QAction。"""
+    submenu = next(a.menu() for a in menu.actions() if a.text() == "音乐")
+    return {a.text(): a for a in submenu.actions() if not a.isSeparator()}
+
+
+def _wait_until(predicate, *, timeout: float = 15.0) -> bool:
+    """轮询等待（事件同步 + 宽预算，不赌固定 sleep 时序）。"""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+def _save_player_cache():
+    from pet import music_players
+
+    saved = dict(music_players._cache)
+    with music_players._warm_lock:
+        inflight = set(music_players._warm_inflight)
+    music_players.clear_cache()
+    return saved, inflight
+
+
+def _restore_player_cache(saved) -> None:
+    from pet import music_players
+
+    cache, inflight = saved
+    music_players.clear_cache()
+    music_players._cache.update(cache)
+    with music_players._warm_lock:
+        music_players._warm_inflight.clear()
+        music_players._warm_inflight.update(inflight)
+
+
+def test_music_submenu_registers_and_places_every_known_player():
+    """四播放器各有一个「打开…并播放」入口，且模板与注册表同时到位。
+
+    两头缺一都不行：**模板**决定默认树形状（老用户布局由
+    ``_merge_future_default_actions`` 按模板锚点补进同一位置），**注册表**决定 id
+    能不能渲染——只补注册表就是"老用户永远看不到"，只补模板则节点被当
+    unknown-action 丢掉（旧版扁平菜单绕开注册表的历史形态）。
+    """
+    from pet import music_players
+    from pet.context_menus.registry import ACTION_ICONS, ACTION_LABELS, MENU_ACTIONS
+
+    # 注册表里登记过的播放器都必须有菜单入口：后端再加播放器时不会漏掉菜单一侧。
+    assert {
+        f"music_open_{key}" for key in music_players.PLAYERS
+    } <= MENU_ACTIONS.ids
+
+    for key in _PLAYER_KEYS:
+        action_id = f"music_open_{key}"
+        assert action_id in MENU_ACTIONS.ids, f"注册表缺 {action_id}"
+        assert ACTION_LABELS.get(action_id), (
+            f"{action_id} 没有规范文案：菜单编辑器里会退化成裸 id")
+        assert ACTION_ICONS.get(action_id) == "play"
+
+    layout = load_default_menu_layout("modern-default-v1")
+    music = next(node for node in layout["nodes"] if node.get("id") == "music")
+    assert [node["id"] for node in music["children"]] == [
+        "music_pause",
+        "music_next",
+        "music_prev",
+        "music_quit",
+        "music_lyric_align",
+        "music.separator-launch",
+        "music_open_netease",
+        "music_open_qqmusic",
+        "music_open_kugou",
+        "music_open_soda",
+    ]
+
+
+def test_new_player_entries_click_routes_its_own_key_through_the_shared_worker(monkeypatch):
+    """酷狗 / 汽水入口各自把**自己的**键交给共用的启动 worker。
+
+    这是"复制一份建造器"最容易犯的错：key 抄错（点酷狗起的是汽水）。这里走完整
+    点击路径（注册表建的菜单项 → action.trigger() → worker），核对 worker 收到的
+    播放器键与传给系统媒体控制的 exe basename。
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from pet import music_players, now_playing
+    from pet.context_menus import shared
+
+    monkeypatch.setattr(music_players, "warm_cache_async", lambda key, manual="": True)
+    monkeypatch.setattr(
+        music_players, "cached_player",
+        lambda key, manual="": (music_players.CACHED_FOUND, f"D:/players/{key}.exe"),
+    )
+    resolved: list[str] = []
+    played: list[str] = []
+    monkeypatch.setattr(
+        music_players, "find_player",
+        lambda key, manual="": (resolved.append(key), f"D:/players/{key}.exe")[1],
+    )
+    monkeypatch.setattr(
+        now_playing, "play_session_for",
+        lambda exe_name: (played.append(exe_name), True)[1],
+    )
+
+    app = QApplication.instance() or QApplication([])
+    entries = _music_entries(_build_full_menu(monkeypatch, _full_menu_pet()))
+    labels = _player_entry_labels()
+    try:
+        for key in ("kugou", "soda"):
+            action = entries[labels[key]]
+            assert action.isEnabled() is True, f"{key} 入口应可用：{action.toolTip()}"
+            resolved.clear()
+            played.clear()
+            action.trigger()
+            assert _wait_until(lambda: played == [f"{key}.exe"]), (
+                f"{key} 入口没走通共用 worker：resolved={resolved} played={played}")
+            assert resolved == [key], f"{key} 入口解析了别的播放器键：{resolved}"
+        # 收口：worker 收工信号是 queued 的，处理事件让信号桥自己出队，
+        # 不把排队事件/残留对象留给后续用例。
+        _wait_until(lambda: not shared._LAUNCH_BRIDGES)
+    finally:
+        for _ in range(20):
+            app.processEvents()
+
+
+def test_new_player_entry_labels_follow_the_player_registry(monkeypatch):
+    """新入口文案取自播放器注册表的显示名，不另抄一份标签。
+
+    注入受控注册表（而不是依赖本机装了哪个播放器）：四个入口的文案一一对应各自的
+    key，抄错 key 或写死显示名都会红。
+    """
+    from pet import music_players
+
+    controlled = dict(music_players.PLAYERS)
+    controlled["kugou"] = ("酷狗音乐", "KuGou.exe", ("KuGou",))
+    controlled["soda"] = ("汽水音乐", "SodaMusic.exe", ("Soda Music",))
+    monkeypatch.setattr(music_players, "PLAYERS", controlled)
+    monkeypatch.setattr(music_players, "warm_cache_async", lambda key, manual="": True)
+    saved = _save_player_cache()
+    try:
+        entries = _music_entries(_build_full_menu(monkeypatch, _full_menu_pet()))
+    finally:
+        _restore_player_cache(saved)
+
+    for key in _PLAYER_KEYS:
+        expected = f"打开{music_players.player_label(key)}给主人放歌"
+        assert expected in entries, f"{key} 的入口缺失或文案错位：{sorted(entries)}"
+
+
+def test_cold_cache_keeps_all_four_entries_optimistic_and_warms_each_once(monkeypatch):
+    """冷缓存：四个入口乐观启用（不置灰），并各自幂等触发一次后台预热。"""
+    from pet import music_players
+
+    saved = _save_player_cache()
+    warms: list[str] = []
+    monkeypatch.setattr(
+        music_players, "warm_cache_async",
+        lambda key, manual="": (warms.append(key), True)[1],
+    )
+    try:
+        entries = _music_entries(_build_full_menu(monkeypatch, _full_menu_pet()))
+    finally:
+        _restore_player_cache(saved)
+
+    for key, label in _player_entry_labels().items():
+        action = entries[label]
+        assert action.isEnabled() is True, f"冷缓存应乐观启用：{label}"
+        assert "找不到" not in action.toolTip(), (
+            f"冷缓存不等于「找不到」，不该挂禁用理由：{action.toolTip()}")
+    assert warms == list(_PLAYER_KEYS), "冷缓存下每个播放器各触发一次幂等预热"
+
+
+def test_inflight_warm_keeps_entry_enabled_and_stays_idempotent(monkeypatch):
+    """预热在途：入口保持乐观启用，且再次开菜单不会重复起一条扫描。"""
+    from pet import music_players
+
+    saved = _save_player_cache()
+    real_warm = music_players.warm_cache_async
+    with music_players._warm_lock:
+        music_players._warm_inflight.add("kugou")
+    # 在飞期间真实现必须直接返回 False（幂等）——测试里也不能真起扫描线程。
+    assert real_warm("kugou") is False, "在飞期间必须幂等"
+    warms: list[str] = []
+    monkeypatch.setattr(
+        music_players, "warm_cache_async",
+        lambda key, manual="": (warms.append(key), True)[1],
+    )
+    try:
+        entries = _music_entries(_build_full_menu(monkeypatch, _full_menu_pet()))
+        label = _player_entry_labels()["kugou"]
+        assert entries[label].isEnabled() is True, "在途预热不该把入口置灰"
+        # 菜单侧照旧按冷缓存处理（发起幂等预热）；去重是预热层的职责。
+        assert "kugou" in warms
+    finally:
+        _restore_player_cache(saved)
+
+
+def test_negative_cache_greys_the_new_entry_with_settings_hint(monkeypatch):
+    """负缓存命中（扫过、本机没有）：置灰 + 保留说明，且不再重扫。"""
+    from pet import music_players
+
+    saved = _save_player_cache()
+    music_players._cache["kugou"] = None
+    warms: list[str] = []
+    monkeypatch.setattr(
+        music_players, "warm_cache_async",
+        lambda key, manual="": (warms.append(key), True)[1],
+    )
+    try:
+        entries = _music_entries(_build_full_menu(monkeypatch, _full_menu_pet()))
+    finally:
+        _restore_player_cache(saved)
+
+    label = _player_entry_labels()["kugou"]
+    action = entries[label]
+    assert action.isEnabled() is False
+    assert f"找不到{music_players.player_label('kugou')}" in action.toolTip()
+    assert "设置 → 桌宠 → 音乐关联" in action.toolTip()
+    assert "kugou" not in warms, "负缓存命中不该再预热"
+
+
+def test_manual_player_path_is_authoritative_for_the_new_entry(tmp_path, monkeypatch):
+    """手填路径就是权威：命中启用；文件不存在时置灰并指向设置页（不静默回退）。"""
+    from pet import music_players
+
+    exe = tmp_path / "KuGou.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(music_players, "warm_cache_async", lambda key, manual="": False)
+    label = _player_entry_labels()["kugou"]
+
+    found = _music_entries(_build_full_menu(
+        monkeypatch, _full_menu_pet({"music_player_paths": {"kugou": str(exe)}})))
+    assert found[label].isEnabled() is True
+
+    missing = _music_entries(_build_full_menu(
+        monkeypatch,
+        _full_menu_pet({"music_player_paths": {"kugou": str(tmp_path / "nope.exe")}}),
+    ))
+    assert missing[label].isEnabled() is False
+    assert "设置 → 桌宠 → 音乐关联" in missing[label].toolTip(), (
+        "手填路径失效必须给出可见反馈，不能静默回退自动搜索")
+
+
+def test_saved_user_layout_gains_the_new_player_entries_beside_their_siblings():
+    """存过布局的老用户也拿得到酷狗 / 汽水：按模板锚点插回音乐子菜单。
+
+    「新默认动作补进老布局」的通用机制另有专测；这里锁的是**本次两个新 id 的落点**：
+    插错父节点（比如掉到根菜单）时老用户会看到两条孤零零的菜单项，而那类错误只有拿
+    真实模板跑一遍才看得见。顺序也要保持——新入口跟同组的两条排在一起。
+    """
+    from pet.context_menus.registry import MENU_ACTIONS
+
+    result = resolve_menu_layout(
+        {
+            "schema_version": 1,
+            "layout_id": "user",
+            "nodes": [
+                {
+                    "type": "submenu",
+                    "id": "music",
+                    "label": "音乐",
+                    "visible": True,
+                    "children": [
+                        {"type": "action", "id": "music_open_netease", "visible": True},
+                        {"type": "action", "id": "music_open_qqmusic", "visible": True},
+                    ],
+                },
+                {"type": "action", "id": "modern_settings", "visible": True},
+                {"type": "action", "id": "quit", "visible": True},
+            ],
+        },
+        registered_actions=MENU_ACTIONS.ids,
+        available_actions=MENU_ACTIONS.ids,
+    )
+
+    music = next(node for node in result.nodes if node.get("id") == "music")
+    # 老布局里缺的默认动作一并按模板锚点补回（这是通用机制）：五个音乐控制在前，
+    # 两个新入口紧跟同组的两条启动项。
+    assert [child["id"] for child in music["children"]] == [
+        "music_pause",
+        "music_next",
+        "music_prev",
+        "music_quit",
+        "music_lyric_align",
+        "music_open_netease",
+        "music_open_qqmusic",
+        "music_open_kugou",
+        "music_open_soda",
+    ]
+    assert "default-action-added:music_open_kugou" in result.diagnostics
+    assert "default-action-added:music_open_soda" in result.diagnostics
+    # 补出来的入口只进音乐子菜单，不会掉到根菜单
+    root_ids = [node.get("id") for node in result.nodes]
+    assert "music" in root_ids
+    assert "music_open_kugou" not in root_ids
+    assert "music_open_soda" not in root_ids

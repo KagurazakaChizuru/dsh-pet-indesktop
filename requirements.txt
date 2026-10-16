@@ -23,7 +23,7 @@ lunar-python>=1.4.8
 # 打包版用户无法自行 pip 安装——所以在此声明为运行时依赖，并在三个构建
 # 脚本里配 --collect-all edge_tts（它用 importlib.metadata 取版本、子模块
 # 存在动态导入，PyInstaller 静态分析收不全）。
-edge-tts>=6.1.10
+edge-tts>=7.3.1,<8
 
 # —— 歌词显示（可选）——
 # 「显示歌词」功能靠 Windows 系统媒体控制（SMTC）读取当前播放的曲目。
@@ -53,6 +53,37 @@ winrt-Windows.Media>=3.0; platform_system == "Windows"
 # 并在三个构建脚本里 collect，否则打包版拿不到它，「避开阻塞」等于没生效。
 # 纯 Python、静态 import，PyInstaller 静态分析即可收集。
 psutil>=5.9
+
+# —— 快速识屏：本地 OCR（pet/screen_capture/ocr.py + ocr_worker.py）——
+# RapidOCR（PP-OCR 模型 + ONNXRuntime 推理），全靠本地、断网可用：模型文件随包
+# 放在 resources/rapidocr_models/（检出后 31.6 MB，见 pet/screen_capture/ocr_models.py
+# 的模块说明里有现成的重新取出命令）。
+#
+# **为什么不是 rapidocr-onnxruntime**：那个包（这个项目的上一代发行名）在 PyPI 上
+# 钉死了 `Requires-Python: <3.13,>=3.6`，本机是 3.13.7，pip 只会回退到 2023 年的
+# 1.2.3；`rapidocr` 是同一个项目改的名（RapidAI），仍是 onnxruntime 推理同一批
+# PP-OCR 模型，且支持 3.8~3.x 全段。两个包不能同时装（会争 rapidocr 顶层模块名）。
+rapidocr>=3.10,<4
+
+# 推理引擎。rapidocr 本身**不**依赖任何引擎（它支持 onnxruntime / openvino /
+# paddle / torch / tensorrt），所以引擎必须在这里单独声明，否则识别时会抛
+# ImportError：本应用的取舍是 ONNXRuntime——CPU-only、无 GPU 驱动依赖、体积可控。
+# 本机验证版本 1.20.1；1.31 起 sympy 从硬依赖降为 extra（安装/打包面更小）。
+onnxruntime>=1.20
+
+# 下面三个虽然也是 rapidocr 的传递依赖，但 pet/screen_capture/ 下的产品代码**直接
+# import 它们**，所以按仓库既有口径（tests/test_runtime_dependencies.py：「运行时
+# import 了却没人声明」是缺陷）显式写在最前面，不靠别人带：
+#   numpy：输出块的坐标，以及识别子进程里把 PNG 字节包成解码输入。
+#   omegaconf：rapidocr 的配置容器；用它 document 的 allow_objects 开关把自建的
+#              onnxruntime session 注入进去（详见 ocr_worker.py::_attach_sessions）。
+#   opencv：识别子进程拿到的是一张 PNG（宿主侧 QImage 内存编码，不落盘），解码
+#           归 cv2 管——它的 IMREAD_COLOR 会把带 alpha / 灰度 / 调色板的图一律
+#           折成 rapidocr 要的 3 通道 BGR。rapidocr 声明的是
+#           opencv-python-headless；本机两套都在，headless 才是跑服务该装的那一个。
+numpy>=1.26
+omegaconf>=2.3
+opencv-python-headless>=4.5.1.48
 
 # —— 开发依赖（测试 + 静态检查）——
 # pytest：测试套件入口（README「测试与验证」与本仓库 CI 都依赖它）。

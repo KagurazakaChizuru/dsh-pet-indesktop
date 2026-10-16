@@ -50,7 +50,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
-    QListWidgetItem,
     QLayout,
     QMessageBox,
     QMenu,
@@ -98,6 +97,7 @@ from .menu_layout import (
     resolve_menu_layout,
 )
 from . import settings_close_flow
+from .application_icon import load_application_icon
 from .settings_slot_config import route_settings_config
 from .speech_bubble import BUBBLE_STYLE_PRESETS
 from .update_settings import UpdatePage
@@ -144,6 +144,7 @@ from .settings_widgets import (
     ModernSelect,
     BrowserSpinBox,
     BrowserDoubleSpinBox,
+    CONTENT_READING_MAX_WIDTH,
     CollapsibleGroup,
     SettingRow,
     ResponsiveActionRow,
@@ -151,6 +152,10 @@ from .settings_widgets import (
     SettingsCard,
     SettingsDisclosureHeader,
     SettingsSection,
+    SettingsSidebarPane,
+    refresh_settings_icons,
+    settings_save_exit_button,
+    settings_sidebar_item,
     _CurrentPageStack,
     SettingsTabContainer,
     _SettingsPageShell,
@@ -266,8 +271,8 @@ class ModernSettingsDialog(QDialog):
     def __init__(self, config, parent=None, *, include_ai: bool = True,
                  standalone: bool = False, initial_page: str | None = None):
         super().__init__(parent)
-        # 子宠设置页：非 per-slot 键直读**主**配置（而不是 slot 文件里的无效快照），
-        # 保存时按同一分流写回。不适用（主身份 / legacy 拓扑）时原样返回，
+        # slot 设置页（含 #271 起的主宠页 = slot0 页）：非 per-slot 键直读**主**配置
+        #（而不是 slot 文件里的无效快照），保存时按同一分流写回。
         # 见 pet/settings_slot_config.py 的模块 docstring。
         config = route_settings_config(config)
         # 每张表单一份**独立编辑视图**（草稿 + 编辑代次基线各自一份，运行期那份保持只读）：
@@ -284,6 +289,9 @@ class ModernSettingsDialog(QDialog):
         self.setProperty("modernStyle", True)
         self.setProperty("menuStyle", "modern")
         self.setWindowTitle("桌宠设置")
+        # 原生标题栏的图标：不设的话 Windows 摆的是系统给的通用图标（--icon 只写进
+        # 可执行文件/应用包的文件图标资源，与窗口属性是两回事）。拿不到时是空图标。
+        self.setWindowIcon(load_application_icon())
         self.resize(800, 560)
         self.setMinimumSize(720, 500)
         self._positioned_away = False
@@ -301,24 +309,21 @@ class ModernSettingsDialog(QDialog):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
 
-        sidebar_pane = QFrame(self)
-        sidebar_pane.setObjectName("sidebarPane")
-        sidebar_pane.setFixedWidth(200)
+        sidebar_pane = SettingsSidebarPane(self)
         sidebar_layout = QVBoxLayout(sidebar_pane)
         sidebar_layout.setContentsMargins(12, 16, 12, 12)
-        sidebar_layout.setSpacing(9)
-        self.save_exit_button = QPushButton("保存并退出", sidebar_pane)
-        self.save_exit_button.setObjectName("saveAndExit")
-        self.save_exit_button.setIcon(vector_widget_icon(self.save_exit_button, "back", 16))
-        self.save_exit_button.clicked.connect(self._save)
-        self.save_exit_button.setAutoDefault(False)
-        self.save_exit_button.setDefault(False)
+        # 间距 3px + 导航行距 1px：slot 页有两个重置按钮时，默认窗口 800×560 下 10 个
+        # 能力域要全落在视口里；3px 把本机余量 4 → 19px（CI 280：Ubuntu 上 6px 不够）。
+        sidebar_layout.setSpacing(3)
+        # 「保存并退出」的图标 / 保存时机 tooltip / 焦点旗标都在控件库里（本文件有行数预算）。
+        self.save_exit_button = settings_save_exit_button(sidebar_pane, self._save)
         sidebar_layout.addWidget(self.save_exit_button)
         self.search_edit = QLineEdit(sidebar_pane)
         self.search_edit.setObjectName("settingsSearch")
         self.search_edit.setPlaceholderText("搜索设置…")
         self.search_edit.addAction(
-            vector_widget_icon(self, "search", 16),
+            # 宿主就是搜索框自己：记在它身上的请求换主题后重画（QLineEdit 无 setIcon）。
+            vector_widget_icon(self.search_edit, "search", 16),
             QLineEdit.ActionPosition.LeadingPosition,
         )
         self.search_edit.installEventFilter(self)
@@ -331,10 +336,10 @@ class ModernSettingsDialog(QDialog):
         self.sidebar = QListWidget(sidebar_pane)
         self.sidebar.setObjectName("settingsSidebar")
         self.sidebar.setIconSize(QSize(18, 18))
-        self.sidebar.setSpacing(2)
+        # 导航行距 1px：与上面的侧栏间距一起把 10 个能力域收进默认窗口高度。
+        self.sidebar.setSpacing(1)
         sidebar_layout.addWidget(self.sidebar, 1)
-        # 全局兜底入口（命令而非偏好项，故放侧栏底部）：实现全在
-        # pet/settings_reset_defaults.py（本文件有行数预算），这里只做接线。
+        # 全局兜底入口（命令而非偏好项，故放侧栏底部；实现在 settings_reset_defaults.py）。
         settings_reset_defaults.create_reset_button(self, sidebar_layout)
         self.version_footer = QLabel(f"版本 v{__version__}", sidebar_pane)
         self.version_footer.setObjectName("settingsVersion")
@@ -490,15 +495,16 @@ class ModernSettingsDialog(QDialog):
         general_layout = QVBoxLayout(general_content)
         general_layout.setContentsMargins(0, 0, 0, 0)
         general_layout.setSpacing(18)
-        autostart_desc = "登录系统后自动启动桌宠。" if not self.config.instance_id else "登录系统后自动启动桌宠。（影响所有桌宠）"
         # 「自启目标」的说明随平台变：桌面端项在非 Windows 上置灰，文案必须
         # 说清原因（不能留着「选桌面端界面」这种本平台做不到的话）。逐字文案
         # 落在 settings_pet_controls.harness_target_hint（同行数预算约定）。
+        # 「开机自启」的范围声明同理：由 settings_pet_controls 的作用域 pass 拆成行内标注
+        # （挂在标签那一行，不占额外一行），说明与拆分机制同一处（GLOBAL_SCOPE_ROWS）。
         harness_target_hint = settings_pet_controls.harness_target_hint(
             self._harness_desktop_available
         )
         launch_rows = [
-            SettingRow("autostart", "开机自启", autostart_desc, self.autostart_check),
+            SettingRow("autostart", "开机自启", "登录系统后自动启动桌宠。", self.autostart_check),
             SettingRow(
                 "harness_autostart",
                 "随桌宠启动 dsh 服务",
@@ -542,6 +548,16 @@ class ModernSettingsDialog(QDialog):
                     SettingRow("stream_capture", "直播捕获兼容", settings_pet_controls.stream_capture_hint(), self.stream_capture_check),
                 ]
             )
+        # 「允许桌宠跨屏」不分平台（三端都有多显示器），排在窗口旗标类之后：前面几条
+        # 讲"窗口怎么摆"，它讲"桌宠能不能到别的显示器去"（行序见常规域装配的 claim 表）。
+        window_rows.append(
+            SettingRow(
+                "cross_screen",
+                "允许桌宠跨屏",
+                settings_pet_controls.CROSS_SCREEN_HINT,
+                self.cross_screen_check,
+            )
+        )
         general_layout.addWidget(SettingsSection("窗口与系统", window_rows, general_content))
         # 拓扑收口：「单进程多开」实验开关已从设置页移除，4.4b 起配置键
         # `experimental_single_process_spawn` 本身也随多进程多宠退役层删除
@@ -669,7 +685,7 @@ class ModernSettingsDialog(QDialog):
                 "音乐关联",
                 [
                     SettingRow("music_sing", "音乐自动唱歌", "检测到后台播放音乐时，自动播放唱歌动画。", self.music_sing_check),
-                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制，酷狗等需在播放器设置里手动开启。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
+                    SettingRow("music_lyric", "显示歌词", "在气泡里显示当前播放歌曲的歌词。仅 Windows 可用；需要播放器支持系统媒体控制（酷狗音乐需在其 设置 → 常规设置 → 播放 里开启「支持系统播放控件」）。歌词识别不依赖「音乐关联」里的路径——那里只影响右键「打开播放器」菜单。网易云音乐不上报播放进度，歌词按开始时间估算——快进或从中途开始播放后，用右键菜单「音乐 → 歌词对齐」校正。", self.music_lyric_check),
                     SettingRow("music_lyric_lead", "歌词提前量", "歌词相对音频的时间偏移。正值让歌词抢先显示，负值让它延后；唱得比音乐早一点通常更自然。", self.music_lyric_lead_spin),
                 ] + settings_music.browser_media_rows(self) + settings_music.foobar_lyrics_rows(self),
                 behavior_content,
@@ -1686,7 +1702,8 @@ class ModernSettingsDialog(QDialog):
                 return
 
     def _page_shell(self, title: str, content: QWidget) -> QWidget:
-        content_max_width = int(content.property("contentMaxWidth") or 960)
+        # 默认最大阅读宽度见 CONTENT_READING_MAX_WIDTH；「菜单」域的内容自己声明更宽的值。
+        content_max_width = int(content.property("contentMaxWidth") or CONTENT_READING_MAX_WIDTH)
         page = _SettingsPageShell(content_max_width, self.pages)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(30, 24, 28, 20)
@@ -1724,9 +1741,7 @@ class ModernSettingsDialog(QDialog):
         return False
 
     def _add_page(self, label: str, icon_name: str, page: QWidget) -> None:
-        item = QListWidgetItem(vector_widget_icon(self, icon_name, 16), label)
-        item.setSizeHint(QSize(0, 34))
-        self.sidebar.addItem(item)
+        self.sidebar.addItem(settings_sidebar_item(self, label, icon_name))
         self.pages.addWidget(page)
 
     def _rebuild_domain_navigation(self) -> None:
@@ -1775,7 +1790,13 @@ class ModernSettingsDialog(QDialog):
         general = page_content(
             [
                 ("应用启动", claim("autostart")),
-                ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "stream_capture")),
+                # 「光标隐藏时自动穿透」回主组：它也是窗口旗标类偏好（与置顶/全屏隐藏同族），
+                # 用户找它会先看这一组；原先跟「直播捕获」一起塞进"Windows 兼容"是埋掉了它。
+                ("窗口与系统", claim("dock_icon", "on_top", "auto_hide_fullscreen", "cursor_hidden_passthrough", "cross_screen")),
+                # 「直播捕获兼容」单独进一层折叠：行说明有四段（重启级切换、OBS 捕获方式、
+                # 平台限制、作用域），平铺在首屏就是逼用户读完。组描述只写一句"这一项做什么"，
+                # 重启/平台限制/作用域全部留在行内（展开即见全文），搜索照旧可达。
+                ("直播捕获（高级）", claim("stream_capture"), True),
                 # 首屏只回答"第一天会问的问题"：凡答案涉及 harness/dsh 的（自启服务、
                 # 自启目标）都是第 N 天才用的，进折叠——不是藏功能，是按"第几天用到"分层。
                 ("启动项（高级）", claim("harness_autostart", "harness_launch_target"), True),
@@ -2149,6 +2170,8 @@ class ModernSettingsDialog(QDialog):
         dark = theme == "dark" or (theme == "system" and _system_dark())
         self.setProperty("settingsDark", dark)
         self.setStyleSheet(_settings_stylesheet(theme))
+        # 图标是位图：QSS 换了它不会自己换色，按记录的名字重画（见 settings_widgets）。
+        refresh_settings_icons(self)
         for control in self.findChildren(ModernSelect):
             if control._popup is not None:
                 control._popup.setStyleSheet(control.popupStyleSheet())
@@ -2305,6 +2328,8 @@ class ModernSettingsDialog(QDialog):
             self.config.set("balance_tier_color_enabled", self.balance_tier_color_check.isChecked())
         if self.auto_hide_fullscreen_check is not None:
             self.config.set("auto_hide_fullscreen", self.auto_hide_fullscreen_check.isChecked())
+        if getattr(self, "cross_screen_check", None) is not None:
+            self.config.set("allow_cross_screen", self.cross_screen_check.isChecked())
         # 「单进程多开」键不落盘控件值：开关已隐藏（拓扑收口 Phase A），
         # 配置字典里加载的原值随 config.save() 原样回写（兼容保留）。
         if self.cursor_hidden_passthrough_check is not None:

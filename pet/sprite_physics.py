@@ -68,6 +68,20 @@ class ThrowPhysicsController:
                 continue
             self._advance_thrown(sprite, float(dt))
 
+    def _effective_bounds(self, sprite) -> QRectF:
+        """这次积分该用的边界：跨屏过渡中的 sprite 用它**自己域里离它最近的那块屏**。
+
+        跨屏过渡时 sprite 的合法域是多块屏的并集（``_clamp_rects``），控制器手里这
+        份单屏 bounds 会把飞行中的这只按回本屏边上（跨屏后的第二次 snap）。改用
+        sprite 自己那块屏做反弹/落地边界：既不再把它拽回本屏，也不新增"抛掷能跨屏"
+        的能力（它仍只在当前所在的那块屏里弹与落）。常规 sprite 逐位走原路径。
+        """
+        if getattr(sprite, "_clamp_rects", None):
+            rect = sprite._clamp_domain()
+            if rect is not None:
+                return QRectF(rect)
+        return QRectF(self._bounds)
+
     def _sprite_bounds(self, sprite) -> tuple[float, float, float, float]:
         """sprite 左上角的可活动范围：身体框贴 bounds 四边（V-2）。
 
@@ -75,14 +89,15 @@ class ThrowPhysicsController:
         画布透明边允许越界）——此前按整 canvas 矩形内缩，反弹发生在
         透明画布边上，与注释声称的口径不符。
         """
+        bounds = self._effective_bounds(sprite)
         rect = sprite.rect()
         body = sprite.body_rect() if hasattr(sprite, "body_rect") else rect
         off_x, off_y = body.x() - rect.x(), body.y() - rect.y()
-        left = self._bounds.left() - off_x
-        top = self._bounds.top() - off_y
+        left = bounds.left() - off_x
+        top = bounds.top() - off_y
         # sprite 比区域还大时 right/bottom 会小于 left/top：钳回，防死循环
-        right = max(left, self._bounds.right() - off_x - body.width())
-        bottom = max(top, self._bounds.bottom() - off_y - body.height())
+        right = max(left, bounds.right() - off_x - body.width())
+        bottom = max(top, bounds.bottom() - off_y - body.height())
         return left, top, right, bottom
 
     def _advance_thrown(self, sprite, dt: float) -> None:

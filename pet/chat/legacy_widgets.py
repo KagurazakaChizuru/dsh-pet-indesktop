@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from .geometry import best_position_near_pet
+from .markdown_view import markdown_to_html
 from .models import ChatMessage
 from .pet_link import PetChatLink
 from .prompt import PromptBuilder, load_character_manifest
@@ -136,7 +137,7 @@ class MessageBubble(QFrame):
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.body.setFont(QFont("Microsoft YaHei UI", 10))
-        self.body.setText(content)
+        self._set_body_text(content)
         panel.addWidget(self.body)
 
         self.status_label = QLabel()
@@ -154,8 +155,18 @@ class MessageBubble(QFrame):
         if role == "user":
             root.setDirection(QHBoxLayout.Direction.RightToLeft)
 
+    def _set_body_text(self, text: str) -> None:
+        """助手气泡按 Markdown 渲染（与现代窗同一 markdown_to_html 口径）；
+        用户气泡保持纯文本（用户输入里的 < 符号等不当 HTML 解析）。"""
+        if self.role == "assistant" and text:
+            self.body.setTextFormat(Qt.TextFormat.RichText)
+            self.body.setText(markdown_to_html(str(text)))
+        else:
+            self.body.setTextFormat(Qt.TextFormat.PlainText)
+            self.body.setText(str(text))
+
     def set_content(self, text: str) -> None:
-        self.body.setText(str(text))
+        self._set_body_text(text)
 
     def set_state(self, state: str) -> None:
         self.state = state

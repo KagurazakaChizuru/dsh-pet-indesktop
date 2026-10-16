@@ -541,6 +541,26 @@ async def _skip_async(to_previous: bool) -> bool:
     return bool(await method())
 
 
+_LOOP_LOCAL = threading.local()
+
+
+def _run_sync(coro):
+    """在调用线程的**常驻**事件循环里跑协程。
+
+    每秒一拍的歌词/会话采样如果各走 ``asyncio.run()``，每拍都要新建并销毁一个
+    事件循环（新建循环的开销实测是这条链的大头——py-spy 火焰图上
+    ``new_event_loop``/线程引导占了采样线程的近一半）。循环按线程常驻
+    （thread-local），WinRT 调用始终落在同一个循环上；线程退出时由解释器回收。
+    主线程依旧不许调（SMTC 查询实测会在主线程永久阻塞，见 ``music_lyric_controller``
+    的采样线程说明）——本函数不改变那条纪律，只改变循环的寿命。
+    """
+    loop = getattr(_LOOP_LOCAL, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        _LOOP_LOCAL.loop = loop
+    return loop.run_until_complete(coro)
+
+
 def skip_track(direction: str = "next") -> bool:
     """切换到下一首/上一首（``direction`` 为 ``"next"`` 或 ``"previous"``）。
 
@@ -550,7 +570,7 @@ def skip_track(direction: str = "next") -> bool:
     if sys.platform != "win32":
         return False
     try:
-        return asyncio.run(_skip_async(direction == "previous"))
+        return _run_sync(_skip_async(direction == "previous"))
     except Exception:
         return False
 
@@ -567,7 +587,7 @@ def toggle_play_pause() -> bool:
     if sys.platform != "win32":
         return False
     try:
-        return asyncio.run(_play_pause_async())
+        return _run_sync(_play_pause_async())
     except Exception:
         return False
 
@@ -593,7 +613,7 @@ def play_session_for(exe_name: str) -> bool:
     if sys.platform != "win32":
         return False
     try:
-        return asyncio.run(_play_session_async(exe_name))
+        return _run_sync(_play_session_async(exe_name))
     except Exception:
         return False
 
@@ -625,7 +645,7 @@ def get_now_playing(
     if sys.platform != "win32":
         return None
     try:
-        return asyncio.run(
+        return _run_sync(
             _read_async(
                 tracked_app_id,
                 allow_browser=allow_browser,
@@ -640,7 +660,7 @@ def get_now_playing(
 # --------------------------------------------------------- 唱歌链路会话探针
 #
 # ``music_detect.is_music_playing`` 跑在 Qt 主线程（音乐唱歌定时器槽），而查
-# SMTC 走 ``asyncio.run()``——主线程同步查实测会永久阻塞窗口（同类教训见
+# SMTC 走 ``_run_sync()``（线程常驻事件循环）——主线程同步查实测会永久阻塞窗口（同类教训见
 # ``music_lyric_controller`` 的采样线程说明）。所以"当前会话是什么"由下面这条
 # 常驻后台线程产出，主线程只读缓存。
 #
@@ -722,7 +742,7 @@ def refresh_session_probe_once() -> tuple:
     """
     global _session_facts, _session_facts_at
     try:
-        facts = tuple(asyncio.run(_facts_async_bounded()))
+        facts = tuple(_run_sync(_facts_async_bounded()))
     except Exception:
         facts = _NO_SESSION_FACTS
     with _probe_lock:

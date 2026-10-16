@@ -288,3 +288,19 @@ def test_switch_character_without_inflight_request_only_swaps_session(tmp_path):
     finally:
         bubble.close()
         app.processEvents()
+
+def test_reply_renders_markdown(tmp_path):
+    """快捷气泡的助手回复按 Markdown 渲染（对齐现代聊天窗 #249 的口径）——
+    用户反馈 v4.3.0 快捷气泡里 markdown 原文直出（**、## 符号裸露）。"""
+    app = QApplication.instance() or QApplication([])
+    from pet.quick_chat import QuickChatBubble
+
+    bubble = QuickChatBubble(Config(base=tmp_path))
+    try:
+        bubble._set_reply_text("重点**加粗**收尾")
+        bubble._render_reply()
+        assert 'font-weight:700' in bubble.output.text() and "加粗" in bubble.output.text(), \
+            f"markdown 未渲染: {bubble.output.text()[:80]}"  # Qt 写 span font-weight 而非 <strong>
+    finally:
+        bubble.close()
+        app.processEvents()

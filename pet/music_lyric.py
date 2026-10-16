@@ -9,11 +9,18 @@
 
 三个源都是明文 HTTP 接口，无需加密，也不下载任何音频（单曲响应约 10 KB）。
 
-**网络边界：歌词请求一律直连，不走系统代理。** 三个源都是公开接口、其中两个还是
-国内域名，走系统代理只会多绕一段路；2026-09-22 实机事故里，用户开着全局代理时
-三个源单次耗时 20~41 秒（全部超过 ``HTTP_TIMEOUT``），于是每首未缓存曲目都以
-「0 行」收场，看起来就像歌词功能被改坏了（详见
+**网络边界：歌词请求首选直连，直连坏掉时才回退一次系统代理。** 三个源都是公开
+接口、其中两个还是国内域名，走系统代理只会多绕一段路；2026-09-22 实机事故里，
+用户开着全局代理时三个源单次耗时 20~41 秒（全部超过 ``HTTP_TIMEOUT``），于是每首
+未缓存曲目都以「0 行」收场，看起来就像歌词功能被改坏了（详见
 ``docs/PR-REPORT-MUSIC-LYRIC-SYSTEM-PROXY-2026-09-22.md``）。
+
+但反过来也有用户**只有代理能出网**：2026-10-16 汽水音乐那次，同一个 URL、同一分钟
+直连恒 HTTP 500 而走系统代理 200 并真的取回歌词（详见
+``docs/PR-REPORT-SODA-LYRICS-ROUTE-2026-10-16.md``）。所以直连失败且属于**传输失败
+或 HTTP 500/502/504** 时，允许**回退一次**系统代理；401/403/404/429/503 这类
+权限/不存在/限流答复不换路（见 :func:`_may_switch_to_proxy`）。两条路线共享
+``fetch_lyrics`` 的同一份截止预算，不会把一次请求变成两倍超时。
 
 缓存放数据目录下的 ``lyrics_cache/``，只存歌词文本，不存音频、不存收听历史；
 条目数超过上限时按文件修改时间淘汰最旧的。用户可在设置页一键清空。
@@ -24,6 +31,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import re
@@ -232,8 +240,19 @@ def _prune_cache(limit: int = CACHE_LIMIT) -> None:
 
 # ---------------------------------------------------------------- 网络
 
-# 「绕过了系统代理」这件事每个进程只记一行（见 _note_proxy_bypass_once）。
-_proxy_bypass_logged = False
+# 「当前进程歌词请求走哪条路」每个进程只记一行（见 _note_route_once）。
+_route_logged = False
+
+# 直连失败时**允许**换到系统代理的 HTTP 状态：500 / 502 / 504。这三个是"这条
+# 路本身出问题"的典型状态（服务端内部错误 / 上游网关错误 / 网关超时），换个出口
+# 可能就通了。
+# 其余状态一律不换路：401/403 是权限与风控、404 是不存在、429/503 是限流，
+# 换条路重打只是把同一个答复再触发一次（也违背服务端 Retry-After 的请求）。
+_FALLBACK_STATUSES = frozenset({500, 502, 504})
+
+# 一次尝试的最小剩余预算（秒）。比这还少就不再发请求：注定来不及的那发只会
+# 白占一个连接，不会带回任何结果。
+_MIN_ATTEMPT_BUDGET = 0.25
 
 
 def _host_of(url: str) -> str:
@@ -245,9 +264,9 @@ def _host_of(url: str) -> str:
 
 
 def _build_opener():
-    """歌词请求专用 opener：**显式禁用系统代理**（直连）。
+    """歌词请求的**直连** opener（首选路线，见 :func:`_http_get_json`）。
 
-    为什么不用 ``urllib.request.urlopen``：它会自动套用系统代理
+    为什么首选直连、不用 ``urllib.request.urlopen``：后者会自动套用系统代理
     （Windows 注册表 / 环境变量，``urllib.request.getproxies()``）。用户开着
     全局模式 VPN 时，本机实测三个源单次耗时变成 41.3 / 22.1 / 20.4 秒，全部
     超过 ``HTTP_TIMEOUT``（8 秒），于是 ``fetch_lyrics`` 每次都在 9 秒死线处
@@ -261,65 +280,312 @@ def _build_opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _note_proxy_bypass_once() -> None:
-    """检测到系统代理时记一行 INFO，说明歌词请求改走直连。
+def _system_proxies() -> dict:
+    """本机的系统代理配置；``{}`` 表示没读到任何配置。
 
-    排查这类"听起来像功能坏了"的问题，第一眼就该看出网络走了哪条路：
-    原先失败原因只写 ``log.debug``，而应用是 ``basicConfig(level=INFO)``，
-    日志里只剩「0行, 耗时 9.00s」，根因被静默吞掉。
+    只读注册表 / 环境变量，不发请求。返回值**可能带凭据**（``user:pass@host``），
+    因此一律不进日志——日志里只写"直连 / 系统代理"这种路线名（见 :func:`_note_route_once`）。
+
+    注意返回值里有**不是代理**的键（``no`` 是绕过名单），所以判断"有没有第二条路"
+    要用 :func:`_fallback_proxy`，不要直接看这个字典非空。
     """
-    global _proxy_bypass_logged
-    if _proxy_bypass_logged:
-        return
     try:
         proxies = urllib.request.getproxies()
     except Exception:
+        return {}
+    if not proxies:
+        return {}
+    return {str(key): str(value) for key, value in proxies.items() if value}
+
+
+_PROXY_SCHEMES = ("http", "https")
+
+
+def _configured_proxies(proxies: dict | None = None) -> dict:
+    """系统配置里**能当代理用**的条目：``http`` / ``https``。
+
+    ``getproxies()`` 还可能出现 ``no``（绕过名单，见 ``NO_PROXY``）与 ``all``/``ftp``
+    这类条目，它们对本模块的 https 目标都不是代理——``ProxyHandler`` 按 URL 的 scheme
+    装 ``*_open`` 处理器，没装到的协议就等于直连。
+
+    ``proxies`` 可传入已读到的配置，避免失败路径上重复读注册表。
+    """
+    source = _system_proxies() if proxies is None else proxies
+    return {
+        str(key).lower(): str(value)
+        for key, value in source.items()
+        if str(key).lower() in _PROXY_SCHEMES and value
+    }
+
+
+def _fallback_proxy(url: str, proxies: dict | None = None) -> str | None:
+    """这个 URL 走系统代理时**真正会用到的**代理；没有就返回 ``None``。
+
+    判据全部沿用标准库语义（``ProxyHandler`` 怎么分派、``urllib.request.proxy_bypass``
+    怎么判），不自建规则：
+
+    1. 只有本 URL 实际协议（http/https）**有代理**才算有第二条路——``no`` 是绕过名单、
+       ``ftp``/``all`` 对本 URL 无效（见 :func:`_configured_proxies`）。
+    2. 主机命中 ``urllib.request.proxy_bypass`` 时，``ProxyHandler.proxy_open`` 会
+       直接放行成直连——那不是"回退系统代理"，再打一次只是重复直连，不能算、也不能
+       在日志里谎称成代理。
+    """
+    parts = urllib.parse.urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in _PROXY_SCHEMES:
+        return None
+    proxy = _configured_proxies(proxies).get(scheme)
+    if not proxy:
+        return None
+    host = parts.hostname
+    if host:
+        try:
+            if urllib.request.proxy_bypass(host):
+                return None
+        except Exception:
+            return None
+    return str(proxy)
+
+
+def _note_route_once() -> None:
+    """本机配了 http/https 代理时，每个进程记一行 INFO 说明路线策略。
+
+    排查这类"听起来像功能坏了"的问题，第一眼就该看出网络走了哪条路：
+    没这行 = 本机没有可用的系统代理配置，歌词请求只有直连一条路。
+    **不回显代理地址/凭据**：日志常被整段贴进 issue 与报告，那是用户环境信息。
+    """
+    global _route_logged
+    if _route_logged:
         return
-    _proxy_bypass_logged = True
-    if proxies:
-        log.info("歌词请求直连：已绕过系统代理 %s",
-                 ", ".join(sorted({str(v) for v in proxies.values() if v})))
+    _route_logged = True
+    if _configured_proxies():
+        log.info(
+            "歌词请求：检测到系统代理，首选直连；仅在直连传输失败或 HTTP 500/502/504 时回退系统代理一次"
+        )
 
 
 def _open_direct(request: urllib.request.Request, *, timeout: float):
     """用直连 opener 发请求（见 :func:`_build_opener`）。"""
-    _note_proxy_bypass_once()
+    _note_route_once()
     return _build_opener().open(request, timeout=timeout)
 
 
-def _http_get_json(url: str, *, referer: str | None = None) -> dict | list | None:
+def _open_via_system_proxy(request: urllib.request.Request, *, timeout: float, proxies: dict):
+    """回退路线：跟随系统代理（``ProxyHandler(proxies)``，见 :func:`_http_get_json`）。"""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(proxies)
+    ).open(request, timeout=timeout)
+
+
+def _may_switch_to_proxy(exc: BaseException) -> bool:
+    """直连这次的失败，是否**值得**换到系统代理再试一次。
+
+    只认两类：① **传输失败**（连不上、读超时、连接被重置、协议层坏掉——根本没
+    拿到可用响应）；② HTTP **500 / 502 / 504**。其它 HTTP 状态是对方的明确答复
+    （401/403 权限、404 不存在、429/503 限流），换条路重打只是再挨一次。
+
+    另外：**只要响应带了 ``Retry-After`` 就不换路**——服务端明确要求"等一会儿再
+    打"，立刻从另一条路再打同样违背该请求（三种取值形态都算：整数秒、HTTP 日期、
+    连内容都解析不了的）。历史上这里只看状态码，日志却写着"不换路、不重试"，
+    等于把 500/502/504 + Retry-After 的响应也换路重打了一遍。
+
+    2026-10-16 实机事实正是①的极端形态：同一个 URL、同一分钟，直连恒 500 而代理
+    200（`.scratch/soda-lyrics/REPORT.md` §4），单一固定路线让这类曲目 100% 0 行。
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code not in _FALLBACK_STATUSES:
+            return False
+        return _retry_after(exc) is None
+    # URLError / TimeoutError / 连接重置都是 OSError 的子类；BadStatusLine 这类
+    # 协议层异常走 HTTPException（不是 OSError），同属"没拿到可用响应"。
+    return isinstance(exc, (OSError, http.client.HTTPException))
+
+
+# ``Retry-After`` 头存在但值为空时，日志里用这个占位（"存在"就要阻止换路）。
+_RETRY_AFTER_BLANK = "(空值)"
+
+
+def _retry_after(exc: BaseException) -> str | None:
+    """响应头里的 ``Retry-After``，规范化成可安全写日志的短串；没有就是 ``None``。
+
+    三种形态都算**存在**（整数秒、HTTP 日期、以及解析不了的内容）——只要服务端给了
+    这个头就是在要求等待，本模块据此**不换路、也不重试**（见
+    :func:`_may_switch_to_proxy`）。值只留可打印字符并截断，避免把响应头里的
+    任意内容原样写进日志。
+    """
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    cleaned = "".join(ch for ch in str(raw).strip() if ch.isprintable())[:40]
+    return cleaned or _RETRY_AFTER_BLANK
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """失败原因的可安全落盘形态：异常类型 + HTTP 状态 + Retry-After。
+
+    **不写异常文本**（``str(exc)``）：``URLError``/``InvalidURL`` 的消息里可能带
+    内部代理地址甚至凭据（``<urlopen error ... proxy.internal:8080>``），而日志经常
+    被整段外贴；异常类型 + 状态码已经够定位，需要细节时再看探针。
+    """
+    detail = type(exc).__name__
+    status = getattr(exc, "code", None)
+    if isinstance(status, int):
+        detail += f" HTTP {status}"
+    retry_after = _retry_after(exc)
+    if retry_after is not None:
+        detail += f"（服务端 Retry-After: {retry_after}，按该响应不换路、不重试）"
+    return detail
+
+
+def _attempt_timeout(deadline: float, *, now: float | None = None) -> float | None:
+    """本次尝试可用的超时（秒）；剩余预算不足时返回 ``None``（不要发请求）。
+
+    ``now`` 显式给出"此刻"，好让**首次**尝试用与预算同一时刻的读数（否则同一
+    份预算下首次尝试会拿到 ``7.999…`` 而不是 ``HTTP_TIMEOUT`` 本身）。
+    """
+    left = deadline - (time.monotonic() if now is None else now)
+    if left < _MIN_ATTEMPT_BUDGET:
+        return None
+    return min(HTTP_TIMEOUT, left)
+
+
+def _decode_json_body(raw: bytes) -> dict | list:
+    """响应字节 → JSON（部分接口返回 JSONP，剥掉外层包裹后再解析）。"""
+    text = raw.decode("utf-8", "replace").strip()
+    if not text.startswith(("{", "[")):
+        start = text.find("(")
+        end = text.rfind(")")
+        if start != -1 and end > start:
+            text = text[start + 1:end]
+    return json.loads(text)
+
+
+def _warn_request_failed(url: str, started: float, detail: str) -> None:
+    """请求失败一律落在 INFO 可见的级别。
+
+    取词失败时日志里只有「0 行」会被误当成"功能坏了"，这里把主机、耗时与
+    异常类型留下（含超时 / 连接被拒 / 两条路各自的结局）。
+    """
+    log.warning("歌词请求失败 %s（%.2fs）: %s",
+                _host_of(url), time.monotonic() - started, detail)
+
+
+def _http_get_json(
+    url: str, *, referer: str | None = None, deadline: float | None = None
+) -> dict | list | None:
+    """GET 一个 JSON 接口并解析；失败返回 ``None``（调用方按"这个源没命中"处理）。
+
+    **路线**：首选直连（:func:`_build_opener`，2026-09-22 实测代理会把三源拖到
+    20~41 秒）。直连失败且**同时**满足下列三条时，**回退一次**系统代理：
+
+    1. 这个 URL 真的有一条代理路可走（:func:`_fallback_proxy`：本 URL 协议配了代理、
+       且没命中系统代理绕过表——否则"回退"只是把同一条直连路再打一遍）；
+    2. 失败属于传输失败或 HTTP 500/502/504，且响应没带 ``Retry-After``
+       （见 :func:`_may_switch_to_proxy`）；
+    3. 还剩够用的预算（见 :func:`_attempt_timeout`）。
+
+    只回退一次、不做周期重试，也不在这里改任何全局 HTTP 行为——其它功能照旧
+    各自跟随或绕开系统代理。日志只记异常类型 / HTTP 状态 / ``Retry-After``，
+    不写异常文本（可能夹带内部代理地址或凭据）。
+
+    ``deadline`` 是本次取词的**绝对**截止时刻（``time.monotonic()`` 口径），由
+    :func:`fetch_lyrics` 算好后逐层透传：直连与回退**共享同一份预算**，各自只拿到
+    剩余部分，因此一次请求（含回退）不会把 ``HTTP_TIMEOUT`` 翻倍成 2 倍超时。
+    不传则本次请求自带一份 ``HTTP_TIMEOUT`` 预算（单测 / 直接调用口径）。
+    """
     headers = {"User-Agent": _UA}
     if referer:
         headers["Referer"] = referer
     request = urllib.request.Request(url, headers=headers)
     started = time.monotonic()
+    if deadline is None:
+        deadline = started + HTTP_TIMEOUT
+
+    timeout = _attempt_timeout(deadline, now=started)
+    if timeout is None:
+        log.warning("歌词请求跳过 %s：剩余预算不足 %.2fs，未发起请求",
+                    _host_of(url), max(0.0, deadline - started))
+        return None
+
+    raw: bytes | None = None
+    direct_error: BaseException | None = None
     try:
-        with _open_direct(request, timeout=HTTP_TIMEOUT) as response:
+        with _open_direct(request, timeout=timeout) as response:
             raw = response.read()
-        # 部分接口返回 JSONP，剥掉外层包裹后再解析。
-        text = raw.decode("utf-8", "replace").strip()
-        if not text.startswith(("{", "[")):
-            start = text.find("(")
-            end = text.rfind(")")
-            if start != -1 and end > start:
-                text = text[start + 1:end]
-        return json.loads(text)
     except Exception as exc:
-        # 必须落在 INFO 可见的级别：取词失败时日志里只有「0 行」会被误当成
-        # "功能坏了"，这里把主机、耗时与异常类型留下（含超时 / 连接被拒）。
-        log.warning("歌词请求失败 %s（%.2fs）: %s: %s",
-                    _host_of(url), time.monotonic() - started,
-                    type(exc).__name__, exc)
+        direct_error = exc
+
+    if direct_error is not None:
+        detail = f"直连 {_failure_detail(direct_error)}"
+        proxies = _system_proxies()
+        if (
+            not _fallback_proxy(url, proxies)
+            or not _may_switch_to_proxy(direct_error)
+        ):
+            _warn_request_failed(url, started, detail)
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining < _MIN_ATTEMPT_BUDGET:
+            _warn_request_failed(
+                url, started,
+                f"{detail}；剩余预算 {max(0.0, remaining):.2f}s 不足以回退系统代理",
+            )
+            return None
+        try:
+            with _open_via_system_proxy(
+                request, timeout=min(HTTP_TIMEOUT, remaining), proxies=proxies
+            ) as response:
+                raw = response.read()
+        except Exception as proxy_error:
+            _warn_request_failed(
+                url, started,
+                f"{detail}；系统代理 {_failure_detail(proxy_error)}",
+            )
+            return None
+        log.info("歌词请求回退系统代理成功 %s（%.2fs）",
+                 _host_of(url), time.monotonic() - started)
+
+    try:
+        return _decode_json_body(raw)
+    except Exception as exc:
+        _warn_request_failed(url, started, f"响应解析失败 {type(exc).__name__}")
         return None
 
 
+# 多歌手分隔符（酷狗报「、」、歌词源多写「/」，feat./ft. 见英文曲库）：
+# 两侧都是多歌手形态时归一逐段比对，否则整串子串必然丢词。
+# feat/ft 必须带单词边界（\b），且切分发生在**去空白之前**——否则 swift/craft/
+# daft punk 这类含 ft/feat 字母序列的单名会被拆碎（盲审 P1）。
+_ARTIST_SEP_RE = re.compile(r"\s*(?:[、/／&×,，;；]|\bfeat\b\.?|\bft\b\.?)\s*", re.IGNORECASE)
+
+
 def _name_matches(candidate: str, wanted: str) -> bool:
-    """歌手名匹配：大小写不敏感，允许子串（"周杰伦" 命中 "周杰伦/Jay Chou"）。"""
+    """歌手名匹配：大小写不敏感，允许子串（"周杰伦" 命中 "周杰伦/Jay Chou"）；
+    多歌手分隔符（、/／&×,; feat./ft.）在**两侧都出现**时归一逐段比对——
+    实机样本：酷狗 SMTC 报「FLOW、GRANRODEO」而网易云歌词源写「FLOW/GRANRODEO」。"""
     a = re.sub(r"\s+", "", str(candidate or "").lower())
     b = re.sub(r"\s+", "", str(wanted or "").lower())
     if not a or not b:
         return False
-    return a in b or b in a
+    if a in b or b in a:
+        return True
+    # 在保留空白的小写串上切分（feat/ft 的词边界要靠空白/标点判定），切完去空白
+    raw_a = [re.sub(r"\s+", "", p) for p in _ARTIST_SEP_RE.split(str(candidate or "").lower())]
+    raw_b = [re.sub(r"\s+", "", p) for p in _ARTIST_SEP_RE.split(str(wanted or "").lower())]
+    raw_a = [p for p in raw_a if p]
+    raw_b = [p for p in raw_b if p]
+    # 仅两侧均呈多歌手形态时增加逐段匹配
+    if len(raw_a) < 2 or len(raw_b) < 2:
+        return False
+    # 逐段**相等**比对（去空白后）：子串比对会让 2-3 字符碎片几乎什么都命中
+    # （盲审 P2："Craft/Lift" 的 "cra" 会被 "Soft、Raft" 的 "raf" 碎片带上）。
+    return any(pa == pb for pa in raw_a for pb in raw_b)
 
 
 def _as_lyrics(lines: list[LyricLine]) -> Lyrics | None:
@@ -368,13 +634,14 @@ def _looks_instrumental(lines: list[LyricLine]) -> bool:
     )
 
 
-def _fetch_from_qq(title: str, artist: str) -> Lyrics | None:
+def _fetch_from_qq(title: str, artist: str, *, deadline: float | None = None) -> Lyrics | None:
     """QQ音乐：中文曲库匹配质量最好。"""
     query = urllib.parse.quote(f"{title} {artist}".strip())
     search = _http_get_json(
         "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
         f"?w={query}&format=json&n=10&p=1&cr=1&aggr=1",
         referer="https://y.qq.com/",
+        deadline=deadline,
     )
     if not isinstance(search, dict):
         return None
@@ -393,16 +660,17 @@ def _fetch_from_qq(title: str, artist: str) -> Lyrics | None:
         "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
         f"?songmid={songmid}&format=json&nobase64=1&g_tk=5381",
         referer="https://y.qq.com/",
+        deadline=deadline,
     )
     if not isinstance(payload, dict):
         return None
     return _as_lyrics(parse_lrc(str(payload.get("lyric") or "")))
 
 
-def _fetch_from_lrclib(title: str, artist: str) -> Lyrics | None:
+def _fetch_from_lrclib(title: str, artist: str, *, deadline: float | None = None) -> Lyrics | None:
     """lrclib：国际/日文曲目覆盖好，也是唯一会给「纯音乐」标记的源。"""
     params = urllib.parse.urlencode({"artist_name": artist, "track_name": title})
-    payload = _http_get_json(f"https://lrclib.net/api/get?{params}")
+    payload = _http_get_json(f"https://lrclib.net/api/get?{params}", deadline=deadline)
     if not isinstance(payload, dict):
         return None
     synced = payload.get("syncedLyrics")
@@ -414,13 +682,14 @@ def _fetch_from_lrclib(title: str, artist: str) -> Lyrics | None:
     return Lyrics(lines=tuple(parse_lrc(str(synced))))
 
 
-def _fetch_from_netease(title: str, artist: str) -> Lyrics | None:
+def _fetch_from_netease(title: str, artist: str, *, deadline: float | None = None) -> Lyrics | None:
     """网易云：明文接口，作为最后兜底。"""
     query = urllib.parse.quote(f"{title} {artist}".strip())
     search = _http_get_json(
         "https://music.163.com/api/cloudsearch/pc"
         f"?s={query}&type=1&offset=0&limit=10",
         referer="https://music.163.com/",
+        deadline=deadline,
     )
     if not isinstance(search, dict):
         return None
@@ -448,6 +717,7 @@ def _fetch_from_netease(title: str, artist: str) -> Lyrics | None:
     payload = _http_get_json(
         f"https://music.163.com/api/song/lyric?id={song_id}&lv=-1&kv=-1&tv=-1",
         referer="https://music.163.com/",
+        deadline=deadline,
     )
     if not isinstance(payload, dict):
         return None
@@ -481,6 +751,10 @@ def fetch_lyrics(
     ``music_lyric_cache_limit``，见 ``music_lyric_controller``）；``None`` 用
     模块默认 :data:`CACHE_LIMIT`。调用方负责夹到合法区间。
 
+    三个源共享**同一份**截止预算（``HTTP_TIMEOUT + 1.0``）：直连与可能的一次
+    路线回退都从这份预算里扣，因此整次取词的用户可见延迟与改动前一致，不会
+    因为多了一条路而翻倍。
+
     返回 :class:`Lyrics`；``instrumental=True`` 表示纯音乐（曲目存在但无词），
     调用方据此不显示歌词、也不播唱歌动画。全部失败时返回 ``None``，调用方应
     据此显示「暂无歌词」**并停止对该曲重试**，避免反复请求。
@@ -499,14 +773,14 @@ def fetch_lyrics(
         max_workers=len(_SOURCES), thread_name_prefix="lyric-fetch"
     )
     try:
+        deadline = time.monotonic() + HTTP_TIMEOUT + 1.0
         # 把 future 与源名配成对，避免用 id() 反查这种脆弱做法。
         submitted = [
-            (name, executor.submit(fetcher, title, artist))
+            (name, executor.submit(fetcher, title, artist, deadline=deadline))
             for name, fetcher in _SOURCES
         ]
         rank = {name: index for index, (name, _) in enumerate(_SOURCES)}
         found: dict[str, Lyrics] = {}
-        deadline = time.monotonic() + HTTP_TIMEOUT + 1.0
         grace_until = time.monotonic() + _PRIORITY_GRACE
 
         while submitted:

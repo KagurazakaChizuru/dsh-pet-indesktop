@@ -50,9 +50,29 @@ classDiagram
 
 **Two render topologies, one process.** `PET_RENDER_TOPOLOGY=overlay` (dev env
 flag, read only in `pet/overlay_shell.is_overlay_topology`) renders every pet as a
-`PetSprite` inside a single `OverlayWindow`; multi-pet is in-process
+`PetSprite` inside an `OverlayWindow`; multi-pet is in-process
 (`AppShell.spawn_in_process_window` / `OverlayShell.spawn_pet`, slot identity via
-`pet/overlay_spawn_state.py`). The topology verdict also reads the persistent
+`pet/overlay_spawn_state.py`). Each **occupied display** has its own
+`OverlayWindow`, owned by a `pet/screen_host.ScreenHost` that also owns that
+screen's behaviour/collision/physics worlds (screen-local coordinates: equal local
+coordinates on two displays are not the same point), while the shell, the
+`TickDriver` timer and every shared service stay single. `OverlayShell.overlay`
+and the three controllers are the *home* host's views; anything that means
+"every pet/window" enumerates `shell.hosts()`. `host_for_sprite(sprite)` and
+`move_sprite_to_screen(sprite, screen, global_pos=None)` are the per-pet screen
+seams (normal drag crosses screens with them; `ScreenHost` bounds come from the
+profile's `screen_name`/`rx`/`ry`). The whole cross-display capability is gated by
+the global `allow_cross_screen` key (default off, snapshotted once per process like
+`stream_capture_mode`): off = every pet stays on the screen the shell started on,
+one window, drags cannot cross, no second host is created. `screen_name` is the
+pet's *screen assignment*: it is stamped at first placement (every pet, so a child
+never silently follows the main pet to another display) and rewritten only by a
+deliberate cross-screen move (`_remember_sprite_screen`). `_save_child_geometry`
+writes the assignment together with ratios/facing/scale **only while the pet is on
+its assigned screen**; a temporary host (switch off, or the assigned screen
+unplugged) writes no geometry key at all, so neither the assignment nor the ratios
+it recorded on its own screen are eaten — turning the switch back on and restarting
+returns each pet to its own screen at its own position. The topology verdict also reads the persistent
 `stream_capture_mode` key (main `config.json`, snapshotted once per process by
 `pet/overlay_settings_command.is_overlay_topology`): capture mode is a
 restart-level switch to the legacy single-window path, where the pet is a real
@@ -234,8 +254,17 @@ exact breakpoint there; see `docs/agents/handoff.md`.
   a report sounds like "X worked yesterday and now it doesn't": the Windows
   system proxy / VPN is a first-class suspect — it made lyric fetching 20-41s
   (all three sources timed out) on 2026-09-22, while jsdelivr update checks only
-  work *through* the proxy. Lyric requests deliberately bypass the proxy
-  (`pet/music_lyric.py::_build_opener`); other features keep following it.
+  work *through* the proxy. Lyric requests try direct first and fall back to the
+  system proxy exactly once — only on a transport failure or HTTP 500/502/504,
+  sharing `fetch_lyrics`' single deadline budget (`pet/music_lyric.py`:
+  `_build_opener` / `_may_switch_to_proxy` / `_fallback_proxy` /
+  `_attempt_timeout`; 404/429/503 and other definitive answers never switch
+  routes, and neither does any response carrying `Retry-After`). The fallback
+  only counts when the URL's own scheme (http/https) has a proxy that the system
+  `proxy_bypass` list does not exempt — a `NO_PROXY`-only or other-scheme config
+  is not a second route. Never log proxy addresses, credentials, or raw
+  exception/URL text: route names, exception type, HTTP status and `Retry-After`
+  only. Other features keep following the proxy.
 - Treat `assets/characters/<id>/videos/` plus its manifest as one character
   package; preserve relative paths and case because packaged platforms differ.
   The manifest may declare `body_box` (`[x1, y1, x2, y2]` in source pixels,

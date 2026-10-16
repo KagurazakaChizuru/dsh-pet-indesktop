@@ -593,6 +593,16 @@ class SpriteMenuFacade:
     def request_quit(self) -> None:  # add_quit 的调用面
         self.close()
 
+    # ---------------------------------------------------------------- 截图（快速识屏）
+    #
+    # 入口一律**转发到壳**（``OverlayShell.on_screen_capture``）：截图编排件
+    # 要活得比菜单久（一次采集会话横跨菜单关闭），而本 facade 每次右键都重建，
+    # 不能当宿主——宿主是壳（见 ``overlay_shell._screen_capture``）。
+    @property
+    def on_screen_capture(self):
+        """「截图 → 框选识屏」：转发到壳的入口。"""
+        return getattr(self._shell, "on_screen_capture", None)
+
     # ---------------------------------------------------------------- 主动识屏
     def _proactive_watcher(self):
         """共享识屏监视器：壳注入面优先，缺失时从 AppShell 的 SharedSubsystems

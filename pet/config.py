@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import catalog, island_segments
+from . import catalog, island_segments, music_players
 
 
 DEFAULT_ANIMATION_GAP_SECONDS = 0.0
@@ -575,14 +575,16 @@ def _bool_or_default(value, default):
 def _clean_music_player_paths(value) -> dict:
     """手动指定的播放器可执行文件路径 {播放器键: 路径}。
 
-    键只认 music_players.PLAYERS 里的两个播放器（其余键丢弃，避免手改配置塞进
-    任何多余东西）；值必须是字符串路径，空串/非字符串一律丢弃。限长与其它路径键
-    同规（500 字符），只做配置面清洗，不碰文件系统——路径是否存在由消费方判定。
+    键只认 music_players 的注册表 ``PLAYERS``（网易云/QQ音乐/酷狗/汽水；其余键
+    丢弃，避免手改配置塞进任何多余东西），键集与右键菜单、设置页同源——新增播放器
+    只改注册表一处，这里不再抄一份固定键表。值必须是字符串路径，空串/非字符串一律
+    丢弃。限长与其它路径键同规（500 字符），只做配置面清洗，不碰文件系统——路径
+    是否存在由消费方判定。
     """
     if not isinstance(value, dict):
         return {}
     cleaned = {}
-    for key in ("netease", "qqmusic"):
+    for key in music_players.PLAYERS:
         raw = value.get(key)
         if not isinstance(raw, str):
             continue
@@ -1134,6 +1136,10 @@ class Config:
             "anim_menu_stay_open": False,
             "quick_launch_apps": [dict(item) for item in DEFAULT_QUICK_LAUNCH_APPS],
             "auto_hide_fullscreen": True,  # 全屏应用自动隐藏（Windows）
+            # 允许桌宠跨屏（全局键、重启级）：开启后每块有桌宠的屏各一张合成窗，
+            # 拖动可以跨显示器；关闭时全部桌宠只留在启动时那块屏。默认关 =
+            # 单显示器用户与旧行为逐位相同（见 overlay_shell._cross_screen_allowed）。
+            "allow_cross_screen": False,
             # 免打扰（issue #208）：右键菜单四档时长的默认档 + 全屏应用时自动等效
             # 免打扰。二者只描述**偏好**，当前是否在免打扰是运行态、不落盘。
             "quiet_minutes_default": DEFAULT_QUIET_MINUTES,
@@ -1172,7 +1178,7 @@ class Config:
             # 空 = 自动：不猜歌名/歌手顺序（见 pet/music_title.py）。出厂默认值随
             # 版本与主题变化，没有稳定契约，所以做成可配置而不是硬编码一份。
             "foobar_title_format": "",
-            # 手动指定播放器路径 {netease|qqmusic: exe 路径}：自动搜索找不到时的
+            # 手动指定播放器路径 {播放器键（网易云/QQ音乐/酷狗/汽水）: exe 路径}：自动搜索找不到时的
             # 逃生口，也能在「设置 → 桌宠 → 播放器路径（高级）」里改（
             # settings_music.build_music_player_rows），空 = 走自动搜索。
             "music_player_paths": {},
@@ -1493,6 +1499,7 @@ class Config:
             "harness_autostart",
             "harness_launch_target",
             "stream_capture_mode",
+            "allow_cross_screen",
             "pnpm_bin",
             "music_sing_enabled",
             "music_sing_grace_seconds",
@@ -1892,6 +1899,7 @@ class Config:
         self.data["animation_gap_seconds"] = _float_or_default(self.data.get("animation_gap_seconds"), DEFAULT_ANIMATION_GAP_SECONDS, 0.0, 3600.0)
         self.data["self_talk_voice_precache_enabled"] = _bool_or_default(self.data.get("self_talk_voice_precache_enabled"), False)
         self.data["cursor_hidden_passthrough"] = _bool_or_default(self.data.get("cursor_hidden_passthrough"), True)
+        self.data["allow_cross_screen"] = _bool_or_default(self.data.get("allow_cross_screen"), False)
         self.data["spawn_inherit_size"] = _bool_or_default(self.data.get("spawn_inherit_size"), True)
         self.data["spawn_scale"] = _float_or_default(self.data.get("spawn_scale"), catalog.DEFAULT_SCALE, 0.1, 4.0)
         self.data["spawn_inherit_dynamic_island"] = _bool_or_default(self.data.get("spawn_inherit_dynamic_island"), False)
@@ -2050,7 +2058,7 @@ class Config:
             _float_or_default(self.data.get("music_lyric_cache_limit"), 2000.0, 1.0, 100000.0)
         )
         # 手动播放器路径：此前只有消费方读、没有 schema 登记，手改 config.json 会
-        # 被 reload() 静默丢弃（交付前审查 P1-3）。清洗成 {netease|qqmusic: 路径}。
+        # 被 reload() 静默丢弃（交付前审查 P1-3）。清洗成 {注册表里的播放器键: 路径}。
         self.data["music_player_paths"] = _clean_music_player_paths(self.data.get("music_player_paths"))
         prewarm = str(self.data.get("media_prewarm", "balanced") or "balanced").strip().lower()
         self.data["media_prewarm"] = prewarm if prewarm in {"full", "balanced", "minimal"} else "balanced"

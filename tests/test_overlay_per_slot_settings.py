@@ -29,6 +29,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 import tests.test_overlay_collision_toggle as toggle
@@ -580,7 +581,7 @@ def test_migrate_rebuilds_every_bubble(tmp_path):
         old_main = shell._bubble_follower
         old_child = shell._bubble_followers[child]
 
-        shell._migrate_to_screen(app.primaryScreen())
+        shell._migrate_to_screen(QGuiApplication.primaryScreen())
 
         assert shell._bubble_follower is not old_main
         assert child in shell._bubble_followers

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import functools
 import json, ssl, threading, urllib.error, urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -15,9 +16,20 @@ except Exception:  # 未安装/未打进包时回退系统默认 CA 库
 
 def _make_ssl_context(verify: bool):
     """按配置构造 SSL 上下文：verify=False 跳过证书校验（本地网关/自签名）；
-    verify=True 优先使用 certifi 的 CA 包（PyInstaller 需 --collect-all certifi）。"""
+    verify=True 优先使用 certifi 的 CA 包（PyInstaller 需 --collect-all certifi）。
+
+    构造结果按 ``verify`` 缓存：SSLContext 建好后只读复用是安全的，而
+    ``create_default_context(cafile=...)`` 每次新建实测要 ~0.5 s（certifi 加载，
+    2026-10-14 本机实测）——截图翻译/视觉问答这种"点一下就等"的短调用不该
+    每次都付这笔钱。
+    """
     if not verify:
         return ssl._create_unverified_context()
+    return _verified_ssl_context()
+
+
+@functools.lru_cache(maxsize=1)
+def _verified_ssl_context():
     try:
         if certifi is not None:
             return ssl.create_default_context(cafile=certifi.where())

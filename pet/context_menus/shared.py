@@ -915,6 +915,28 @@ def add_network_info(menu: QMenu, pet, *, icons: bool = True):
     return action
 
 
+#: 「截图」入口名。置灰理由的真值在 ``pet/screen_capture/reasons.py``
+#: （动作条「翻译」按钮的 tooltip 与结果浮层状态行共用一份）。
+SCREEN_CAPTURE_LABEL = "截图提问"
+
+
+def add_screen_capture_menu(menu: QMenu, pet, *, icons: bool = True):
+    """「截图」= 单一**直接**菜单项（不进子菜单）：点了就进框选。
+
+    交互模型（2026-10-14 实机反馈后重做）：菜单只负责**开始框选**；框完松手，
+    覆盖层动作条给出「提取文字 / 翻译 / 截图问答 / 复制图像 / 取消」由用户当场选。
+    原来还套一层只装一个叶子的子菜单——实机反馈：一个选项没必要（平铺直出）。
+
+    截图栈（控制器/覆盖层/编排件）仍只有真触发时才装载——本函数不 import
+    ``screen_capture.actions``，装载点在动作回调里（``actions_for``）。
+    """
+    callback = getattr(pet, "on_screen_capture", None)
+    if not callable(callback):
+        return None  # 宿主没接这套面（纯桌宠变体）= 能力不可用，整组不出现
+    return add_action(menu, SCREEN_CAPTURE_LABEL, "size" if icons else None,
+                      callback, close_on_trigger=True)
+
+
 def add_balance(menu: QMenu, pet, *, icons: bool = True):
     callback = getattr(pet, "on_show_balance", None)
     if callback is None:
@@ -1358,7 +1380,11 @@ def add_music_lyric_align(menu: QMenu, pet, *, icons: bool = True):
 
 
 def _music_player_builder(player_key: str):
-    """生成"打开某播放器并播放"的 builder（两个播放器共用一套逻辑）。"""
+    """生成"打开某播放器并播放"的 builder（四个播放器共用一套逻辑）。
+
+    新增播放器只加一个 ``add_music_open_<key>`` 转发（见文件末尾四个），路径解析、
+    冷缓存乐观启用、后台预热、负缓存置灰、手填路径失效提示全部由这里一次性给出。
+    """
 
     def build(menu: QMenu, pet, *, icons: bool = True):
         from .. import music_players
@@ -1395,6 +1421,14 @@ def add_music_open_netease(menu: QMenu, pet, *, icons: bool = True):
 
 def add_music_open_qqmusic(menu: QMenu, pet, *, icons: bool = True):
     return _music_player_builder("qqmusic")(menu, pet, icons=icons)
+
+
+def add_music_open_kugou(menu: QMenu, pet, *, icons: bool = True):
+    return _music_player_builder("kugou")(menu, pet, icons=icons)
+
+
+def add_music_open_soda(menu: QMenu, pet, *, icons: bool = True):
+    return _music_player_builder("soda")(menu, pet, icons=icons)
 
 
 def add_agent_cost(menu: QMenu, pet, *, icons: bool = True):

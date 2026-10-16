@@ -111,6 +111,7 @@ def _drag_steps(sprite: PetSprite, clock: FakeClock, start: tuple[float, float],
     """press 后按 (dx, dy, dt) 序列拖动，返回松手位置（不 release）。
 
     真拖拽序列 = on_press（点击候选）→ begin_drag（过阈值升级）→ on_move…
+    每步拖动后推一帧（真实拖拽中移动事件与帧交错；弹簧档靠 advance 追踪光标）。
     """
     sprite.on_press(QPointF(*start))
     sprite.begin_drag()
@@ -119,7 +120,41 @@ def _drag_steps(sprite: PetSprite, clock: FakeClock, start: tuple[float, float],
         clock.advance(dt)
         x, y = x + dx, y + dy
         sprite.on_move(QPointF(x, y))
+        sprite.advance(dt)
     return QPointF(x, y)
+
+
+# ---------------------------------------------------------------- 拖拽跟随弹簧
+def test_drag_follow_springs_when_drag_physics_on():
+    """拖拽弹簧（对齐 legacy window.py _tick_drag_physics 的 K=200/C=30 手感）：
+    drag_physics 开时 on_move 只写目标点不直写位置，advance 用 spring_velocity
+    阻尼收敛。v4.3.0 回归：overlay 拓扑从未实现这段，拖拽变 1:1 硬跟手。"""
+    clock = FakeClock()
+    sprite = _make_sprite((100.0, 100.0), clock=clock)
+    sprite.drag_physics = True
+    sprite.on_press(QPointF(110.0, 110.0))
+    sprite.begin_drag()
+    sprite.on_move(QPointF(410.0, 110.0))     # 拖拽目标 x=400（grab 偏移 10）
+
+    assert sprite.pos.x() == 100.0            # 不直写
+    for _ in range(12):                        # 0.1s：在半路（滞后），且没到
+        clock.advance(1 / 120)
+        sprite.advance(1 / 120)
+    assert 100.0 < sprite.pos.x() < 390.0
+    for _ in range(120):                       # 再 1s：收敛到目标
+        clock.advance(1 / 120)
+        sprite.advance(1 / 120)
+    assert abs(sprite.pos.x() - 400.0) < 2.0
+
+
+def test_drag_follow_stays_direct_when_drag_physics_off():
+    """drag_physics 关 = 今天的 1:1 直跟，逐字不变。"""
+    sprite = _make_sprite((100.0, 100.0))
+    sprite.drag_physics = False
+    sprite.on_press(QPointF(110.0, 110.0))
+    sprite.begin_drag()
+    sprite.on_move(QPointF(410.0, 110.0))
+    assert sprite.pos.x() == 400.0
 
 
 # ---------------------------------------------------------------- 飞行段（controller）
@@ -279,6 +314,7 @@ def test_flight_anim_speed_untouched_for_non_thrown():
 def test_high_speed_release_enters_thrown():
     clock = FakeClock()
     sprite = _make_sprite((100.0, 100.0), clock=clock)
+    sprite.drag_physics = True  # 抛掷接管只在物理拖拽开时生效（缺省 False）
     # 400px / 0.1s ≈ 4000px/s，远超 DEAD_ZONE_SPEED
     release = _drag_steps(sprite, clock, (110.0, 110.0),
                           [(40.0, 0.0, 0.01)] * 10)
@@ -288,8 +324,8 @@ def test_high_speed_release_enters_thrown():
     assert sprite.interaction_state == INTERACTION_THROWN
     assert sprite.velocity.x() > physics_mod.DEAD_ZONE_SPEED
     assert sprite.velocity.y() == 0.0                      # 纯水平甩动
-    # 松手后停在最后一次拖动位置（grab 偏移 (10,10)）
-    assert sprite.pos == release - QPointF(10.0, 10.0)
+    # 弹簧档松手不 snap：宠从滞后位置起抛（legacy 手感），不是瞬移到光标
+    assert 100.0 < sprite.pos.x() < release.x() - 20.0
 
 
 def test_slow_release_returns_normal():
@@ -303,7 +339,9 @@ def test_slow_release_returns_normal():
 
     assert sprite.interaction_state == INTERACTION_NORMAL
     assert sprite.velocity == QPointF(0, 0)                # 停住，不恢复拖拽前速度
-    assert sprite.pos == release - QPointF(10.0, 10.0)
+    # 慢拖弹簧贴得很紧：落在拖拽位置附近（不 snap，允许弹簧残差；
+    # 本例拖拽全程仅 6px，跟不上的残差 ~5.7px 是弹簧还没走完的物理事实）
+    assert abs(sprite.pos.x() - (release.x() - 10.0)) < 8.0
 
 
 def test_stale_release_returns_normal():
@@ -482,6 +520,7 @@ def test_grounded_drop_skips_thrown_capture_and_landing_warm(monkeypatch):
 def test_release_velocity_direction_matches_drag():
     clock = FakeClock()
     sprite = _make_sprite((300.0, 300.0), clock=clock)
+    sprite.drag_physics = True  # 抛掷接管只在物理拖拽开时生效（缺省 False）
     # 向右上甩：dx:dy = 3:-2
     release = _drag_steps(sprite, clock, (310.0, 310.0),
                           [(30.0, -20.0, 0.01)] * 8)
@@ -496,6 +535,7 @@ def test_release_velocity_direction_matches_drag():
 def test_release_speed_soft_clamped_below_cap():
     clock = FakeClock()
     sprite = _make_sprite((100.0, 100.0), clock=clock)
+    sprite.drag_physics = True  # 抛掷接管只在物理拖拽开时生效（缺省 False）
     # 3000px / 0.05s ≈ 60000px/s：十倍于 cap 的暴力甩
     release = _drag_steps(sprite, clock, (110.0, 110.0),
                           [(300.0, 0.0, 0.005)] * 10)

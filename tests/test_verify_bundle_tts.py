@@ -112,3 +112,28 @@ def test_minimum_modules_are_still_required(verify_tts):
     """兜底清单（含 PYZ-only 的 tabulate）不许在过滤里被削掉。"""
     assert "tabulate" in verify_tts.MINIMUM_MODULES
     assert "edge_tts" in verify_tts.MINIMUM_MODULES
+
+
+@pytest.mark.parametrize("build_version,bundle_version,ok", [
+    ("7.3.1", "7.3.1", True), ("7.2.8", "7.2.8", False),
+    ("7.3.1", "7.2.8", False), ("7.3.1", None, False),
+    ("7.3.1", "7.3.2", False), ("8.0.0", "8.0.0", False),
+])
+def test_bundle_version_gate(verify_tts, tmp_path, monkeypatch, build_version, bundle_version, ok):
+    import importlib.metadata
+
+    exe = tmp_path / "pet.exe"
+    exe.write_bytes(b"archive is the OS boundary")
+    if bundle_version:
+        metadata = tmp_path / "_internal" / f"edge_tts-{bundle_version}.dist-info" / "METADATA"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text(f"Metadata-Version: 2.4\nName: edge-tts\nVersion: {bundle_version}\n",
+                            encoding="utf-8")
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: build_version)
+    monkeypatch.setattr(verify_tts, "import_closure", lambda: set(verify_tts.MINIMUM_MODULES))
+    monkeypatch.setattr(verify_tts, "frozen_module_names", lambda exe: set(verify_tts.MINIMUM_MODULES))
+    code, summary = verify_tts.verify(tmp_path, exe)
+    assert (code == 0) is ok, summary
+    if ok:
+        assert summary["build_version"] == "7.3.1"
+        assert summary["bundle_version"] == "7.3.1"

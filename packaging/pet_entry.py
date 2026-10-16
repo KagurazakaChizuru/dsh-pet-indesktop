@@ -42,6 +42,15 @@ if "--settings" in sys.argv:
 
     sys.exit(_run_settings())
 
+if "--ocr-worker" in sys.argv:
+    # 本地 OCR 的识别子进程（切片 5）。冻结包里 exe 自己就是解释器，所以识别子进程
+    # 是"本 exe 加一个内部子命令"，路由**必须**登记在这里——冻结启动走的是本文件，
+    # pet/__main__.py 不参与。同样必须在 import pet.app 之前分流：这条路径要的正是
+    # "别把 Qt / 素材库 / 托盘拖进来"。
+    from pet.__main__ import _run_ocr_worker
+
+    sys.exit(_run_ocr_worker())
+
 from pet.app import main
 
 if __name__ == "__main__":

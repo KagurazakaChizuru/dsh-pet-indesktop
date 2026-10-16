@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEvent
+from PySide6.QtGui import QTextDocument
 from PySide6.QtWidgets import QApplication
 
 from pet.config import Config
@@ -67,7 +68,9 @@ def test_quick_chat_bubble_truncates_long_ai_reply(tmp_path: Path):
 
         assert bubble._reply_full == long_reply
         assert bubble._reply_text == "长" * limit + suffix
-        assert bubble.output.text() == bubble._reply_text
+        _doc = QTextDocument()
+        _doc.setHtml(bubble.output.text())   # 富文本信封 → 纯文本比对
+        assert _doc.toPlainText().rstrip("\n") == bubble._reply_text
         assert bubble.session.messages[-1].content == long_reply, "会话历史必须保留全文"
         # 截断预览：只留「去聊天窗」直达按钮，分页箭头/页码无意义
         assert bubble.page_widget.isVisibleTo(bubble)
@@ -83,12 +86,16 @@ def test_quick_chat_bubble_truncates_long_ai_reply(tmp_path: Path):
         assert bubble._reply_truncated is False
         bubble._delta("req-stream", "长" * 100)
         assert bubble._reply_truncated is True
-        assert bubble.output.text().endswith(suffix)
+        _doc = QTextDocument()
+        _doc.setHtml(bubble.output.text())   # 富文本信封 → 纯文本比对
+        assert _doc.toPlainText().rstrip("\n").endswith(suffix)
 
         # 短回答：不截断、不显示分页/跳转行
         bubble._active_request_id = "req-short"
         bubble._finished("req-short", "短回答")
-        assert bubble.output.text() == "短回答"
+        _doc = QTextDocument()
+        _doc.setHtml(bubble.output.text())   # 富文本信封 → 纯文本比对
+        assert _doc.toPlainText().rstrip("\n") == "短回答"
         assert bubble._reply_truncated is False
         assert not bubble.page_widget.isVisibleTo(bubble)
     finally:

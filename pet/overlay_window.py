@@ -9,7 +9,7 @@ WM/DWM 的窗口移动路径。Phase 0 实测（同目录 probe_report）该路�
 本阶段（1b/2）：逐像素穿透两端都已接通——Windows 复用 platform_win 的
 WS_EX_TRANSPARENT 轮询，非 Windows（X11/macOS）复用 platform_passthrough 的
 Qt 属性 + 原生输入穿透标志轮询，两边同一套判定/档位协议（见 showEvent）；
-多屏几何见 Phase 4。
+多屏由壳按屏开宿主窗口（pet/screen_host.py）。
 Phase 3a：右键菜单最小集（contextMenuEvent → sprite_menu.build_sprite_menu）；
 鼠标路由只让左键进拖拽 grab，右键只弹菜单（PetWindow 旧语义）。
 Phase 3b：sprite 位置监听（add_position_listener）——sprite 不产生 moveEvent，
@@ -39,13 +39,17 @@ from __future__ import annotations
 import sys
 
 import shiboken6
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QCursor, QPainter, QRegion, QScreen
 from PySide6.QtWidgets import QApplication, QWidget
 
 from . import catalog
 from . import overlay_peripherals
-from .platform_mac import _mac_no_window_shadow_flag
+from .platform_mac import (
+    _keep_macos_tool_window_visible,
+    _mac_no_window_shadow_flag,
+    _mac_set_hides_on_deactivate,
+)
 from .platform_passthrough import QtPerPixelInputController
 from .sprite_menu import build_sprite_menu
 from .sprite_slingshot import SlingshotController
@@ -72,7 +76,14 @@ class OverlayWindow(QWidget):
                             | _mac_no_window_shadow_flag())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
-        # Phase 1a 暂不做多屏：默认主屏，调用方可注入别的 QScreen。
+        # macOS：本窗带 Qt.Tool，Cocoa 在应用失活时会自动把它 order out。真机表现是
+        # 「切到别的应用后整只桌宠从桌面消失，点 Dock 图标把应用激活回来才重现」——
+        # 窗口只是被移出屏幕，进程并没有退出，所以 Dock 图标还在（真机实测：切到
+        # Finder 时本进程在屏窗口 2→0，切回 →1）。
+        # legacy ``PetWindow`` 一直带着这条修复（pet/window.py，同一 helper），overlay
+        # 单合成窗新架构落成时漏了它。只设 native 属性、不动 flags，不会重建原生窗口。
+        _keep_macos_tool_window_visible(self)
+        # 一块屏一张窗：默认主屏，调用方（壳的宿主）注入该窗所属的 QScreen。
         self._screen = screen or QApplication.primaryScreen()
         self.setGeometry(self._screen.geometry())
 
@@ -98,6 +109,11 @@ class OverlayWindow(QWidget):
         # 变化的 sprite 触发其 listeners（cb(sprite)）；外围小窗（气泡等）的
         # 跟随源——sprite 不是窗口，没有 moveEvent 可挂。
         self._position_listeners: dict = {}
+        # 跨屏过渡的**只读投影**：sprite -> 偏移（归属窗原点 − 本窗原点）。
+        # 身体跨在缝上时，缝两侧各画自己那一半：归属窗画本体，邻窗按这条映射把
+        # 同一只 sprite 平移后重画一次（本窗裁剪天然只留落在自己屏里的部分）。
+        # 只读协议：不复制 sprite/媒体、不进 tick 与 collision、不换 DPR、不抢 grab。
+        self._projections: dict = {}
         # 逐像素穿透协议字段（platform_win 的 Windows 控制器与
         # platform_passthrough 的 Qt 控制器共用同一套判定，见 showEvent 平台分派）：
         # mouse_through = 用户手动"鼠标穿透"开关（恒穿透）；_press_global 非 None
@@ -165,10 +181,20 @@ class OverlayWindow(QWidget):
 
     # ---------------------------------------------------------------- M-1 闲置降档（挂点）
     def _note_user_input(self) -> None:
-        """真实按键输入：交给 driver 做挂起自愈（丢了解锁消息也能点醒）。"""
+        """真实按键输入：交给 driver 做挂起自愈（丢了解锁消息也能点醒）。
+
+        壳层另挂 ``_user_input_cb``：输入真到达窗口时收敛穿透态。这是**兜底**
+        而非通用自愈——穿透真开着时点击根本到不了窗口，本条只在原生穿透样式
+        与窗口标记脱同步（窗口重建 / 样式被复位）时接得上；解开"grab 卡死"
+        的另有看门狗与显示/恢复两道（见
+        overlay_shell._converge_auto_cursor_hidden）。
+        """
         note = getattr(self._driver, "note_user_input", None)
         if callable(note):
             note()
+        cb = getattr(self, "_user_input_cb", None)
+        if callable(cb):
+            cb()
 
     def _note_kinetic(self) -> None:
         """运动/输入信号（M-1：升档同步立即，不等下一个 tick）。
@@ -184,10 +210,25 @@ class OverlayWindow(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # macOS：原生关掉 hidesOnDeactivate（issue #262 / #273）。Cocoa 失活时
+        # order out 窗口的**真正判据**就是这个原生属性；Qt 属性
+        # （__init__ 里已下发的 WA_MacAlwaysShowToolWindow）在部分系统版本上被
+        # 反馈为不再生效，故两条路并存。必须在这里调用：showEvent 时 winId()
+        # 才指向就绪的 NSView，构造期拿不到。非 cocoa 平台本函数是安全 no-op。
+        _mac_set_hides_on_deactivate(int(self.winId()))
         self._refresh_tick_interval()  # V-6：显示时重读刷新率（电池 DRR）
         self._feed_dpr()               # V-11：DPR 由 overlay 统一喂
         self._arm_dpr_change_watch()   # D2/P1：屏 DPR 变化 → 重喂 + 重建
         self._note_kinetic()           # M-1：可见即回 T0（从 T3 唤醒）
+        # 穿透态收敛（壳层挂的 ``_shown_cb``）：显示/恢复侧无条件解除上一个
+        # 会话的自动穿透（光标隐藏）——那条状态下整窗点不到。光标真还藏着时
+        # 探测表随即补拍，同一拍（或最迟下一拍 50ms）重报 HIDDEN 把穿透重建；
+        # 曾经用来挡这一拍的 HIDDEN 闸因"制造永久卡死"已被撤销，见
+        # overlay_shell._converge_auto_cursor_hidden 的裁决段。
+        # 排在可见性上报**之前**：先收敛再补拍，探测表那一拍给出的才是最新真值。
+        shown_cb = getattr(self, "_shown_cb", None)
+        if callable(shown_cb):
+            shown_cb()
         # O2：可见性上报（隐藏期停掉的光标探测在这里恢复，且立即补一次探测）
         overlay_peripherals.note_overlay_visibility(self, True)
         if sys.platform == "win32":
@@ -489,10 +530,56 @@ class OverlayWindow(QWidget):
         # M12c：聚合 sprite 数归零 → 驱动器停表（空窗期不再空转）
         self._driver.note_sprite_count_changed()
 
+    def detach_sprite_for_transfer(self, sprite) -> None:
+        """跨屏移交：把 sprite 摘出本窗，但**不**广播移除、**不**释放 clip。
+
+        与 ``remove_sprite`` 的分工就是"搬家"与"退场"：搬家不是注销——行为/
+        探头/彩蛋状态、clip 所有权、驱动器时钟都要原样过继给目标宿主。故这里
+        只做本窗自己的簿记（z 序、位置监听、脏/活力回调、残留像素），
+        不通知 ``_sprite_removed_listeners``、不 ``note_sprite_count_changed``
+        （后者会在一摘一加之间把整组 tick 停掉再重启）。
+
+        瞄准会话是按下窗的会话（aiming 期间 sprite 定锚不动、不参与换屏），
+        故这里不需要处理 slingshot。
+        """
+        if sprite not in self.sprites:
+            return
+        self.sprites.remove(sprite)
+        self._position_listeners.pop(sprite, None)
+        sprite._dirty_cb = None
+        sprite._kinetic_cb = None
+        self.update(QRegion(sprite.rect()))
+
     def add_sprite_removed_listener(self, cb) -> None:
         """注册 sprite 移除通知（V-9 外部簿记注销挂点）；重复注册 no-op。"""
         if cb not in self._sprite_removed_listeners:
             self._sprite_removed_listeners.append(cb)
+
+    # ---------------------------------------------------------------- 跨屏只读投影
+    def set_projection(self, sprite, offset) -> None:
+        """登记/更新一只**属于别的窗**的 sprite 在本窗的只读投影。
+
+        ``offset`` = 归属窗原点 − 本窗原点（把这只的局部坐标搬进本窗坐标系的平移
+        量）。只读：本窗只借 painter 平移重画它的当前帧，不持有它的驱动权。
+        """
+        self._projections[sprite] = QPointF(offset)
+
+    def clear_projection(self, sprite) -> bool:
+        """摘掉一只投影（返回是否原本有）。"""
+        return self._projections.pop(sprite, None) is not None
+
+    def projection_offset(self, sprite):
+        """该投影的映射偏移（没投影返回 None）。"""
+        return self._projections.get(sprite)
+
+    def projection_rect(self, sprite) -> QRect:
+        """该投影在本窗坐标系里的绘制外接矩形（脏区映射用它）。"""
+        offset = self._projections.get(sprite)
+        if offset is None:
+            return QRect()
+        rect = (sprite.paint_bounds() if hasattr(sprite, "paint_bounds")
+                else sprite.rect())
+        return rect.translated(int(offset.x()), int(offset.y()))
 
     # ---------------------------------------------------------------- 位置监听（Phase 3b）
     def add_position_listener(self, sprite, cb) -> None:
@@ -523,8 +610,12 @@ class OverlayWindow(QWidget):
         节流窗口"的强制同步入口（见 ``sprite_bubble.SpriteBubbleFollower``）；
         未实现的监听方（壳层簿记、聊天跟随窗等）原样跳过。锚点由跟随方自算，
         本类既不认识跟随器的存在形式，也不依赖壳层。
+
+        跟随方注册在**持有该 sprite 的 overlay** 上（跨屏移交后 ≠ 本窗），故经
+        ``_follow_overlay`` 取归属窗，而不是直接用本窗的监听表。
         """
-        for cb in list(self._position_listeners.get(sprite, [])):
+        owner = self._follow_overlay(sprite)
+        for cb in list(owner._position_listeners.get(sprite, [])):
             flush = getattr(cb, "follow_now", None)
             if not callable(flush):
                 continue
@@ -534,6 +625,19 @@ class OverlayWindow(QWidget):
                 # 外围跟随方失败绝不打断拖拽主链路（气泡同款静默降级）：
                 # 其余监听方与后续拖拽收尾照旧。
                 pass
+
+    def _follow_overlay(self, sprite):
+        """持有该 sprite 位置监听的 overlay（默认本窗；跨屏移交由子类解析）。"""
+        return self
+
+    def _sprite_event_pos(self, sprite, global_pos, local_pos) -> QPointF:
+        """鼠标事件坐标 → sprite 所在坐标系（overlay 局部）坐标。
+
+        单屏装配下 sprite 的坐标系就是本窗局部坐标，返回 ``local_pos`` 逐位
+        等值。跨屏拖动时 sprite 的**归属**已是别的宿主（见 shell 的移交），而
+        输入会话仍留在按下窗，故由子类覆写本钩子按全局坐标换算。
+        """
+        return local_pos
 
     # ---------------------------------------------------------------- 统一 tick
     def before_sprites_advance(self, dt: float) -> None:
@@ -599,6 +703,22 @@ class OverlayWindow(QWidget):
                 continue  # M14：隐藏 sprite 跳过绘制（脏区域照旧被覆盖擦除）
             if region.intersects(sprite.rect()):
                 sprite.paint(painter)
+        # 跨屏投影：不属于本窗、但身体有一部分落在本屏的那只，按映射平移重画。
+        # 画在本窗自己的 sprite 之上（正在被拖的那只是活动对象，压在别人上面）。
+        # 本窗裁剪天然只留落在自己屏里的那一部分——这就是"两边各画一半"的拼接。
+        for sprite, offset in list(self._projections.items()):
+            if not getattr(sprite, "visible", True):
+                continue
+            rect = (sprite.paint_bounds() if hasattr(sprite, "paint_bounds")
+                    else sprite.rect()).translated(int(offset.x()), int(offset.y()))
+            if not region.intersects(rect):
+                continue
+            painter.save()
+            try:
+                painter.translate(offset)
+                sprite.paint(painter)
+            finally:
+                painter.restore()
         self._paint_slingshot(painter)  # 瞄准 UI 层（橡皮带 + 轨迹预览，最上）
         painter.end()
 
@@ -628,8 +748,8 @@ class OverlayWindow(QWidget):
     def sprite_at(self, local_pos: QPoint | QPointF):
         """逐像素联合命中：z-order 顶层往下，绘制外接矩形粗筛 + alpha 细判。
 
-        参数为 overlay 局部坐标（Phase 1a 单屏：= 屏幕物理坐标 - overlay
-        原点）。Windows 穿透轮询与鼠标路由共用此判据。
+        参数为 overlay 局部坐标（= 全局 - 本窗原点；多屏下每块屏一张窗，
+        各自的局部坐标互不相通）。Windows 穿透轮询与鼠标路由共用此判据。
 
         粗筛用 ``paint_bounds()`` 而非 ``rect()``：45° 探头 / 黄金回旋式的
         抛掷旋转会把可见像素画到帧绘制矩形之外，只用 ``rect()`` 粗筛会在细判
@@ -656,7 +776,7 @@ class OverlayWindow(QWidget):
     def _is_transparent_at(self, local: QPoint | QPointF) -> bool:
         """逐像素联合穿透判据（WindowsPerPixelInputController 协议方法）：
         光标处没有任何 sprite 的不透明像素 = 该点穿透到下层应用。"""
-        self._check_stale_press()  # V-7：穿透轮询是恒开的，顺带兜底卡死的拖拽
+        self._check_stale_press()  # V-7：穿透轮询是恒开的，顺带兜底卡死的 grab
         return self.sprite_at(local) is None
 
     def contextMenuEvent(self, event) -> None:
@@ -710,8 +830,19 @@ class OverlayWindow(QWidget):
             self._cancel_slingshot(resume_drag=False)
         target = self.sprite_at(event.position())
         if target is None:
+            # 遗留 grab（上一次按下丢过 release / click-only 卡住）在这里被清。
+            # 清之前先看有没有 grab，有就走壳层收尾通知：壳层的收尾钩子同时
+            # 补做被 grab 闸住的穿透收敛（``_converge_pending``），漏通知会让
+            # 那笔待办永久滞留（窗口整窗穿透退不出去）。
+            # 本分支的既有语义逐位保留：**不**转发 on_release、不做位置同步、
+            # 不动 ``_press_global``/``_drag_committed``，故只取通知这一份，
+            # 不复用 ``_finish_grab`` 本体（它对遗留真拖拽 grab 会转发
+            # on_release → 按陈旧轨迹算抛掷初速 + 补一次位置同步）。
+            had_grab = self._mouse_grab is not None
             self._mouse_grab = None
             self._press_click_only = False
+            if had_grab:
+                self._notify_grab_finished()
             event.ignore()  # 未命中：忽略（Windows 穿透轮询会把点击让给下层）
             return
         self._mouse_grab = target
@@ -778,7 +909,7 @@ class OverlayWindow(QWidget):
         if self.slingshot.aiming:
             # 瞄准中：move 只更新拉拽矢量，sprite 定锚不动（不走 on_move）
             self._note_kinetic()  # M-1：瞄准移动保持 T0
-            self.slingshot.update_pull(event.position())
+            self.slingshot.update_pull(self._grab_cursor_pos(event))
             self._refresh_slingshot_visual()
             event.accept()
             return
@@ -792,16 +923,19 @@ class OverlayWindow(QWidget):
             return
         self._note_kinetic()  # M-1：拖拽移动保持 T0
         # 先判升级再喂移动：on_move 在 begin_drag 之前是 no-op（点击候选不挪窝）
-        self._commit_drag_if_threshold_crossed(event.globalPosition().toPoint())
-        # grab 期间事件直达被按住的 sprite（光标移出/落到别的 sprite 上不换手）
-        self._mouse_grab.on_move(event.position())
+        global_pos = event.globalPosition().toPoint()
+        self._commit_drag_if_threshold_crossed(global_pos)
+        # grab 期间事件直达被按住的 sprite（光标移出/落到别的 sprite 上不换手）；
+        # 坐标按 sprite 所在坐标系换算（跨屏移交后已不是本窗局部坐标）
+        self._mouse_grab.on_move(
+            self._sprite_event_pos(self._mouse_grab, global_pos, event.position()))
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
         self._note_kinetic()  # M-1：松手（甩出判定）同步升档
         if self.slingshot.aiming:
             if event.button() == Qt.MouseButton.LeftButton:
-                self._fire_slingshot(event.position())
+                self._fire_slingshot(self._grab_cursor_pos(event))
                 event.accept()
                 return
             # 右键/其它键松手：瞄准继续（左键仍按住）。右键的取消手势在
@@ -809,7 +943,8 @@ class OverlayWindow(QWidget):
             event.accept()
             return
         grab = self._mouse_grab
-        self._finish_grab(event.position())
+        self._finish_grab(self._sprite_event_pos(
+            grab, event.globalPosition().toPoint(), event.position()))
         if grab is None:
             event.ignore()
             return
@@ -869,15 +1004,48 @@ class OverlayWindow(QWidget):
         if grab is not None and committed:
             # 松手终位立即同步（旧 window.py:3401），不等 tick/30Hz 补发
             self._sync_follow_now(grab)
+        self._notify_grab_finished()
+
+    def _notify_grab_finished(self) -> None:
+        """grab 收尾的壳层通知（所有把 ``_mouse_grab`` 清空的出口共用）。
+
+        4.1b：壳层 ``_on_grab_finished`` 在此冲刷光标恢复滞留，并补做被 grab
+        闸住的穿透收敛（``_converge_pending``）。**任何**清 grab 的出口都必须
+        走到这里，否则壳层收不到收尾事件、那笔待办永远没人认账
+        （``_auto_cursor_hidden`` 与待办一起滞留 = 窗口永久整窗穿透）。
+        """
         cb = getattr(self, "_grab_finished_cb", None)
         if callable(cb):
-            cb()  # 4.1b：shell 冲刷光标恢复滞留等拖拽后状态
+            cb()
 
     def _check_stale_press(self) -> None:
         """V-7 拖拽看门狗：release 事件丢失（alt-tab/弹窗抢 grab/屏拔除）
         时 _press_global 卡死 → should_click_through 永假 → 全屏吞点击。
-        穿透轮询与 tick 路径兜底：左键已不在按下态则强制收尾。"""
+        穿透轮询与 tick 路径兜底：左键已不在按下态则强制收尾。
+
+        click-only 按下（锁定位 / 未按 SHIFT）不记 ``_press_global``（见
+        mousePressEvent），但同样持有 ``_mouse_grab``：丢一次 release 就永久
+        卡住 grab，壳层据它判定的 ``_cursor_transition_blocked()`` 恒真 →
+        光标隐藏态触发的整窗穿透再也退不出去（窗口可见却点不到，点击又被
+        穿透吃掉）。故这一支与拖拽分支同判据（左键已不在按下态即收尾）。
+
+        瞄准会话照收：click-only 的按住**也能进瞄准**（右键分支只看
+        ``_mouse_grab``，见 mousePressEvent 的非左键支），漏收会让 sprite 停在
+        DRAG、右键菜单被 ``_context_menu_blocked()`` 一直拦（既有问题已登记
+        BACKLOG，本支与拖拽支同口径先收会话）。
+        """
         if self._press_global is None:
+            # ``_press_global`` 为空还持有 grab = click-only 按下，或已失锚的
+            # 孤儿 grab——两者都该收尾，故只看 grab 不看是否 click-only。
+            if self._mouse_grab is None:
+                return
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                return
+            if self.slingshot.aiming and self._cancel_slingshot(resume_drag=False):
+                # 瞄准会话的按压源（左键）已消失且 release 没到：收会话回锚点
+                # （不发射），grab 收尾已在 _cancel_slingshot 内完成。
+                return
+            self._finish_grab(self._cursor_grab_pos())
             return
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
             return
@@ -885,7 +1053,26 @@ class OverlayWindow(QWidget):
             # 瞄准会话的按压源（左键）已消失且 release 没到：收会话回锚点
             # （不发射），grab 收尾已在 _cancel_slingshot 内完成。
             return
-        self._finish_grab(QPointF(self.mapFromGlobal(QCursor.pos())))
+        self._finish_grab(self._cursor_grab_pos())
+
+    def _cursor_grab_pos(self) -> QPointF:
+        """看门狗收尾用的当前位置：按当前 grab 的坐标系换算（跨屏移交后已
+        不是本窗局部坐标，见 ``_sprite_event_pos``）。"""
+        global_pos = QCursor.pos()
+        return self._sprite_event_pos(
+            self._mouse_grab, global_pos, QPointF(self.mapFromGlobal(global_pos)))
+
+    def _grab_cursor_pos(self, event) -> QPointF:
+        """事件光标位置 → **被抓住那只 sprite 所在坐标系**的坐标。
+
+        弹弓的锚点/拉拽矢量、拖拽收尾都活在这只 sprite 的坐标系里；跨屏移交后
+        输入会话仍留在按下窗，直接喂 ``event.position()`` 会把本窗局部坐标与另一
+        块屏上的 sprite 坐标混起来（差整整一个屏原点：抓取偏移错位、橡皮带与
+        轨迹预览画在错的窗/错的位置）。本方法不 warp 鼠标，只做坐标换算。
+        """
+        grip = self._mouse_grab if self._mouse_grab is not None else self.slingshot.sprite
+        return self._sprite_event_pos(
+            grip, event.globalPosition().toPoint(), event.position())
 
     # ---------------------------------------------------------------- 弹弓会话（事件侧调和）
     def _consume_right_press_for_slingshot(self, event) -> bool:
@@ -896,7 +1083,7 @@ class OverlayWindow(QWidget):
         会覆写它，若不清理，随后的左键松手会被壳层判成一次单击）。
         """
         if not self.slingshot.maybe_enter_on_right_press(
-                self._mouse_grab, event.position()):
+                self._mouse_grab, self._grab_cursor_pos(event)):
             return False
         self._context_menu_suppressed = True
         self._invalidate_press_discriminator()
@@ -935,7 +1122,15 @@ class OverlayWindow(QWidget):
             self.__dict__["_press_pos"] = None
 
     def _paint_slingshot(self, painter: QPainter) -> bool:
-        """瞄准 UI 绘制挂点（橡皮带 + 轨迹预览）。只在瞄准期间有内容。"""
+        """瞄准 UI 绘制挂点（橡皮带 + 轨迹预览）。只在瞄准期间有内容。
+
+        跨屏：会话可能开在按下窗、而被瞄准的 sprite 已在另一块屏上（拖拽跨屏
+        之后才点右键），瞄准 UI 的坐标属于**持 sprite 的那张窗**——只有它画，
+        按下窗不画（否则带/预览按另一套局部坐标落在错的窗上）。
+        """
+        sprite = self.slingshot.sprite
+        if sprite is not None and self._follow_overlay(sprite) is not self:
+            return False
         return self.slingshot.paint(painter)
 
     def _refresh_slingshot_visual(self) -> None:
@@ -946,7 +1141,15 @@ class OverlayWindow(QWidget):
         不是外接大矩形——预测弧能横跨大半屏，按外包框重绘会白刷几十个百分点
         的像素）。取消/发射后当前区域为空，旧区域这一笔负责把残留的带/点
         擦干净。
+
+        跨屏同 ``_paint_slingshot``：脏区归持有被瞄准 sprite 的那张窗（可能不是
+        本窗），这里把请求转过去，保持"绘制与擦除在同一个坐标系、同一条通道"。
         """
+        sprite = self.slingshot.sprite
+        owner = self._follow_overlay(sprite) if sprite is not None else self
+        if owner is not self:
+            owner._refresh_slingshot_visual()
+            return
         current = self.slingshot.visual_region(self.rect())
         dirty = current | self._slingshot_dirty
         self._slingshot_dirty = current

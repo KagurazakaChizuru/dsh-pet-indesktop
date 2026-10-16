@@ -22,6 +22,12 @@
   D3D11（含 WARP 软件后备），运行时不加载该 DLL。可用 --keep-opengl-sw 保留。
 - Qt 翻译：仅保留 zh_CN / zh_TW / en（界面为中文，其余 100+ 语言包无引用）。
 - PIL AVIF 插件（_internal/PIL/*avif*）：全仓无 AVIF 图片使用。
+- OpenCV 的 FFMPEG 视频后端（_internal/cv2/opencv_videoio_ffmpeg<版本>_64.dll，
+  本机实测 27.3 MB）：本地 OCR 只用 cv2 的图像算子（颜色转换、缩放、形态学），
+  **不碰视频 I/O**；该 DLL 由 cv2.pyd 在首次 VideoCapture/VideoWriter 时动态加载
+  （pefile 实测 cv2.pyd 的导入表里没有它，所以依赖闭包校验会放行）。文件名带
+  OpenCV 版本号，所以白名单用通配 `opencv_videoio_ffmpeg*.dll`——换 opencv 版本
+  不需要同步改这里。
 
 stdout 最后一行打印 JSON 摘要（removed_count / freed_bytes / removed / skipped），
 供构建脚本记录体积对比；所有日志为 ASCII，避免 GBK 控制台乱码。
@@ -52,19 +58,24 @@ REMOVAL_GLOBS = (
     f"{PYSIDE}/plugins/imageformats/qpdf.dll",
     f"{PYSIDE}/opengl32sw.dll",
     "_internal/PIL/*avif*",
+    "_internal/cv2/opencv_videoio_ffmpeg*.dll",
 )
 
 # 违禁清单：构建机环境污染（在打包机装了但产品零引用的包）一旦被连带收集，
 # 直接判构建失败——不许靠人工 review dist 才发现（2026-10-01 实测：部署包
-# _internal 里 django 30MB + numpy 5.9MB + numpy.libs 21MB，全仓含 .py/.spec/
-# .ps1/.json/.toml/.yaml 零 import，django 甚至不在构建 venv 里；numpy 唯一
-# 消费者是本地专用素材工具 tools/greenscreen_to_frameseq.py，不入产品）。
-# 防线是双层的：build_onedir.ps1 用 --exclude-module 让 PyInstaller 不收集，
-# 这里兜底——任何路径把它们带进产物（新依赖、新 hook、换机）都会红。
+# _internal 里 django 30MB + numpy 5.9MB + numpy.libs 21MB）。
+#
+# **numpy 已于 2026-10-13 移出本清单**：快速识屏的本地 OCR 直接 import numpy
+# （``pet/screen_capture/ocr.py`` 的 QImage → BGR 数组），它不再是"打包机污染"
+# 而是**随包必带的运行时依赖**（requirements.txt 里也已声明）。留在清单里的后果
+# 不是"更干净"而是硬闸误杀：每次构建都会红在一个完全正常的产物上。
+# 移除它时同时删掉了 ``build_onedir.ps1`` 里的 ``--exclude-module numpy``——
+# 两处一致，正是那条注释原本要求的"换机/新装库后复查"。
+# django / hypothesis 仍然零引用，继续禁：防线是双层的——build_onedir.ps1 用
+# --exclude-module 让 PyInstaller 不收集，这里兜底，任何路径把它们带进产物
+# （新依赖、新 hook、换机）都会红。
 FORBIDDEN_GLOBS = (
     "_internal/django/**",
-    "_internal/numpy/**",
-    "_internal/numpy.libs/**",
     "_internal/hypothesis/**",
 )
 

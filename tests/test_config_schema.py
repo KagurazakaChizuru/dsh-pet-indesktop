@@ -34,6 +34,7 @@ from pet.island_segments import CPU, NETWORK
 RELOAD_WHITELIST_SNAPSHOT = frozenset(
     {
         "agent_cost_enabled",
+        "allow_cross_screen",
         "anim_menu_stay_open",
         "animation_gap_seconds",
         "auto_hide_fullscreen",
@@ -729,6 +730,87 @@ def test_set_cleans_music_player_paths(tmp_path):
     assert cfg.data["music_player_paths"] == {"netease": "D:/a.exe"}
     cfg.set("music_player_paths", "not-a-dict")
     assert cfg.data["music_player_paths"] == {}
+
+
+def test_music_player_paths_accepts_all_registered_players(tmp_path):
+    """四播放器的路径都要能存下来（清洗键集与 music_players.PLAYERS 同源）。
+
+    回归面：清洗名单只认 netease/qqmusic 时，酷狗/汽水手填的路径在 Config()
+    构造与 reload() 里被静默丢掉，用户填了等于没填。
+    """
+    payload = {
+        "netease": "D:/CloudMusic/cloudmusic.exe",
+        "qqmusic": "D:/QQMusic/QQMusic.exe",
+        "kugou": "D:/KuGou/KGMusic/KuGou.exe",
+        "soda": "C:/Users/me/AppData/Local/SodaMusic/SodaMusic.exe",
+    }
+    _write_config(tmp_path, {"version": 4, "music_player_paths": payload})
+    cfg = Config(base=tmp_path)
+    assert cfg.data["music_player_paths"] == payload
+
+    cfg.reload()
+    assert cfg.data["music_player_paths"] == payload, "reload() 把新播放器的路径丢了"
+
+
+def test_music_player_paths_keys_track_registry(tmp_path):
+    """清洗键集 = 注册表键集（不许在 config 里另抄一份固定键表）。"""
+    from pet import music_players
+
+    assert set(music_players.player_keys()) == {"netease", "qqmusic", "kugou", "soda"}
+    payload = {key: f"D:/{key}/player.exe" for key in music_players.player_keys()}
+    _write_config(tmp_path, {"version": 4, "music_player_paths": payload})
+    cfg = Config(base=tmp_path)
+    assert cfg.data["music_player_paths"] == payload
+
+
+def test_music_player_paths_drops_unknown_keys_but_keeps_old_two(tmp_path):
+    """旧两键升级后不丢；表外键（含键名大小写不符、拼错的播放器键）照旧丢弃。"""
+    _write_config(
+        tmp_path,
+        {
+            "version": 4,
+            "music_player_paths": {
+                "netease": "D:/CloudMusic/cloudmusic.exe",
+                "qqmusic": "D:/QQMusic/QQMusic.exe",
+                "kugou": "D:/KuGou/KGMusic/KuGou.exe",
+                "kuGou": "D:/KuGou/KuGou.exe",       # 键名大小写不符 = 表外键
+                "soda_music": "D:/SodaMusic.exe",
+                "unknown": "D:/evil.exe",
+            },
+        },
+    )
+    cfg = Config(base=tmp_path)
+    assert cfg.data["music_player_paths"] == {
+        "netease": "D:/CloudMusic/cloudmusic.exe",
+        "qqmusic": "D:/QQMusic/QQMusic.exe",
+        "kugou": "D:/KuGou/KGMusic/KuGou.exe",
+    }
+
+
+def test_four_player_paths_persist_across_restart(tmp_path):
+    """四键写盘 → 重启（新建 Config）后仍是四键，且空串/未知键不落盘。"""
+    cfg = Config(base=tmp_path)
+    cfg.set("music_player_paths", {
+        "kugou": "D:/KuGou/KGMusic/KuGou.exe",
+        "soda": "D:/SodaMusic/SodaMusic.exe",
+        "netease": "D:/CloudMusic/cloudmusic.exe",
+        "qqmusic": "",
+        "bogus": "D:/bogus.exe",
+    })
+    cfg.save()
+
+    fresh = Config(base=tmp_path)
+    assert fresh.data["music_player_paths"] == {
+        "kugou": "D:/KuGou/KGMusic/KuGou.exe",
+        "soda": "D:/SodaMusic/SodaMusic.exe",
+        "netease": "D:/CloudMusic/cloudmusic.exe",
+    }
+    fresh.reload()
+    assert fresh.data["music_player_paths"] == {
+        "kugou": "D:/KuGou/KGMusic/KuGou.exe",
+        "soda": "D:/SodaMusic/SodaMusic.exe",
+        "netease": "D:/CloudMusic/cloudmusic.exe",
+    }
 
 
 def test_huge_integer_literal_falls_back_to_default(tmp_path):

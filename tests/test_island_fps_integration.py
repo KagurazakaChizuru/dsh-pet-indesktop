@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -727,6 +728,10 @@ class _StubSession:
     只替换"PresentMon 子进程"这一个 OS 边界：行格式、表头列名、事件时钟列
     （``TimeInMs``）与真实输出逐字同形，所以采集器那一侧（表头识别、列解析、
     pid 过滤、事件时钟校准、窗口统计、发布、代次）全部是真代码在跑。
+
+    ``stop_completed`` 是"会话收口真的做完了"的**明确信号**（在 ``stop`` 末尾置位）：
+    收口是异步的（``unsubscribe`` 立刻清 ``_thread``，worker 稍后才在 finally 里调
+    ``stop``），"采集线程的 ``running`` 变假"推不出它——见文件尾那条慢停闸门探针。
     """
 
     _HEADER = ("Application,ProcessID,SwapChainAddress,MsBetweenPresents,"
@@ -742,6 +747,7 @@ class _StubSession:
         self._header_sent = False
         self.stopped = False
         self.closed = False
+        self.stop_completed = threading.Event()
 
     def start(self) -> None:
         pass
@@ -768,9 +774,33 @@ class _StubSession:
     def stop(self, timeout=None, *, terminate_session: bool = True) -> None:
         self.stopped = True
         self.terminate_session = bool(terminate_session)
+        self.stop_completed.set()
 
     def close(self, *, terminate_session: bool = True) -> None:
         self.closed = True
+
+
+class _GatedStubSession(_StubSession):
+    """``stop`` 上装了闸门的替身：进 ``stop`` 先发信号，再**停在闸门前面**。
+
+    用来确定性地造出那一刻——"采集线程已经收到停止并进入会话收口，但收口还没做完"
+    （慢 runner 上偶然出现、快机器上几乎撞不到）。闸门有超时兜底：用例自己出错时
+    不许把守住它的 worker 永久挂在里面（跨用例的线程泄漏）。
+    """
+
+    #: 闸门最多关这么久：只是兜底（用例从"进 stop"到显式放行只隔几条语句），
+    #: 正常路径永远由用例放行，不靠这个值。
+    GATE_TIMEOUT = 60.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gate = threading.Event()
+        self.stop_entered = threading.Event()
+
+    def stop(self, timeout=None, *, terminate_session: bool = True) -> None:
+        self.stop_entered.set()
+        self.gate.wait(self.GATE_TIMEOUT)
+        super().stop(timeout, terminate_session=terminate_session)
 
 
 def _drive_qt_loop(predicate, *, timeout: float = 20.0) -> bool:
@@ -832,9 +862,13 @@ def test_the_real_collector_reaches_the_island_through_the_qt_loop(tmp_path, mon
         island.close()
     assert monitor is not None
     assert monitor.subscribers == frozenset(), "关窗口后订阅必须归零"
-    deadline = time.monotonic() + 10.0
-    while monitor.running and time.monotonic() < deadline:
-        time.sleep(0.02)
+    # 收口是**异步**的：退订当场清 ``_thread``（``FpsMonitor._stop_worker(wait=False)``），
+    # 所以 ``running`` 立刻为假，而 worker 那一刻可能还没跑进 finally 里的会话收口——
+    # 快机器上看不出来，慢 runner（mac CI 2026-10-16 00:32 原始红）上就是假红。
+    # 因此等的是替身在自己 ``stop`` 末尾置位的**完成事件**（宽预算 + 泵 Qt），
+    # 不是睡眠猜时序，也不是拿 ``running`` 当收口完成的证据。
+    assert _drive_qt_loop(lambda: stub_session.stop_completed.is_set(), timeout=30.0), \
+        "会话收口没在预算内完成（等的是替身 stop 的完成事件）"
     assert monitor.running is False, "收口后采集线程必须退出（不留下孤线程）"
     assert stub_session.stopped is True, "会话要收到停止（真机上即官方终止命令那一步）"
 
@@ -893,8 +927,6 @@ def test_repeated_hide_show_cycles_keep_one_session_and_leak_no_worker(
 
 def _fps_threads() -> list[str]:
     """活着的采集线程名（``fps_monitor.THREAD_NAME`` 前缀的都算：主循环 + 两条读线程）。"""
-    import threading
-
     return sorted(str(thread.name) for thread in threading.enumerate()
                   if str(thread.name).startswith(fm.THREAD_NAME))
 
@@ -908,6 +940,72 @@ def _fake_backend(monkeypatch):
     path.write_bytes(b"stub")
     monkeypatch.setattr(gf, "BACKEND_EXE_NAME", path.name)
     return path
+
+
+def test_a_slow_session_stop_proves_running_false_is_not_stop_completed(
+        tmp_path, monkeypatch):
+    """慢 ``stop`` 闸门：确定性地钉住"``running`` 变假 ≠ 会话收口完成"。
+
+    这是上面那条真采集器用例收口断言的**探针**，把它的理由做成可复现的一步：
+
+    - ``FpsHub.detach`` → ``FpsMonitor.unsubscribe`` → ``_stop_worker(wait=False)``
+      **当场**把 ``_thread`` 清空，于是 ``monitor.running`` 立刻为假；而 worker 那一
+      刻可能还没跑进 ``finally`` 里的 ``_close_session``（真会话 stop 在慢机器上要
+      发官方终止命令 + 有界等它退出，本机替身则是被闸门停住）。
+    - 所以旧写法"等 ``running`` 变假，再断言 ``stopped is True``"是一个**时序赌**：
+      慢 runner 上必红——mac CI 2026-10-16 00:32 的原始红（``.scratch/ci278-macos-failed.txt``
+      ``tests/test_island_fps_integration.py:839``，``assert False is True``）就是这个形态。
+    - 闸门由本用例显式开关，所以窗口是**确定**出现的（不是睡出来的），换到快机器上
+      也一样复现；放行后按完成事件等收口，两个原断言（``running`` 已停、``stopped``
+      为真）都保留。
+    """
+    session = _GatedStubSession(pid=4242, name="game.exe", session_name="gated-session")
+    before = _fps_threads()
+
+    def factory():
+        return fm.FpsMonitor(
+            foreground_reader=lambda: (4242, "game.exe"),
+            process_identity=lambda pid: 1.0,
+            session_factory=lambda pid, name, session_name: session,
+            excluded_names=frozenset(),
+            target_stable_seconds=0.0,
+            min_session_seconds=0.0,
+            poll_seconds=0.02,
+            publish_interval=0.0,
+        )
+
+    monkeypatch.setattr(island_fps, "_HUB", island_fps.FpsHub(monitor_factory=factory))
+    monkeypatch.setattr(gf, "platform_support", lambda: True)
+    monkeypatch.setattr(gf, "bundled_backend_path", lambda: _fake_backend(monkeypatch))
+    island = DynamicIsland(_config(tmp_path, metrics=[FPS]))
+    monitor = None
+    try:
+        island.show()
+        assert _drive_qt_loop(lambda: _fps_seg(island).state == isl.STATE_OK), \
+            "读数没上来：探针的前置条件不成立"
+        monitor = island._fps.monitor
+        assert monitor is not None and monitor.running is True
+
+        island.close()
+        # 旧写法的等价物：等 ``running`` 变假——等到了也**推不出**收口完成。
+        assert _drive_qt_loop(lambda: monitor.running is False, timeout=20.0), \
+            "退订后 running 应当立刻为假（收口异步，不 join）"
+        assert _drive_qt_loop(lambda: session.stop_entered.is_set(), timeout=20.0), \
+            "worker 没走到会话收口：前置条件不成立"
+        assert session.stopped is False, \
+            "闸门关着时收口必然没完成——旧写法在这一刻断言 stopped 就是赌时序"
+
+        session.gate.set()
+        assert _drive_qt_loop(lambda: session.stop_completed.is_set(), timeout=30.0), \
+            "放行闸门后收口必须完成"
+        assert session.stopped is True
+        assert monitor.running is False, "收口完成后采集线程不许还在跑"
+    finally:
+        # 用例中途失败也不许把 worker 永久关在闸门里（跨用例线程泄漏）
+        session.gate.set()
+        island.close()
+        assert _drive_qt_loop(lambda: _fps_threads() == before, timeout=30.0), \
+            "用例收尾后不得遗留采集线程"
 
 
 @pytest.mark.parametrize("platform", ["win32", "linux"])
