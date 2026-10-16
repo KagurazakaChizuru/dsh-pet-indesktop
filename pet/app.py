@@ -1637,13 +1637,26 @@ class AppShell:
             and self.config.get("click_show_self_talk", False)
         )
 
+    def _divination_speak_wanted(self) -> bool:
+        """抽签语音播报是否开启——它同样复用报时服务的音频通道。
+
+        与节日语音同族：通道随报时开关一起被释放时，抽签语音就变成"有气泡没声音"。
+        判定走抽签自己的配置清洗（`normalize_divination_config`，非法值回落默认），
+        与抽签服务读的同一处实现，不另立第二份真值。
+        """
+        from .divination import normalize_divination_config
+
+        cfg = normalize_divination_config(self.config)
+        return bool(cfg["enabled"] and cfg["speak"])
+
     def _chime_wanted(self) -> bool:
-        # 报时自身开启，或节日语音 / 点击自言自语朗读需要这条音频通道（三者共用
-        # 一套合成与播放，因此"通道是否存在"取决于其中之一是否需要）。
+        # 报时自身开启，或节日语音 / 点击自言自语朗读 / 抽签语音需要这条音频通道
+        #（四者共用一套合成与播放，因此"通道是否存在"取决于其中之一是否需要）。
         return (
             bool(self.config.get("voice_chime_enabled", False))
             or self._festival_speak_wanted()
             or self._self_talk_speak_wanted()
+            or self._divination_speak_wanted()
         )
 
     def _ensure_chime_service(self):
@@ -1664,8 +1677,21 @@ class AppShell:
         return service.should_speak_at(chime_slot)
 
     def ensure_audio_channel(self):
-        """对外暴露的音频通道（节日提醒语音复用报时服务的合成与播放）。"""
-        return self._ensure_chime_service()
+        """对外暴露的音频通道（节日提醒语音 / 每日一签复用报时服务的合成与播放）。
+
+        通道可能是**为本次调用才懒创建**的（报时、节日语音、点击朗读都关着，只有
+        抽签语音一路要用它），此时服务里的 ``_cfg`` 还是模块默认值——合成后端、
+        回退开关、音量都按默认走，用户选的本地后端与音量被无视（真事故：只开抽签
+        语音 + 选 SAPI + 关回退 + 音量 0，抽签语音照旧联网 edge 合成、按默认音量出声）。
+
+        未在运行就先补读一次用户配置（与 ``speak_self_talk`` 同一条做法），收在这一
+        处是为了不必让每个调用方各自补读。运行中的通道由 ``_sync_chime_service`` 在
+        保存时刷新，不在这里重读：重读会清掉报时那一组预合成占位。
+        """
+        channel = self._ensure_chime_service()
+        if channel is not None and not channel.is_running():
+            channel.apply_config()
+        return channel
 
     def self_talk_voice_file(self, text: str) -> Path | None:
         """预缓存台词音频的查找路径；没有就返回 None。

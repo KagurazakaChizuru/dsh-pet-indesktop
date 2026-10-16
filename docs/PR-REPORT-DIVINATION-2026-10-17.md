@@ -539,3 +539,181 @@ IsIconic        = False
 - **真机听到抽签语音 / 右键菜单观感 / 每日提示的打扰程度**：仍需用户点验收，口径同 §5.4。
 - **未改 289 / 输入 / v5 相关树的任何产品代码**：本轮对它们的文件只做合并（逐字节等于上游），未再改动。
 - **本轮不重复广泛审查、不操作真实用户配置**（沿用 §9.5 的边界）。
+
+## 十一、第五轮（2026-10-17 发布前收尾）：两条产品阻断的修复
+
+> **起点**：`6ce64db`（第四轮累计树的 tip，**三端 CI 绿**：`PR Test Gate` run
+> [38976101980](https://github.com/MerZlin/dsh-pet-indesktop/actions/runs/38976101980)，
+> `head_sha=6ce64dbb…`，macOS / ubuntu / windows 三个 job 全 success）
+> **本轮范围**：只修**两条产品阻断**（外部审查与独立票各出一份，本轮在本机各自独立复现），
+> 不加功能、不改任何功能口径、不做广泛复审。**先红后绿**（§11.4）：新用例 5 条，改产品代码前
+> 5/5 红、改后 5/5 绿。
+> **上游**：`origin/main` 仍是 `e08c7fb`（本轮 `git fetch` 复核）→ 不需要额外 merge。
+
+### 11.1 两条阻断（现场 / 根因 / 修法）
+
+| # | 阻断 | 现场与根因 | 本轮修法（最小改动） |
+|---|---|---|---|
+| ① | **只开「抽签时念出来」时，通道不按用户配置合成** | `AppShell._chime_wanted()` 只认报时 / 节日语音 / 点击朗读三者：报时一关、只剩抽签语音时，`_sync_chime_service()` 把通道释放掉。抽签取通道走 `ensure_audio_channel()` → `_ensure_chime_service()` **懒创建** `VoiceChimeService`，而它构造里的 `_cfg` 是 `normalize_chime_config(None)`（模块默认：`backend="edge"`、`fallback=True`、`volume=80`），**没有任何人 `apply_config()`**（运行中的通道由 `start()` / 保存路径刷新，懒创建这条没有）。后果：选了本机 SAPI / 关掉回退 / 音量 0 的主人点抽签时**照旧联网 edge 合成、按默认音量出声**——三个设置项一个都不生效 | ① 把**真实抽签需求**纳入通道生命周期：新增 `_divination_speak_wanted()`（读 `normalize_divination_config`，与抽签服务同一处清洗，不另立第二份真值）并接进 `_chime_wanted()` 的**四个**消费者；② 在**唯一的取通道接缝** `ensure_audio_channel()` 上补"未运行就先 `apply_config()`"（沿用 `speak_self_talk` 的既有做法）。收在一处，两个抽签调用点与节日那条自动跟上，不必逐个改调用方 |
+| ② | **停用抽签后，在途的揭签 / 预热重试闭包照旧执行** | `DivinationService.shutdown()` 只 `timer.stop()` 那个 10 分钟跨天定时器；而**揭签**（`_schedule_reveal` → `QTimer.singleShot(READING_GAP_MS=2800)`）、**通道轮询**（`WAITING_POLL_MS`）、**预热重试**（`PRECACHE_RETRY_MS`，上限 20 次）全是**投递出去的闭包**，停定时器管不着它们。于是关掉抽签之后：签文气泡照冒、经**共用的音频通道**出声、还把当天那段文本重新提交一次合成（真事故：在设置里关掉抽签，几秒后仍听得到签文） | 投递口 + 入口两层最小 guard：① `_after()` 的投递 wrapper 带**动身时的代次**，回调回来时代次对不上（`shutdown()` 把代次 +1）即整条丢弃——揭签 / 轮询 / 重试三条闭包一次覆盖；② `_disabled` 挡入口（`draw_now` / `hint_on_interaction` / `_precache_today`），`apply_config()` 是"重新可用"的判定点；③ `shutdown()` 顺手把 `_precache_pending` 复位——那条链已被代次作废，标记留着会让复活后的 `_precache_today` 一直以为"已有一条链在跑"，当天那段签文再也没人补合成。**不碰共用音频通道**：`shutdown()` 里没有任何 channel 调用（停用抽签 ≠ 替报时 / 节日 / 点击朗读关声音） |
+
+### 11.2 修改文件说明（`git diff --numstat HEAD`，HEAD = `6ce64db`）
+
+| 文件 | 增删 | 改了什么 + 为什么 |
+|---|---|---|
+| `pet/app.py` | **+30 / −4** | 阻断①的两半：① `_divination_speak_wanted()`（3 行实现 + 注释）与 `_chime_wanted()` 的第四个分支——否则只剩抽签语音时通道会被释放；② `ensure_audio_channel()` 补"未运行就先 `apply_config()`"——否则懒创建的通道沿用模块默认（edge / 回退开 / 音量 80），用户设置全失效。原 docstring 里的"节日提醒语音复用"改写为"节日提醒语音 / 每日一签复用" |
+| `pet/divination_service.py` | **+52 / −6** | 阻断②：`__init__` 加 `_disabled` / `_generation`；`apply_config()` 置 `_disabled = False`（读一次配置即"可用"）；`draw_now()` / `hint_on_interaction()` / `_precache_today()` 三处入口早退；`_after()` 的投递 wrapper 加代次比较（唯一覆盖全部延后回调的地方）；`shutdown()` 置停用 + 代次 +1 + 复位 `_precache_pending`（定时器停法不变），docstring 写清"只作废自己、不碰共用通道" |
+| `tests/test_voice_chime_service.py` | **+85 / −0** | 阻断①的两条回归：① "只剩抽签语音时通道必须存在且在跑"（与节日语音 / 点击朗读同款用例，此前抽签缺这条）；② **真 `VoiceChimeService`**（不是 `_Channel` 桩）跑真抽签点击：断言合成链路只出现 `sapi`（`edge` 一出现即红）、音量 0 真落到播放器 —— 只替掉合成线程与播放器两个边界 |
+| `tests/test_divination_service_timers.py` | **新增 148 行** | 阻断②的三条**时序**用例（真 `QTimer.singleShot` + 真事件循环）：揭签闭包 / 预热重试闭包在停用后不许执行、停用再启用是新代次（旧闭包全死、新实例照常揭签）；共用通道不许被停；另钉住 `shutdown()` 复位 `_precache_pending`。每条"什么都没发生"的断言都配一个**更晚到点**的控制定时器当凭据（避免"等得不够久"的假绿），不用固定 sleep 赌时序 |
+| `docs/PR-REPORT-DIVINATION-2026-10-17.md` | **+178 / −0** | 本节（第五轮的现场 / 修法 / 先红后绿 / 消融 / 实测 / 门禁 / 边界） |
+| `docs/INDEX.md` | **+1 / −1**（同一行的条目内追加一句） | 「PR 报告存档」里本报告那一行追加"第五轮"这一段（新文档入场规则不涉及新文件，但索引条目要跟内容同步） |
+
+### 11.3 这两条为什么在"上一轮全绿"里没被抓住（口径修正，必须登记）
+
+**"上一轮门禁绿"推不出"没有这两个缺陷"**——本轮两条都是真缺陷，且两条都在第四轮那套
+（聚焦 1576 passed / 累计全量 8105 passed）里**逐条绿**。缺的是**用例**，不是门禁失效：
+
+1. **阻断①的用例缺口**：`_chime_wanted()` 的前三个消费者**各自**都有"只剩它一个时通道必须存在"
+   的用例（节日语音 `test_audio_channel_survives_on_festival_speak_alone`、点击朗读
+   `test_audio_channel_survives_on_self_talk_speak_alone`），**抽签是第四个消费者却没有同款用例**；
+   而"通道的配置有没有被读"此前只在**运行中的**通道上被覆盖（`start()` 会 `apply_config()`），
+   唯一覆盖"懒创建 + 不 start"的是 `speak_self_talk`，那条路径还有"命中本地缓存先返回"的分支。
+2. **阻断②的用例缺口**：`tests/test_divination_service.py` 的模块 docstring 明确写着"不开 Qt"，
+   并把 `_after` 打桩成**立即执行**——于是"投递出去、稍后回来"这条契约在测试里**根本不存在**：
+   该文件里所有"延后"用例都在验证"投递时打了什么参数"，**没有一条**验证"回来时还该不该执行"。
+   这正是本轮新增 `tests/test_divination_service_timers.py` 的原因（真事件循环 + 真 `QTimer`）。
+3. **结论口径**：绿是"**当时列出的不变量全绿**"，不是"无缺陷"；本轮把这两条**变成清单内的机器判据**
+   （5 条新用例 + 3 组消融，见 §11.4），此后同类回归会红。
+
+### 11.4 断言有效性（先红后绿 + 消融）
+
+命令：`PYTHONPATH="D:/dsh-pet-pr267-deps;D:/dsh-pet-pr267-deps-ocr" QT_QPA_PLATFORM=offscreen
+"D:/dsh-pet-src/.venv/Scripts/python.exe" -m pytest -q tests/test_divination_service_timers.py
+tests/test_voice_chime_service.py::test_audio_channel_survives_on_divination_speak_alone
+tests/test_voice_chime_service.py::test_divination_speak_uses_the_user_backend_on_a_lazily_created_channel`
+
+| 阶段 | 命令/手法 | 结果 |
+|---|---|---|
+| **改产品代码前** | `git stash push -- pet/app.py pet/divination_service.py` 后重跑 5 条 | **5 failed**（日志 `D:/dsh-pet-pr290-artifacts/round5-red-before-fix.log`）；红的方式正是现场：`AssertionError: 合成链路只许出现用户选的后端，实际 ['edge']`、`抽签语音需要这条通道`（None）、旧闭包冒出了签文气泡 |
+| **改后** | `git stash pop` 后重跑 | **5 passed**（1.61 s） |
+
+消融（把修复的某一半单独放回去，证明**没有一行是摆设**）：
+
+| 消融 | 重跑 | 结果 |
+|---|---|---|
+| 删 `ensure_audio_channel()` 的补读（只留生命周期那半） | 阻断①的 2 条 | 生命周期那条 **passed** / "按用户配置合成"那条 **failed**（仍是 edge） |
+| 删 `_chime_wanted()` 的抽签门（只留补读那半） | 阻断①的 2 条 | "通道必须存在且在跑" **failed** / 后端那条 **passed** |
+| 删 `_after()` 的投递 guard（只留 `_disabled` 入口门） | 时序 3 条 | 揭签与"停用再启代次" **failed** / 预热重试 **passed**（重试那条是入口门挡住的） |
+
+### 11.5 性能分析（本轮实测）
+
+**方法（可复现）**：`python .scratch/divination-pr290/probe_round5_perf.py`（真机 Windows 11 /
+Python 3.13.7 / PySide6 6.11.2，真 `Config`；逐字日志 `.scratch/divination-pr290/round5-perf.log`）。
+量的都是本轮**新增的那几行**在稳态热路径上的成本：
+
+| 新增点 | 实测（中位数） | 归属 / 触发频率 |
+|---|---|---|
+| `_divination_speak_wanted()` | **0.58 µs/次**（n=5×20000） | `_chime_wanted()` 每次多问一次（启动 + 每次配置保存 / 服务同步） |
+| `AppShell._chime_wanted()` 整体 | **5.6 µs/次**（n=5×20000，其中约 0.6 µs 是本轮新增的抽签门） | 同上 |
+| `_after()` 投递 wrapper 的代次 guard | **+0.45 µs/次**（对照组 = 改动前 `_after` 的逐行等价实现，同法把 `QTimer.singleShot` 打成"就地调用"以剔除 Qt 注册成本；n=5×200000） | 每日一签每天投递**个位数次**（1 次揭签 + 少量轮询 + 预热重试） |
+| 入口停用门（读 `_disabled`） | **0.054 µs/次** | 每次 `draw_now` / 每日提示 / 预合成 |
+| `ensure_audio_channel()` 补读，**通道在运行**时 | **+0.26 µs/次**（一次 `is_running()`） | 每次取通道（节日语音 / 抽签点击） |
+| 同上，**通道未运行**时 | **+18.2 µs**（`apply_config()`，节流命中不扫目录）；每 300 s 首次含一次缓存目录扫描 **230 µs**（本机缓存目录为空） | 只在"通道还没跑起来"的分支；本修复后正常路径通道都在跑，这条基本不触发 |
+
+逐条回答（对齐交付证据纪律）：
+
+1. **稳态开销**：启动 / 设置保存路径多 0.58 µs；每日一签热路径（点击、揭签、重试）各多
+   0.45 µs。相对一次点击本身的动画面 / 音效（毫秒级）可忽略。
+2. **新增路径成本与触发频率**：`ensure_audio_channel()` 的补读只在**未运行**分支发生
+   （0.26 µs → 18.2 µs，取决于通道是否已跑），运行中恒定 0.26 µs；缓存目录扫描受既有
+   `_PRUNE_MIN_INTERVAL_S = 300` 节流。
+3. **有无新增系统调用 / 网络 / 磁盘 / 线程**：**一条都没有**。改动只在既有函数体内加判据与闭包：
+   不发网络（反而**消掉**了"该走本机 SAPI 却走 edge"的那条网络路径，见 §11.6）、不开线程、
+   不新增文件读写、不新增定时器（`shutdown()` 的停表口径不变）。
+4. **内存有无增长**：服务多两个标量字段（`_generation` int / `_disabled` bool）；`_after()` 每次
+   投递多一个闭包，而 `QTimer.singleShot` 本就持有该回调引用，到期即释放。
+5. **净收益是"不出声 / 不联网"，不是"更快"**：只开抽签语音且音量 0 的用户，点击时不再按默认
+   音量 80 出声；选 SAPI 的用户不再每次点抽签都发一次 edge 网络请求（本机实测链路由
+   `['edge']` 变为 `['sapi']`，§11.6）。
+
+### 11.6 实机运行记录（本轮）
+
+**本机真实环境**：Windows 11 / Python 3.13.7 / PySide6 6.11.2 / **真实 `windows` 平台插件**
+（探针首行打印 `platform = windows`），**隔离一次性配置目录**（`tempfile.mkdtemp()` +
+`PYTHON_KEYRING_BACKEND=null`），**不读用户真实配置、不联网、全程不出声**（播放器替身只记账）。
+
+命令：`python .scratch/divination-pr290/probe_round5.py` → 日志 `.scratch/divination-pr290/round5-runtime.log`
+
+```text
+platform = windows  python = 3.13.7
+
+--- Part A：只开抽签语音（真 SAPI 合成 / 音量 0 / 不许 edge） ---
+  _chime_wanted() = True
+  voice_chime_service = VoiceChimeService  is_running=True
+  _cfg: backend='sapi' fallback=False volume=0
+  可用合成后端链 = ['sapi']
+  起播 = True  用时 0.13s
+  气泡 = ['抽签中...']
+  播放器音量记录 = [0.0]  起播文件 = ['db30f7db2b02c6de.wav']
+  缓存目录产物 = [('db30f7db2b02c6de.wav', 70566)]
+  edge 合成调用次数 = 0（[]）
+
+--- Part B：停用抽签（真 QTimer，真 2.8 秒揭签间隔） ---
+  点下去那一刻气泡 = ['抽签中...', '抽签中...']
+  3.4 秒后（> 2.8 秒揭签间隔）气泡总数 = 3
+  停用那一支（2026-10-17）揭签了 = 否
+  没停用那一支（2026-10-18）揭签了 = 是（对照正常）
+  停用那一支的播报出现在通道里 = 否
+  通道记账的播报 = ['抽签中...', '抽签中...', '今日中平签，老马识途。签']
+```
+
+- **阻断①的真机证据**：服务里的 `_cfg` 就是用户设置（`sapi / False / 0`）；可用后端链只有
+  `['sapi']`；真的用**本机 SAPI（COM，零网络）**合出了一段 **70 566 字节 `.wav`**（`.wav` 只有
+  SAPI 产出、edge 出 `.mp3`），从点击到起播 0.13 s；交给播放器的音量是 **0.0**；`edge` 的 `synth`
+  被替换成"一调用就抛异常"，**调用次数 0**——"没走 edge"不是从日志推断，而是**真调用就会当场炸**。
+- **阻断②的真机证据**：两份实例同一时刻各点一次抽签（不同日期，便于区分是哪一支），其中一份
+  `shutdown()`；**真 3.4 秒**（> 真实 `READING_GAP_MS = 2800`）后，被停用的那一支**既没冒签文气泡、
+  也没进通道**；没停用的那一支照常揭签 —— 对照组证明"这 3.4 秒里闭包本该回来"。
+- **用户可见行为的确认**：Part A 打印了气泡文本、播放器收到的音量与文件名、缓存目录产物、
+  edge 调用次数；Part B 打印了两支签的揭签与否与通道记账。
+- **未验的（如实登记）**：**真机听到声音仍未验**——本轮探针只做"播放器记账"，不在用户机器上出声
+  （conftest 与探针同口径）；音色 / 音量 / 间隔的听感仍留给用户点验收（同 §5.4）。
+  edge-tts 的**联网耗时不测**（本轮不捏造网络数字，且修复后的正常路径根本不发这次请求）。
+
+### 11.7 本轮门禁
+
+环境同 §10.4（`D:\dsh-pet-src\.venv` + 隔离依赖目录 `D:/dsh-pet-pr267-deps`（edge-tts 7.3.1）+
+`D:/dsh-pet-pr267-deps-ocr`（omegaconf 2.4.0），`PYTHONPATH` 分隔符是 **`;`**，`QT_QPA_PLATFORM=offscreen`）。
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 静态检查 | `python -m ruff check pet tests scripts` | **All checks passed!** |
+| 先红后绿 / 消融 | 见 §11.4 | 5 failed → 5 passed；三组消融各自命中 |
+| 聚焦（本支 + 上游接缝） | `bash D:/dsh-pet-pr290-artifacts/round5-focused.sh`（脚本内是 §10.4 的 41 文件清单 + `tests/test_app_lazy_imports.py`） | **1488 passed / 2 skipped / 0 failed**（243.40 s；日志 `D:/dsh-pet-pr290-artifacts/round5-focused.log`） |
+| 受影响时序族高负载复跑 ×3 | `pytest -q tests/test_voice_chime.py tests/test_voice_chime_service.py tests/test_divination_service_timers.py` 连跑 3 遍 | 3 遍各 **277 passed**（10.44 / 6.38 / 6.19 s），无 flake |
+| 累计全量（按文件切 18 片、各起独立进程） | `PR290_REPO=D:/dsh-pet-wt-pr290 python run_chunks_pr290.py 500`（逐片日志 `D:/dsh-pet-pr290-artifacts/chunk290-*.log`，汇总 `chunks290-final.log`） | **18 片 rc 全 0：passed 8110 / failed 0 / skipped 22 / error 0**（收集 8132；较第四轮 +5 = 本轮新增的 5 条用例） |
+
+（聚焦那 2 条 skip 与全量的 skip 都不是本轮新增：本支改过的用例文件里只有既有的依赖 / 环境守卫；
+新增的 5 条用例**一条 skip 都没有**。）
+
+### 11.8 未做与边界（本轮）
+
+- **只修这两条阻断**：不加功能、不改签库 / 取签 / 状态 / 播报口径，不做广泛复审（用户口径），
+  未改 289 / 输入 / v5 相关树，未涉及 Android 与 DLC。
+- **`speak_self_talk()` 里那处同款"未运行就 `apply_config()`"刻意保留**：两处各自成立且幂等
+  （非运行分支多花 18 µs，本修复后基本不触发）；删它等于把语义挪到别处，超出本轮范围。
+- **`_disabled` 入口门的产品可达面**：产品路径关闭抽签是"`shutdown()` + 引用置 None"（再启用时
+  重建实例），因此入口门主要挡的是①已排进事件队列的跨天定时器 timeout、②对已停用实例的直接调用；
+  本轮把它与投递 guard 一起钉成契约（§11.4 消融证明它自己也在挡重试链）。
+- **真机听感 / doubao / mimo 真实合成**：仍未验（同 §10.5、§11.6 末条）。
+- **未 tag、未 merge、未改 `main`**：`origin/main` 复核仍是 `e08c7fb`，本 PR 只需更新自身 head。
+
+### 11.9 push 与 CI（同 head 快照，不等循环）
+
+| 项 | 值 |
+|---|---|
+| 目标 | 作者 fork `KagurazakaChizuru/dsh-pet-indesktop` 的 `feat/divination`（PR #290 的 head 分支） |
+| push 前 head | `6ce64db`（CI run 38976101980 success） |
+| push 后 head | PUSHED_HEAD |
+| 同 head CI | CI_RUN |
+| 不做 | 不 merge、不 tag、不 release；不看 CI 循环等待（只取同 head 的一次快照） |

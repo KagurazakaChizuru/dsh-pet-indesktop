@@ -2156,6 +2156,91 @@ def test_audio_channel_not_created_for_self_talk_speak_alone(tmp_path):
     assert shell.voice_chime_service is None
 
 
+def test_audio_channel_survives_on_divination_speak_alone(tmp_path):
+    """报时 / 节日语音 / 点击朗读全关、只剩「抽签时念出来」时，通道同样不能被释放。
+
+    与节日语音、点击朗读同族：通道随报时开关一起被释放，抽签语音就变成「有气泡没
+    声音」——这正是产品阻断①暴露的那条生命周期缺口。
+    """
+    from pet.app import AppShell
+
+    _qapp()
+    cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", False)
+    cfg.set("festival_reminder_enabled", False)
+    cfg.set("self_talk_speak_enabled", False)
+    cfg.set("click_show_self_talk", False)
+    cfg.set("divination_enabled", True)
+    cfg.set("divination_speak", True)
+    shell = AppShell(_qapp(), cfg, enable_chat=False)
+
+    shell._sync_chime_service()
+    service = shell.voice_chime_service
+    assert service is not None, "抽签语音需要这条通道"
+    assert service.is_running() is True, "通道必须真的在跑（配置才会被读进来）"
+
+    cfg.set("divination_speak", False)
+    shell._sync_chime_service()          # 保存路径先同步通道生命周期（同自测）
+    shell._sync_divination_service()
+    assert shell.voice_chime_service is None, "四个消费者都关掉后通道应释放"
+
+
+def test_divination_speak_uses_the_user_backend_on_a_lazily_created_channel(tmp_path, monkeypatch):
+    """只开抽签语音：**懒创建**的通道也必须按用户配置合成（SAPI / 不回退 / 音量 0）。
+
+    产品阻断①：``AppShell._chime_wanted()`` 不含抽签 → 通道随时被释放；抽签取通道
+    那一刻新建的 ``VoiceChimeService`` 的 ``_cfg`` 还是模块默认（edge 后端 + 允许
+    回退 + 默认音量），于是"选了本机 SAPI、关掉回退、音量 0"的主人点抽签时照旧
+    **联网 edge 合成**、按默认音量出声——三个设置项一个都不生效。
+
+    只替两个边界：合成线程（网络 / COM）与播放器（音频设备）；服务本身是真的。
+    """
+    import datetime as _dt
+
+    import pet.voice_chime_service as svc_mod
+    from pet.app import AppShell
+
+    _qapp()
+    cfg = Config(base=tmp_path)
+    cfg.set("voice_chime_enabled", False)
+    cfg.set("festival_reminder_enabled", False)
+    cfg.set("self_talk_speak_enabled", False)
+    cfg.set("click_show_self_talk", False)
+    cfg.set("divination_enabled", True)
+    cfg.set("divination_speak", True)
+    cfg.set("voice_chime_tts_backend", "sapi")
+    cfg.set("voice_chime_tts_fallback", False)
+    cfg.set("voice_chime_volume", 0)
+    # 每个后端都自报"可用"：合成链路由配置决定，用例不去猜本机装没装 SAPI / edge
+    _WorkerSpy.instances = []
+    monkeypatch.setattr(svc_mod, "_TTSWorker", _WorkerSpy)
+    for provider in svc_mod.tts.providers():
+        monkeypatch.setattr(type(provider), "availability", lambda self, values: False)
+
+    shell = AppShell(_qapp(), cfg, enable_chat=False)
+    channel = shell.ensure_audio_channel()
+    assert isinstance(channel, VoiceChimeService), "必须是真服务，不是通道桩"
+    channel._player = _FakePlayer()
+    channel._audio_out = _FakeAudioOut()
+    channel._ensure_player = lambda: True
+
+    service = shell._ensure_divination_service()
+    monkeypatch.setattr(service, "_bubble", lambda text: None)   # 气泡不是本用例的被测面
+    service.draw_now(_dt.date(2026, 10, 16))
+
+    assert _WorkerSpy.instances, "抽签语音必须提交一次合成"
+    used = {a.provider for worker in _WorkerSpy.instances for a in worker.attempts}
+    assert used == {"sapi"}, f"合成链路只许出现用户选的后端，实际 {sorted(used)}"
+
+    # 预合成回来 → 排队的「抽签中...」进合成；再回来 → 交给播放器（音量必须真为 0）
+    _WorkerSpy.instances[-1].finish()
+    assert len(_WorkerSpy.instances) >= 2, "排队的「抽签中...」必须补上合成"
+    _WorkerSpy.instances[-1].finish()
+    assert channel._audio_out.volumes == [0.0], "音量 0 必须真的落到播放器上"
+
+    service.shutdown()   # 收口：投递出去的揭签闭包随停用作废，不赌用例结束时机
+
+
 def _precached_wav(cfg, text: str) -> Path:
     """按与产品一致的命名约定放一个假音频文件，返回其路径。"""
     import hashlib

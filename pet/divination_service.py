@@ -68,6 +68,11 @@ class DivinationService:
     def __init__(self, app: Any) -> None:
         self._app = app
         self._cfg: dict = {}
+        # 停用标志 / 代次（见 shutdown 与 _after）：``_disabled`` 挡**入口**，
+        # ``_generation`` 挡**投递**——延后回调在投递时记下动身时的代次，回来时
+        # 对不上就整条丢弃。
+        self._disabled = False
+        self._generation = 0
 
     # ------------------------------------------------------------ 生命周期
     def is_running(self) -> bool:
@@ -76,6 +81,8 @@ class DivinationService:
 
     def apply_config(self) -> None:
         self._cfg = self._read_cfg()
+        # 读一次配置即视为"可用"（停用后再启用走的就是这里）
+        self._disabled = False
         # 音色/语速/开关可能刚被改过 → 缓存键变了，允许重预合成
         self._precached_day = None
         self.ensure_roll_timer()
@@ -117,8 +124,10 @@ class DivinationService:
     def draw_now(self, today: _dt.date | None = None) -> dict | None:
         """点「抽支签」：先「抽签中...」，约 1 秒后揭签（同一天重复点只再显示一次，不改签号）。
 
-        返回 ``{"quote":..., "newly": bool}``；功能关闭时返回 None。
+        返回 ``{"quote":..., "newly": bool}``；功能关闭或服务已停用时返回 None。
         """
+        if self._disabled:
+            return None
         self._cfg = self._read_cfg()
         if not self._cfg["enabled"]:
             return None
@@ -161,18 +170,33 @@ class DivinationService:
         logger.info("[抽签] %s ｜ %s", detail, "新抽" if newly else "当天重现")
 
     def _after(self, delay_ms: int, fn) -> None:
-        """延时执行；**没有 Qt 事件循环时就地执行**（用例里不引入事件循环）。"""
+        """延时执行；**没有 Qt 事件循环时就地执行**（用例里不引入事件循环）。
+
+        投递口统一套一层代次 guard：闭包带回**动身时**的代次，回来时服务已被停用
+        （``shutdown`` 把代次 +1）或已被换掉（停用后再开是另一个实例）就整条丢弃。
+        没有这层 guard，关掉抽签之后那条揭签 / 预热重试闭包照旧到点执行——冒气泡、
+        经共享音频通道出声、还把当天那段文本重新提交合成。
+        """
+        generation = self._generation
+
+        def deliver() -> None:
+            if generation != self._generation:
+                logger.debug("抽签已停用（代次 %s→%s），丢弃迟到的延时回调",
+                             generation, self._generation)
+                return
+            fn()
+
         try:
             from PySide6.QtWidgets import QApplication
         except Exception:
-            fn()
+            deliver()
             return
         if QApplication.instance() is None:
-            fn()
+            deliver()
             return
         from PySide6.QtCore import QTimer
 
-        QTimer.singleShot(int(delay_ms), fn)
+        QTimer.singleShot(int(delay_ms), deliver)
 
     def _resolve_today(self, day: _dt.date) -> tuple[divination.DivinationQuote, bool]:
         """拿到当天的签（必要时落状态）。**当天锁定**：有记录就用记录。"""
@@ -201,6 +225,8 @@ class DivinationService:
         **一天只提示一次**（state 里记 ``hint_date``）：她一天会点桌宠很多次，
         每点一次冒一次就不叫提醒、叫唠叨了。
         """
+        if self._disabled:
+            return False
         self._cfg = self._read_cfg()
         if not self._cfg["enabled"] or not self._cfg["hint"]:
             return False
@@ -283,7 +309,23 @@ class DivinationService:
         self._roll_timer = timer
 
     def shutdown(self) -> None:
-        """释放本服务持有的定时器（停用抽签时调用，免得定时器跟着对象飘着）。"""
+        """停用抽签：停掉跨天定时器，并让所有已投递的延后回调作废。
+
+        **为什么不止停定时器**：揭签、通道轮询、预热重试都是 ``QTimer.singleShot``
+        投递出去的闭包，停定时器管不着它们——关掉抽签之后它们照旧到点执行，冒出
+        气泡、经共享音频通道出声、还把当天那段文本重新提交合成。代次 +1 之后，
+        投递口（``_after``）把它们整条丢弃；``_disabled`` 挡住停用期间新到的入口
+        调用（含跨天定时器那一拍已经排进事件队列的 timeout）。
+
+        **只作废本服务自己的东西**：那条音频通道是报时 / 节日语音 / 点击朗读共用
+        的，这里一个字节都不碰（停用它等于替别的功能关声音）。
+        """
+        self._disabled = True
+        self._generation += 1
+        # 在飞的那条预热重试链同样已被代次作废，标记要一起复位：留着 True 会让
+        # 复活后的 `_precache_today` 一直以为"已有一条链在跑"而不再挂新的，当天那段
+        # 签文就再也没人补合成（停用是终态、复活走 `apply_config`）。
+        self._precache_pending = False
         timer = getattr(self, "_roll_timer", None)
         self._roll_timer = None
         if timer is not None:
@@ -307,6 +349,10 @@ class DivinationService:
         这是「语音合成慢」的正解：合成发生在点击**之前**，点下去就是缓存命中，
         零网络延迟。开关关着 / 通道不支持预合成 / 免打扰期间都直接跳过。
         """
+        # 入口门：停用后不再提交任何合成（跨天定时器的 timeout 可能已经排在队列里，
+        # 迟到的重试闭包也不再走这条路——它在投递口就被代次挡掉了，这里是第二道）。
+        if self._disabled:
+            return
         if not self._cfg.get("speak"):
             logger.info("[抽签] 语音关着，跳过预合成")
             return
