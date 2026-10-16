@@ -2834,6 +2834,17 @@ class OverlayShell(QObject):
         ``after_display`` 重排**它的**周期定时器（避免与刚弹出的点击气泡叠一起）。
         """
         target = self.sprite if sprite is None else sprite
+        # 每日一签：当天还没看签时冒一行「今日的签还没看」（服务内部保证一天只提示
+        # 一次、开关关掉就不提示）。挂在这里而不是 click_feedback：后者不带 sprite
+        # 身份、对无 sprite 的调用按契约静音（见下），而且**本方法是壳自己的方法**，
+        # 首次构建与屏迁移两处接线都指向它，不会像 overlay 上的属性那样重挂漏掉。
+        hint = getattr(getattr(self._instance, "shell", None),
+                       "divination_hint_on_interaction", None)
+        if callable(hint):
+            try:
+                hint()
+            except Exception:
+                logging.exception("抽签每日提示失败")
         # 点击音效：overlay 的 click_feedback 通道不带 sprite 身份（播放器对
         # "无 sprite"的调用已按契约静音，见 SpriteSoundPlayer.on_click），真正的
         # 播放落在这一句——门/音量/音源都取被点的那一只自己的配置。通道被置 None

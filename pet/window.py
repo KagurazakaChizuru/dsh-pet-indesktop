@@ -3317,6 +3317,11 @@ class PetWindow(QWidget, WindowFeatureGateMixin):
                 play_release_sound(self._press_sound_pair, volume)
             if not self._try_open_quick_chat_from_bubble(g):
                 self._on_click()
+                # 每日一签：每天第一次点桌宠给一行提示（钩子由 app.py 以公有属性
+                # 注入，未注入时无操作——与语音报时的窗口钩子同一手法）。
+                hint = getattr(self, "on_user_interaction", None)
+                if callable(hint):
+                    hint()
         self._dragging = False
         self._interaction_state = "IDLE"
         self._press_global = None

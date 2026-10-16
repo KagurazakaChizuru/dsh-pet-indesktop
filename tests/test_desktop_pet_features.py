@@ -911,6 +911,7 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     if sys.platform == "win32":
         expected_labels.append("回收内存")  # 「回收内存」菜单动作（#210）：仅 Windows
     expected_labels.extend(["查看天气", "天气城市"])  # 天气入口（issue #209，所有平台）
+    expected_labels.append("抽支签")  # 每日一签（2026-10-15，趣味的入口就是这个菜单项）
     # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
     # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([
@@ -1342,7 +1343,7 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert isinstance(dialog.sidebar, QListWidget)
     assert isinstance(dialog.pages, QStackedWidget)
     # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
+    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_pages
     assert dialog.pages.count() == len(expected_pages)
     assert dialog.search_edit.placeholderText() == "搜索设置…"

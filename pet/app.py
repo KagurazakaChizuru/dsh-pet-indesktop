@@ -617,6 +617,10 @@ class PetInstance:
         win.on_self_talk_speak = self._slot_wrap(self.shell.speak_self_talk)
         win.on_festival_now = self._slot_wrap(self.shell.trigger_festival_now)
         win.on_toggle_festival = self._slot_wrap(self.shell.toggle_festival_reminder)
+        # 每日一签：菜单「抽支签」→ 出当天的签；on_user_interaction 供
+        # 窗口在"用户点了桌宠"时回调（当天没看才提示一行）。
+        win.on_divination_draw = self._slot_wrap(self.shell.trigger_divination_draw)
+        win.on_user_interaction = self._slot_wrap(self.shell.divination_hint_on_interaction)
         win.on_restore_fun_windows = restore_ojingjing_windows
         win.on_hidden = self._slot_wrap(self._notify_pet_hidden)
         # 4.4b：窗级「退出这只」恒注入（多窗常开化；最后一窗退出即全进程退出，
@@ -1088,6 +1092,7 @@ class PetInstance:
             shell._sync_todo_service()
             shell._sync_chime_service()
             shell._sync_festival_service()
+            shell._sync_divination_service()
             self._sync_animation_prewarm()
             self._refresh_chat_windows()
             _mac_set_dock_icon_visible(bool(self.config.get("show_dock_icon", True)))
@@ -1845,6 +1850,8 @@ class AppShell:
         self._sync_todo_service()
         self._sync_chime_service()
         self._sync_festival_service()
+        # 抽签的预合成也随配置收敛：音色/语速一变，缓存键就变了，必须重合。
+        self._sync_divination_service()
         # 外部配置变更也可能改了 agent_link.dsh（右键菜单开关落盘后同样收敛到
         # 这里）→ 各窗 refresh_pet_settings 链里的 manager.apply_config 会按
         # 同一功能门启停 DshMonitor（桥目录唯一读方）；overlay 拓扑由上面的
@@ -2402,6 +2409,11 @@ class AppShell:
         # "本分钟是否让位"。顺序反了会出现"报时先响、节日后响"从而两者都出声。
         self._sync_festival_service()
         self._sync_chime_service()
+        # 每日一签：**启动就同步**，让「抽签中...」与今天那段签文在后台先合好。
+        # 挂在点击那一刻已经晚了一拍——实测她点下去之后 1.2 秒合成才完成，
+        # 那 1.2 秒就是她说的"合成还是太慢"。必须排在 _sync_chime_service 之后：
+        # 预合成要用报时服务那条音频通道。
+        self._sync_divination_service()
         # 设置页进程隔离：启动即装 config 目录 watcher，独立设置进程落盘后由它
         # 合并进运行期（开关关闭时不装，完全走旧路径）。
         self._install_config_watcher()
@@ -4314,6 +4326,54 @@ class AppShell:
     def toggle_festival_reminder(self) -> None:
         """「启用/关闭节日提醒」开关（默认隐藏、菜单编辑器可加回）：翻转配置并同步服务启停。"""
         self._toggle_flag("festival_reminder_enabled", self._sync_festival_service)
+
+    # ------------------------------------------------------------ 每日一签（趣味域）
+    def _ensure_divination_service(self):
+        """懒创建抽签服务（纯逻辑 + 无定时器，创建很轻，但仍按开关懒建）。"""
+        if getattr(self, "divination_service", None) is None:
+            from .divination_service import DivinationService
+
+            self.divination_service = DivinationService(self)
+            # 建好就刷一次配置：`apply_config()` 会顺手把今天的语音预合成提交掉，
+            # 免得"服务建了但没人调 apply_config"时预热被漏掉。
+            self.divination_service.apply_config()
+        return self.divination_service
+
+    def _sync_divination_service(self) -> None:
+        """按开关同步抽签服务：关掉就释放，不留常驻对象。"""
+        from .divination import normalize_divination_config
+
+        if normalize_divination_config(self.config)["enabled"]:
+            self._ensure_divination_service().apply_config()
+        elif getattr(self, "divination_service", None) is not None:
+            # 停用要**显式收口**：服务持有跨天定时器，直接丢对象定时器还会留着。
+            self.divination_service.shutdown()
+            self.divination_service = None
+
+    def trigger_divination_draw(self) -> None:
+        """菜单「抽支签」：出当天的签（当天再点显示同一支）。
+
+        关掉总开关时**不做静默无反应**——明确告诉用户去哪儿打开（天气那条同口径）。
+        """
+        service = self._ensure_divination_service()
+        service.apply_config()
+        if service.draw_now() is None:
+            win = getattr(self, "win", None)
+            if win is not None:
+                try:
+                    win.show_bubble("每日一签已关闭 · 设置 → 趣味 里打开", duration_ms=6000)
+                except Exception:
+                    logging.exception("抽签关闭提示气泡失败")
+
+    def divination_hint_on_interaction(self) -> None:
+        """用户点了桌宠：当天还没看签时冒一行提示（服务内部判开关与是否已抽）。"""
+        service = getattr(self, "divination_service", None)
+        if service is None:
+            return
+        try:
+            service.hint_on_interaction()
+        except Exception:
+            logging.exception("抽签提示失败")
 
     def system_notify(self, title: str, message: str, *, on_click=None, duration_ms: int = 5000) -> None:
         """Show a bottom-right desktop notification (self-drawn, tray-independent)."""

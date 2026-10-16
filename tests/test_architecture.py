@@ -265,7 +265,9 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 文案落在 settings_pet_controls（`CROSS_SCREEN_HINT` 与作用域登记），本文件只留
 # 装配与接线；行内文案表仍是唯一来源。按文件约定预算只随实测校准，不为达标压缩
 # 行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2526
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2537
+# 2026-10-16 同日再上调到 2537：抽签域（【趣味】）接线 +11 行（建控件 / 建页 /
+# 域表 / 保存委托 / import / 侧栏行距注释）。按文件约定预算只随实测校准。
 
 
 def _read(name: str) -> str:

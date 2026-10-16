@@ -124,16 +124,18 @@ class VoiceChimeSettingsPage(QWidget):
 
         # ---- 自定义台词/歌词（一行一条；留空回退内置库）----
         self.custom_zh_edit = QPlainTextEdit(self)
-        self.custom_zh_edit.setMinimumSize(280, 84)
-        self.custom_zh_edit.setMaximumHeight(180)
+        # 高度刻意压扁：一行一条的白名单输入，3~4 行足够看，长内容自己滚。
+        # （原来 min 84 / max 180 会把整页撑得很长，用户要往下翻很久。）
+        self.custom_zh_edit.setMinimumSize(280, 56)
+        self.custom_zh_edit.setMaximumHeight(90)
         self.custom_zh_edit.setPlaceholderText(
             "每行一条，例如：\n又是元气满满的一天～\n该起来喝口水、动一动啦。"
         )
         self.custom_zh_edit.setPlainText(str(self.config.get("voice_chime_custom_quotes_zh", "") or ""))
 
         self.custom_en_edit = QPlainTextEdit(self)
-        self.custom_en_edit.setMinimumSize(280, 84)
-        self.custom_en_edit.setMaximumHeight(180)
+        self.custom_en_edit.setMinimumSize(280, 56)
+        self.custom_en_edit.setMaximumHeight(90)
         self.custom_en_edit.setPlaceholderText(
             "One quote per line, e.g.\nTake a short break and stretch.\nYou've got this!"
         )

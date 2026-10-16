@@ -272,9 +272,11 @@ def test_voice_and_festival_domains_split_into_three_groups_each(tmp_path, monke
         ]
         expected = {
             "语音报时 · 何时报": ("voice_chime_enabled", "voice_chime_schedule", "voice_chime_custom_times"),
-            "语音报时 · 用什么声音": ("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume"),
+            # 「立即试听」跟音色/语速/音调/音量同组：它试的就是这些参数（2026-10-15 用户要求挪组）。
+            "语音报时 · 用什么声音": ("voice_chime_voice", "voice_chime_rate", "voice_chime_pitch", "voice_chime_volume",
+                              "voice_chime_preview"),
             "语音报时 · 说什么": ("voice_chime_show_bubble", "voice_chime_show_quote",
-                             "voice_chime_custom_quotes_zh", "voice_chime_custom_quotes_en", "voice_chime_preview"),
+                             "voice_chime_custom_quotes_zh", "voice_chime_custom_quotes_en"),
             "节日提醒 · 开关": ("festival_reminder_enabled", "festival_reminder_cn",
                            "festival_reminder_solar_terms", "festival_reminder_west", "festival_reminder_speak"),
             "节日提醒 · 时间": ("festival_reminder_mode", "festival_reminder_count", "festival_reminder_times"),

@@ -450,6 +450,16 @@ class SpriteMenuFacade:
     def on_toggle_festival(self):
         return _first_callable(self._hosts(), ("toggle_festival_reminder",))
 
+    @property
+    def on_divination_draw(self):
+        """「抽支签」：``AppShell.trigger_divination_draw``。
+
+        **必须在 facade 上存在**：注册表的可用性判定是
+        ``callable(getattr(pet, "on_divination_draw", None))``，门面不代理这个属性，
+        overlay 菜单就会**静默少一项**（语音报时/节日四项同样依赖各自的代理）。
+        """
+        return _first_callable(self._hosts(), ("trigger_divination_draw",))
+
     # ---------------------------------------------------------------- 动画/速率
     def switch_clip(self, name: str) -> None:
         """播放指定动画（一次性，播完回掷骰链——window.py switch_clip 语义）。

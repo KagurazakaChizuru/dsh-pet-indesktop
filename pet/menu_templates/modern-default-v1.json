@@ -73,7 +73,7 @@
     {"type": "action", "id": "voice_chime_now", "visible": false, "section": "tools"},
     {"type": "action", "id": "voice_chime_toggle", "visible": false, "section": "tools"},
     {"type": "action", "id": "festival_now", "visible": false, "section": "tools"},
-    {"type": "action", "id": "festival_toggle", "visible": false, "section": "tools"},
+    {"type": "action", "id": "festival_toggle", "visible": false, "section": "tools"}, {"type": "action", "id": "divination_draw", "visible": true, "section": "tools"},
     {"type": "separator", "id": "default.separator-tools", "visible": true},
     {"type": "action", "id": "modern_settings", "visible": true, "section": "system"},
     {"type": "action", "id": "quit", "visible": true, "section": "system"}

@@ -769,6 +769,58 @@ class VoiceChimeService:
                    respect_quiet=respect_quiet)
         return True
 
+    @property
+    def channel_idle(self) -> bool:
+        """通道此刻是否真空闲（无合成在飞、播放器未接管）。
+
+        对外只读面：抽签要在「抽签中...」**念完之后**再静一段才念签文，判据必须是
+        "声音停了"，不能从点击起算固定毫秒（音色/语速一变，间隔就没了）。
+        """
+        return self._channel_idle()
+
+    def precache(self, text: str, *, log_tag: str = "预合成") -> bool:
+        """把一段文本**提前合成进缓存、不出声**。
+
+        给"点下去就要立刻出声"的功能用（每日一签）：先在后台把今天那段签文合出来，
+        用户点的时候就是缓存命中，零网络延迟。语气与报时的预合成一致——免打扰期间
+        不跑（合了也不该出声，白跑一趟网络）。
+
+        **返回值语义（调用方靠它决定要不要重试）**：
+
+        * ``True`` ＝ 返回时它**已可用或已在合成中**（缓存命中，或这次刚提交）；
+        * ``False`` ＝ 这次没办成（免打扰 / 通道忙 / 合成后端不可用）→ **稍后重试**。
+          真事故：这里曾经"放弃也算成功"，于是每日一签的两段只成了第一段
+          （起手合成了、签文被丢），当天再也没补——返回值必须说实话。
+
+        **不播放**靠两处保证：这里只给 ``role="precache"``，且 ``_fire`` 的缓存命中
+        分支对预合成角色直接返回。
+        """
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        if self._quiet_muted():
+            return False
+        try:
+            voice, note = resolve_voice(self._cfg["voice"])
+            if note:
+                self._announce_voice_substitution(note)
+            key = cache_key(stripped, {
+                "voice": voice, "rate": self._cfg["rate"], "pitch": self._cfg["pitch"],
+            })
+            if _cache_hit(self._cache_dir / f"{key}.mp3"):
+                return True
+        except Exception:
+            logger.exception("预合成缓存查询失败")
+            return False
+        if self._busy or not _EDGE_TTS_AVAILABLE:
+            # 通道忙（多半是上一段预合成在飞）：这次放弃，**由调用方稍后重试**。
+            # 曾经这里是"放弃也算成功"，导致两段预合成只成了第一段（真事故）。
+            logger.debug("%s：通道忙或后端不可用，跳过本次预合成", log_tag)
+            return False
+        self._fire(stripped, datetime.now(), None, show_bubble=False,
+                   role="precache", respect_quiet=True)
+        return True
+
     def play_file(self, path: str, *, log_tag: str = "本地语音") -> bool:
         """直接播放一个**本地音频文件**（预缓存台词走这条路：零延迟、不联网）。
 
@@ -972,6 +1024,10 @@ class VoiceChimeService:
         # 命中要求文件非空：失败的合成会留下 0 字节文件，只判 exists() 会把它当成
         # 「已有缓存」→ 播出一声静音且再也不重新合成。
         if _cache_hit(out_path):
+            if role == "precache":
+                # 预合成撞上已有缓存：什么都不做。**不能往下走播放分支**——
+                # 那会让"我只是想提前合好"变成"偷偷播了一次"。
+                return
             # 起播前记下这一段的免打扰口径：免打扰在它播放**期间**才生效时按它决定
             # 切不切（见 _on_quiet_state_changed）。放在这里而不是播放方法里，是为了
             # 写入口径的地方与决定"播什么"的地方同一处。

@@ -1283,6 +1283,16 @@ class Config:
             "festival_reminder_speak": False,  # 节日提醒是否语音播报
             "festival_custom_quotes_cn": "",  # 自定义中文文案（一行一条，追加到内置库）
             "festival_custom_quotes_west": "",  # 自定义西文文案（一行一条，追加到内置库）
+            # 每日一签（趣味域）。**纯日期驱动、零个人信息**：签只跟日期有关，
+            # 不碰生日/坐标这类字段，因此不需要隐私守卫（见 DEV-HANDOVER 的隐私铁律）。
+            # 总开关**默认开**：与报时/节日不同，它是用户主动拉取的（不点不出声、
+            # 不主动冒泡），默认关只会让第一次点击撞上一句"功能已关闭"（天气同口径）。
+            "divination_enabled": True,
+            "divination_speak": False,  # 抽签时念解曰（复用报时服务的音频通道）
+            "divination_hint": True,  # 当天没看时，第一次点桌宠冒一行提示
+            # 运行时状态：今天抽到几号 / 本轮抽过哪些 / 签册。放一个键里，
+            # 免得为"今天抽了什么"新增四个顶层键。
+            "divination_state": {},
             # 天气（右键菜单「查看天气」/「天气城市」，issue #209）。**默认开**：
             # 与报时/节日不同，它是纯拉取型——不点不发请求、不主动冒泡，默认关掉
             # 只会让第一次点击撞上一句"功能已关闭"。默认**不猜城市**：气泡永远会
@@ -1535,6 +1545,10 @@ class Config:
             "festival_reminder_speak",
             "festival_custom_quotes_cn",
             "festival_custom_quotes_west",
+            "divination_enabled",
+            "divination_speak",
+            "divination_hint",
+            "divination_state",
             "weather_enabled",
             "weather_city",
             "weather_city_list",

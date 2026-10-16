@@ -124,6 +124,7 @@ ACTION_ICONS = {
     "network_info": "web",
     "modern_settings": "settings", "quit": "quit",
     "voice_chime_now": "chat", "voice_chime_toggle": "chat",
+    "divination_draw": "todo",
     "festival_now": "todo", "festival_toggle": "todo",
 }
 
@@ -256,6 +257,11 @@ def _build_festival_now(menu, pet):
     return add_action(menu, "今日节日", "todo", pet.on_festival_now, close_on_trigger=True)
 
 
+def _build_divination_draw(menu, pet):
+    """「抽支签」：每天一支，点开即出（当天再点显示同一支）。"""
+    return add_action(menu, "抽支签", "todo", pet.on_divination_draw, close_on_trigger=True)
+
+
 def _build_check_update(menu, pet):
     return add_action(menu, "检查更新", "update", lambda: pet.on_check_update(pet), close_on_trigger=True)
 
@@ -379,6 +385,9 @@ class MenuActionRegistry:
             ),
             "festival_toggle": MenuActionSpec(
                 _build_festival_toggle, _callback_available("on_toggle_festival")
+            ),
+            "divination_draw": MenuActionSpec(
+                _build_divination_draw, _callback_available("on_divination_draw")
             ),
             # 天气：回调缺失 = 能力不可用（隐藏）；开关关掉 = 运行时置灰、位置保留
             # （CONTEXT.md 的 Capability Unavailable / Runtime Disabled 口径）。

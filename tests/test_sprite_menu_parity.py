@@ -482,6 +482,30 @@ def test_music_submenu_offers_every_player_a_launch_entry(tmp_path):
     assert len(launch) == len(set(launch)) == 4, f"启动入口重复或数量不对：{launch}"
 
 
+def test_divination_entry_appears_when_app_shell_provides_the_callback(tmp_path):
+    """回调存在 → overlay 菜单必须出现「抽支签」。
+
+    真 app 里回调来自 ``AppShell.trigger_divination_draw``（app.py），门面
+    ``SpriteMenuFacade`` **必须显式代理** ``on_divination_draw``：注册表的可用性
+    判定是 ``callable(getattr(facade, "on_divination_draw", None))``，漏代理就
+    **静默少一项**——2026-10-15 林小姐截图发现的就是这一条（模板里 visible: true
+    也照样不显示）。
+
+    这里不能靠"和 PetWindow 对齐"那条拦：脚手架两侧都没有 app 回调，
+    包含关系照样成立，红不了。所以要显式把回调装上再断言。
+    """
+    shell, instance, _config = _make_overlay(tmp_path)
+    try:
+        instance.shell.trigger_divination_draw = lambda: None
+        labels = _all_labels(build_sprite_full_menu(shell))
+        assert "抽支签" in labels, "回调可用时「抽支签」必须出现在 overlay 菜单里"
+        # 反向：把回调摘掉，这一项必须消失（可用性判定真的在起作用，不是硬编码显示）
+        del instance.shell.trigger_divination_draw
+        assert "抽支签" not in _all_labels(build_sprite_full_menu(shell))
+    finally:
+        shell._delete_runtime_marker()
+
+
 def test_harness_launcher_gets_widget_dialog_parent(tmp_path, monkeypatch):
     """harness 四个入口的模态父必须是 QWidget（facade 不能当 QMessageBox parent）。
 

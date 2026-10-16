@@ -86,6 +86,7 @@ SETTINGS_DOMAIN_NAV = (
     ("自动化与联动", "automation"),
     ("语音", "sound"),
     ("文件识别", "file"),
+    ("趣味", "play"),
     ("更新", "update"),
 )
 
@@ -1578,6 +1579,9 @@ CONTENT_READING_MAX_WIDTH = 800
 SIDEBAR_MIN_WIDTH = 200
 
 #: 侧栏导航图标与行高：图标按当前主题渲染一次、切主题时重画（见 :func:`refresh_settings_icons`）。
+#: **行高恒为 34**：`test_modern_settings_panel_uses_sidebar_and_includes_ai_settings` 断言
+#: ``sizeHint().height() >= 34``，不许压。能力域从 10 增到 11（【趣味】，2026-10-16）
+#: 要腾出的 16px 只能从**间距**里挤（见 modern_settings_dialog 的侧栏行距与布局间距）。
 SIDEBAR_ICON_SIZE = 16
 SIDEBAR_ROW_HEIGHT = 34
 

@@ -760,6 +760,11 @@ class TestPrepareRealMaterial:
              "--character", "shenshen"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(ROOT), check=False,
+            # 子进程输出强制 UTF-8：默认跟随本机 locale（中文 Windows 为 cp936），
+            # 而这里按 utf-8 解码 ⇒ 中文全成替换字符、断言必然落空（本机已复现）。
+            # **只作用于这个子进程**——不能给测试进程本身设 PYTHONIOENCODING，
+            # 那会让 test_module_level_validation 假红（见 DEV-ENV）。
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         assert result.returncode == 0, result.stderr
         assert "跳过转换" in result.stdout
