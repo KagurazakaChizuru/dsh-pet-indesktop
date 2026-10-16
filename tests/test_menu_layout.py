@@ -1050,10 +1050,31 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
         all_rows = dialog.findChildren(SettingRow)
         chime_rows = [r for r in all_rows if r.objectName().startswith("settingRow_voice_chime_")]
         festival_rows = [r for r in all_rows if r.objectName().startswith("settingRow_festival")]
-        # 语音报时页实测 12 行（3 + 4 + 5）、节日提醒 12 行（5 + 3 + 4）：锁「整组都在、
-        # 一个不漏」，行本身不动，只是被域收集机制 reparent 进「语音」域。
-        assert len(chime_rows) == 12, "语音报时整组 12 行都必须在「语音」域"
-        assert len(festival_rows) == 12, "节日提醒 12 行整体移入「语音」域"
+        # 语音报时与节日提醒的行**整组都在**：锁「一个不漏、也不留在自动化与联动」。
+        # 行数不再写死（2026-10-14 provider 化后语音报时多了引擎与四家后端的字段行），
+        # 改为与两页自己卡片里的行数对齐——本用例要钉的是「归属」，不是「行数」。
+        from pet.settings_widgets import SettingsSection  # noqa: PLC0415
+
+        def _card(title: str):
+            """标题为 ``title`` 的那张卡（找不到返回 None，交给断言报出来）。"""
+            for section in dialog.findChildren(SettingsSection):
+                label = section.findChild(settings_mod.QLabel, "sectionTitle")
+                if label is not None and label.text() == title:
+                    return section
+            return None
+
+        # 语音报时那张卡里的每一行都要在「语音」域：卡里除 `voice_chime_*` 行外还有
+        # 折叠头与凭据组行（`tts_backend_fold_*` / `tts_credentials`），所以这里比的是
+        # 「卡里没有一行掉队」而不是行数相等。本用例要钉的是**归属**，不是行数。
+        card = _card("语音报时")
+        assert card is not None, "「语音」域必须有「语音报时」这张卡"
+        for row in card.rows:
+            assert voice_page.isAncestorOf(row), f"{row.objectName()} 必须在「语音」域"
+        assert len(chime_rows) >= 12, "语音报时既有 12 行一个都不能少"
+        # 节日提醒整组（含 provider 化前后就有的 12 行 + 生日/动画/折叠头等新增行）
+        # 同样一行不留地进「语音」域；具体分卡见 test_festival_settings_layout。
+        for row in festival_rows:
+            assert voice_page.isAncestorOf(row), f"{row.objectName()} 必须在「语音」域"
         for item in chime_rows + festival_rows:
             assert voice_page.isAncestorOf(item), f"{item.objectName()} 必须在「语音」域"
             assert not automation_page.isAncestorOf(item), (
@@ -1064,15 +1085,18 @@ def test_voice_domain_owns_only_tts_rows(tmp_path, monkeypatch):
             label.text()
             for label in voice_page.findChildren(settings_mod.QLabel, "sectionTitle")
         ]
-        # 2026-10-08 设置页「按区直找」：两个页各自的旧分区不再被压平成单张卡片，
-        # 各自拆回同类小分组（组名带页名前缀），顺序与旧页一致。
+        # 2026-10-14 起两页各自**自建卡片**交给本域：语音报时整组占一张「语音报时」
+        # （页内再分基础设置/合成后端/语音/台词歌词，见 test_voice_chime_settings_layout），
+        # 节日提醒整组由 festival_settings.build_domain_page 现造卡片收走
+        # （何时提醒/提醒哪些日子/怎么提醒/你的生日/少用项）。本域不再按「一组行」
+        # 拼小分组——那样页面容器会散架、分组标题会丢。
         assert section_titles == [
-            "语音报时 · 何时报",
-            "语音报时 · 用什么声音",
-            "语音报时 · 说什么",
-            "节日提醒 · 开关",
-            "节日提醒 · 时间",
-            "节日提醒 · 文案",
+            "语音报时",
+            "何时提醒",
+            "提醒哪些日子",
+            "怎么提醒",
+            "你的生日",
+            "少用项",
         ]
 
         # 音效类三组都不在「语音」域（各自回原功能分组，行本身仍照常存在）。

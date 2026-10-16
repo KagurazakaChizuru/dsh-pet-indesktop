@@ -726,12 +726,18 @@ def _page(tmp_path):
 
 
 def test_settings_page_has_preview_row_with_button(tmp_path):
-    from pet.modern_settings_dialog import SettingRow
+    """试听行必须存在且包在 SettingRow 里（历史事故：没包进行里就不会被域收集搬运）。
 
+    2026-10-14 起本页的行**不再挂在页面上**：它们由 ``build_domain_page`` 现造卡片
+    收走（页面容器会在域装配时散架）。所以这里按页面自己的行表断言，而不是
+    ``page.findChildren(SettingRow)``——独立构造时那些行还没被域接走。
+    """
     page = _page(tmp_path)
-    rows = {r.objectName() for r in page.findChildren(SettingRow)}
-    assert "settingRow_festival_preview" in rows
+    assert page.preview_row.objectName() == "settingRow_festival_preview"
+    assert page.preview_row.control is page.preview_btn
     assert page.preview_btn.text() == "立即试听"
+    # 试听行属于「少用项」折叠组，必须被折叠编排登记在册
+    assert page.preview_row in page._festival_panel.rows()
 
 
 def test_preview_click_emits_signal_and_writes_config(tmp_path):

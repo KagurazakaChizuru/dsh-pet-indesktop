@@ -73,6 +73,7 @@ packaging/build_variant.py
 # Node 依赖树：桥接插件为零依赖红线，本地 pnpm install 残留不许入库——
 # 否则原地 import 门禁蹭到它假绿，且 PyInstaller --add-data 会把 junction 垃圾带进产物
 node_modules/
+dist-onedir-alt/
 
 # Android tools, signing material, and generated outputs
 android/.gradle/

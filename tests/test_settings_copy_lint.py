@@ -44,19 +44,20 @@ _BLACKLIST = ("SMTC", "UDP", "DNS", "甩出死区", "零初速", "网卡字节�
 _DOMAIN_WHITELIST: dict[str, frozenset[str]] = {
     # AI 域的用户就是在配 API——「API Key / API 地址」是他要处理的对象本身。
     "AI 与对话": frozenset({"API", "AI", "JSON", "SSL"}),
+    # 语音域的用户在这里就要去服务商拿 Key：带上 Key 的后端（豆包 / MiMo）若不写
+    # 「API Key」，用户根本不知道该填什么、去哪儿找（2026-10-14 随 provider 注册表
+    # 进来：凭据行按后端声明生成）。这是他要处理的对象，不是实现黑话。
+    "语音": frozenset({"API"}),
 }
 
 #: 行级豁免：行 key（去掉 ``settingRow_`` 前缀）→ 允许出现在该行文案里的 token。
 _ROW_WHITELIST: dict[str, frozenset[str]] = {
     # 文件识别域：解释「交给谁」的产品级说法，不是内部代号。
     "file_interpret_enabled": frozenset({"AI"}),
-    # 时间格式占位符：用户要照着它输入，属于输入语法而不是黑话。
-    "voice_chime_custom_times": frozenset({"HH", "MM"}),
-    "festival_reminder_times": frozenset({"HH", "MM"}),
-    # 「无需 API Key」是在告诉用户不用配密钥（同一域的通用说法）。
-    "voice_chime_voice": frozenset({"API"}),
-    # 内置西文诗句库的作品名（圣经译本缩写），属作品署名。
-    "festival_custom_quotes_west": frozenset({"KJV"}),
+    # 注（2026-10-14）：`voice_chime_custom_times` / `festival_reminder_times` /
+    # `voice_chime_voice` / `festival_custom_quotes_west` 四条豁免已随文案重写而失效
+    # ——新文案不再出现 HH/MM、API、KJV 这些 token，所以按本文件「白名单不是垃圾桶」
+    # 的口径把它们**删掉**（防腐烂用例会盯着失效条目）。
     # 免费视觉模型名：用户要按这个名字去服务商侧配置，删掉就无法照做。
     "proactive_free": frozenset({"GLM"}),
     # 自定义台词模板是 JSON：用户要复制/粘贴的就是它。

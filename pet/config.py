@@ -1268,6 +1268,22 @@ class Config:
             "voice_chime_show_quote": True,  # 台词/歌词开关
             "voice_chime_custom_quotes_zh": "",  # 自定义中文台词/歌词（一行一条，留空回退内置库）
             "voice_chime_custom_quotes_en": "",  # 自定义英文台词/歌词（一行一条，留空回退内置库）
+            # 合成后端：edge（edge-tts，免 Key）/ mimo（小米 MiMo TTS，OpenAI 兼容接口，
+            # API Key 存系统钥匙串）/ sapi（Windows 本地语音）/ doubao（豆包 2.0）；
+            # 主后端失败时按 fallback 自动回退另一个。
+            # 默认 edge（2026-10-13 改，原为 mimo）：面向公众发包时，陌生人装上就要能听见
+            # 声音——mimo / doubao 都要用户自备 API Key，拿它们当默认等于新装即静音；
+            # edge 不需要任何凭据，且失败照走既有自动回退。只改仓库默认值，不动任何人
+            # 本机 config.json 里的显式取值。
+            "voice_chime_tts_backend": "edge",  # edge / mimo / sapi / doubao
+            "voice_chime_tts_fallback": True,  # 主后端失败自动回退 edge
+            "voice_chime_mimo_model": "mimo-v2.5-tts",  # 或 mimo-v2.5-tts-voicedesign
+            "voice_chime_mimo_voice": "冰糖",  # 内置音色 id（中文名即 id）
+            "voice_chime_mimo_style": "",  # 风格指令（自然语言，留空用模型默认）
+            "voice_chime_sapi_voice": "",  # SAPI5 本地音色（留空＝自动挑中文音色）
+            "voice_chime_sapi_rate": 0,  # SAPI5 语速 −10..10（0 为系统默认）
+            "voice_chime_doubao_speaker": "zh_female_peiqi_uranus_bigtts",  # 豆包 2.0 音色
+            "voice_chime_doubao_pitch": 15,  # 豆包本地变调百分比（0–30）
             # 节日提醒（农历/24 节气/西方节日；命中当日用气泡告知并附氛围匹配文案）。
             # 总开关默认关闭：属"主动打扰"型功能，升级后不应突然冒出来，由用户显式开启。
             "festival_reminder_enabled": False,  # 节日提醒总开关
@@ -1281,6 +1297,10 @@ class Config:
             # 节日语音播报：复用语音报时服务的音频通道（音色/语速/音调/音量同报时），
             # 故不新增独立的语音参数键。默认关闭。开启后同一分钟由节日让报时让位。
             "festival_reminder_speak": False,  # 节日提醒是否语音播报
+            "festival_reminder_animation": True,  # 节日提醒是否播匹配动画
+            # 生日进「动态节日」：命中当天排最前，不进 FESTIVALS 静态表（见 festival_animations）。
+            # 默认空串＝没填，非法/不存在的日期静默落空（clean_birthday 整串 fullmatch 校验）。
+            "festival_birthday": "",
             "festival_custom_quotes_cn": "",  # 自定义中文文案（一行一条，追加到内置库）
             "festival_custom_quotes_west": "",  # 自定义西文文案（一行一条，追加到内置库）
             # 每日一签（设置页在「互动 · 抽签」标签）。**纯日期驱动、零个人信息**：签只跟
@@ -1534,6 +1554,15 @@ class Config:
             "voice_chime_show_quote",
             "voice_chime_custom_quotes_zh",
             "voice_chime_custom_quotes_en",
+            "voice_chime_tts_backend",
+            "voice_chime_tts_fallback",
+            "voice_chime_mimo_model",
+            "voice_chime_mimo_voice",
+            "voice_chime_mimo_style",
+            "voice_chime_sapi_voice",
+            "voice_chime_sapi_rate",
+            "voice_chime_doubao_speaker",
+            "voice_chime_doubao_pitch",
             "festival_reminder_enabled",
             "festival_reminder_cn",
             "festival_reminder_solar_terms",
@@ -1543,6 +1572,8 @@ class Config:
             "festival_reminder_times",
             "festival_reminder_show_quote",
             "festival_reminder_speak",
+            "festival_reminder_animation",
+            "festival_birthday",
             "festival_custom_quotes_cn",
             "festival_custom_quotes_west",
             "divination_enabled",

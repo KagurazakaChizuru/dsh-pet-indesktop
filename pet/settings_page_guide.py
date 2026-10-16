@@ -67,14 +67,30 @@ def _layout_children(widget) -> list[QWidget]:
     return children
 
 
+def _is_plain_container(widget) -> bool:
+    """没有自己的标题、只是布局层的普通 ``QWidget``（域装配可能先起一层再放卡片）。
+
+    2026-10-14 起「语音」域就是这样：顶层一张「语音报时」平卡 + 节日页自建的卡片组，
+    中间隔了一层自建 ``QWidget``。跳转条与组描述都按布局树取材，不穿透这层就会
+    「新卡片看不见、跳转条少一格」。
+    """
+    return type(widget) is QWidget and widget.layout() is not None
+
+
 def blocks_in_layout_order(page) -> list[tuple[str, QWidget]]:
     """页内**顶层块**（分区 / 折叠框）按布局顺序；跳转条一格对一块。"""
-    blocks = []
-    for child in _layout_children(page):
-        if isinstance(child, CollapsibleGroup):
-            blocks.append((child.toggle.text(), child))
-        elif isinstance(child, SettingsSection):
-            blocks.append((section_title(child), child))
+    blocks: list[tuple[str, QWidget]] = []
+
+    def walk(node) -> None:
+        for child in _layout_children(node):
+            if isinstance(child, CollapsibleGroup):
+                blocks.append((child.toggle.text(), child))
+            elif isinstance(child, SettingsSection):
+                blocks.append((section_title(child), child))
+            elif _is_plain_container(child):
+                walk(child)
+
+    walk(page)
     return blocks
 
 
@@ -88,6 +104,8 @@ def sections_in_layout_order(page) -> list[tuple[str, list[SettingRow]]]:
                 found.append((section_title(child), list(child.rows)))
             elif isinstance(child, CollapsibleGroup):
                 walk(child.body)
+            elif _is_plain_container(child):
+                walk(child)
 
     walk(page)
     return found
@@ -231,15 +249,19 @@ SECTION_GUIDE: dict[str, str] = {
     "文案风格与模板": "它说话是什么风格，以及一份可以整体替换的文案模板。",
     "自定义台词（逐事件文案）": "每个事件各说什么，逐条改；不改也能正常用。",
     "事件气泡文案": "按事件分组的气泡台词，一行一条。",
-    # 语音
-    "语音报时 · 何时报": "几点说话、多久说一次。",
-    "语音报时 · 用什么声音": "用哪个音色，语速、音调、音量各是多少，以及先试听一句。",
-    "语音报时 · 说什么": "报完时间加不加台词、冒不冒气泡。",
     # 互动 · 抽签
     "抽签": "右键「抽支签」出当天的签，一天一支；这里管开关、要不要念、要不要每天提醒。",
-    "节日提醒 · 开关": "开不开节日提醒、提醒哪些节日、要不要一起念出来。",
-    "节日提醒 · 时间": "一天提醒几次，或者自己排几个时间点。",
-    "节日提醒 · 文案": "节日文案从哪儿来，以及先预览一次看看效果。",
+    # 语音（2026-10-14 起两页各自自建卡片，标题跟着从「语音报时 · X」变成卡片名）
+    # 「语音报时」是域里唯一那张语音卡：语音页自己的四张小卡（基础设置 / 合成后端 /
+    # 语音 / 台词歌词）**不进域**——它们的行被收进这张平卡，容器本身被丢弃，所以
+    # 那四个标题在界面上永远不会出现，不能在这里留条目（会被防腐烂用例判为过期）。
+    "语音报时": "几点说话、多久说一次；用哪家的合成引擎、各引擎的音色与参数；"
+              "以及报完时间加不加台词、冒不冒气泡。",
+    "何时提醒": "一天提醒几次，或者自己排几个时间点。",
+    "提醒哪些日子": "开不开节日提醒、提醒哪些节日。",
+    "怎么提醒": "出声念、播动画、附一句诗词，各自开不开。",
+    "你的生日": "填了就在当天有专属祝福。",
+    "少用项": "自定义节日文案与预览这类偶尔才用的项。",
     # 文件识别
     "拖文件解读": "把文件拖到桌宠身上，它会读一遍并说点什么。",
 }

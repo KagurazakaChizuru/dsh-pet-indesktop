@@ -373,3 +373,87 @@ python scripts/capture_settings_pages.py .scratch/divination-pr290/capture-light
 `config.json` 里的四个 `divination_*` 键会留着（读入即弃不存在——`divination_state`
 只是历史状态，不会影响其它功能；想彻底清干净可手工删这四个键，或走「恢复全局默认…」）。
 作者原始提交 `1dc37ed2` 完整保留在分支历史上，可单独取用。
+
+## 九、第三轮（2026-10-17）：累计合并 PR267 候选后的兼容收口
+
+> **起点**：本轮收口后的 `1c69fb3`（本分支）
+> **合入**：`integration/pr267` = `210ea04`——PR [#267](https://github.com/MerZlin/dsh-pet-indesktop/pull/267)
+> （作者 `KagurazakaChizuru`，tip `29a87be`，TTS 合成后端 provider 化）合上游 `main` `056dc2a`
+> （#291 汽水歌词 / #288 跨屏 / #287 edge-tts 门禁）的候选。合并前先读过
+> `D:/dsh-pet-pr267-artifacts/PRECACHE-COMPAT-NOTE-FOR-290.md`（该候选给 `precache` 相关
+> 接口写了兼容说明）。
+> **状态**：本分支**仍是本地提交**——未 push 作者 fork、未 merge 上游。理由见 9.5。
+
+### 9.1 六处冲突的取法
+
+| 冲突文件 | 取法 | 为什么 |
+|---|---|---|
+| `pet/voice_chime_service.py`（`_fire` 缓存命中分支） | **两侧都要**：逐后端循环（本支）＋循环内对 `role in PRECACHE_ROLES` 早退（267） | 缓存路径从"一个"变成"逐后端一个"，早退必须落在循环里；只取循环就丢"提前合好不许出声"，只取早退就只查第一个后端 |
+| `pet/modern_settings_dialog.py` | 取 267 侧（`voice_chime_rows` / `festival_rows` 认领） | 语音报时与节日提醒的行已由 provider 声明重建为平卡，旧的 `voice_sections` / `festival_sections` 分组表在合并树里**没有消费方**（留下就是死代码） |
+| `pet/settings_page_guide.py` | 取 267 侧新卡名 + 保留本支「抽签」条目 | 卡片标题从「语音报时 · X / 节日提醒 · X」变成卡片名；「抽签」是本支新增的页内标签落点，两边都要在 |
+| `tests/test_settings_page_guide.py` | 取 267 侧 | 旧的三条「语音报时 · X」卡名在合并树里不存在（`_section(dialog, "语音", …)` 必失败） |
+| `tests/test_architecture.py` | 行数预算按合并后**实测 2535** 重设 | `2526`（main）/ `2530`（本支）/ `2533`（267）三个数字都被合并树取代：TTS provider 化净 +7 与抽签接线净 +4 落在同一份文件上 |
+| `docs/INDEX.md` | 两侧行并集 | 本支的 DIVINATION 行 + 主线的 SODA-LYRICS-ROUTE 行（#291） |
+
+### 9.2 语义迁移（没有文本冲突、但不改就是坏的）
+
+- **`precache()` 改用 provider 接口**：可用后端改用 `_usable_attempts()`（它已跑过 provider
+  的 `preflight()`，"音色下架换默认"的说明由它弹一次），缓存路径改用
+  `_cache_path(text, attempt)`（扩展名 `.mp3`/`.wav` 与缓存键里的 provider flavor 都由
+  provider 给）。原来那三段——自己 `resolve_voice()`、自己拼平铺 dict 喂 `cache_key()`、
+  自己认 `.mp3`——在合并后**服务层已无这些符号**（合成整段进了 `pet/tts/`），不改就是
+  `NameError`。
+- **"后端不可用"的判据换源**：原来是 `_EDGE_TTS_AVAILABLE`（模块级标志，已随合成链路搬进
+  provider），现在就是"`_usable_attempts()` 返回空元组"——回退链上的 doubao / mimo 同样
+  按各自的 `availability()` 参与判定，不再只看 edge 一家。
+- **AUX 预合成与报时预合成仍然分家**（本支的核心隔离，一个字节未改）：
+  `AUX_PRECACHE_ROLE` 只写自己的 cache key，不碰报时那一组
+  `_precache_slot/_text/_bubble/_path`；`_handle_synthesized` 的失败/完成分支按角色分流。
+  合并只动了 `_fire` 的命中分支结构，占位隔离不在其中。
+- **上游能力照留**：`edge-tts>=7.3.1,<8` 的依赖下限（#287 门禁）、`pet/tts_diagnostics.py`
+  的脱敏失败诊断、`pet/music_lyric.py` 的 #291 直连＋有界单次回退（与本支改动面无关，
+  合并后逐字节等于上游 `056dc2a` 版本）。
+
+### 9.3 本轮验证（本机 Windows 11 / Py3.13.7 / PySide6 6.11.2）
+
+环境口径：`D:\dsh-pet-src\.venv` + 隔离依赖目录 `D:/dsh-pet-pr267-deps`（edge-tts 7.3.1，
+= `requirements.txt` 的下限）+ `D:/dsh-pet-pr267-deps-ocr`（omegaconf）、
+`PYTHONPATH="…;…"` `QT_QPA_PLATFORM=offscreen`。
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 静态检查 | `python -m ruff check .` | **All checks passed!** |
+| 聚焦（两侧改动面的并集，25 个文件） | `pytest -q tests/test_tts_*.py tests/test_voice_chime*.py tests/test_divination*.py tests/test_settings_{interaction_tabs,page_guide,default_marks,search_aliases,copy_lint,pet_tabs,slot_config_route}.py tests/test_menu_layout.py tests/test_desktop_pet_features.py tests/test_config_schema.py tests/test_sprite_menu_parity.py tests/test_festival*.py tests/test_architecture.py tests/test_pr_report_discipline.py` | **1052 passed**（198.80 s） |
+| 受影响时序族高负载复跑 ×3 | `pytest -q tests/test_voice_chime.py tests/test_voice_chime_service.py` 连跑 3 遍 | 3 遍各 **272 passed**（5.88 / 6.07 / 6.23 s），无 flake |
+| 全量（按文件切 18 片、各起独立进程） | `python run_chunks_pr290.py 500`（脚本与逐片日志：`D:/dsh-pet-pr290-artifacts/`） | **8092 用例跑到：passed 8070 / failed 1 / skipped 21**；唯一那条红是 9.4 的环境用例，与本次改动无关 |
+| 断言有效性（消融·早退守卫，本轮新增用例） | 删掉 `_fire` 里那 4 行 `if role in PRECACHE_ROLES: … return` 后重跑 `-k aux_precache` | **1 failed / 3 passed**（红的那条正是新增用例，`plays == 1`："预合成偷偷播了一次"）；恢复后 4/4 绿，文件 sha256 与消融前一致 |
+
+### 9.4 全量那一条红的归因（不假称通过）
+
+`tests/test_proactive.py::TestVisionAndWatcherPhase2::test_foreground_window_info_real_call_no_shadow_bug`
+
+那条用例断言"真实调用 `pet.vision.foreground_window_info()` 必须拿得到前台窗口"。探针
+（`D:/dsh-pet-pr290-artifacts/probe-foreground.py`，输出同名 `.log`）在本机此刻拿到的是
+**不可见**窗口：
+
+```
+GetForegroundWindow() = 27987436
+IsWindowVisible = False
+IsIconic        = False
+```
+
+而 `foreground_window_info()` 的契约就是"窗口不可见 / 最小化 / cloaked / 取不到 → 返回 None"
+（`pet/vision.py:95`），所以那句 `assert info is not None` 的前提不成立。**与本次改动无关的
+证据有三条**：① 两侧都没碰过 `pet/vision.py` 与 `tests/test_proactive.py`（对 merge-base
+的 diff 为空，合并树里逐字节等于两侧）；② 同一条用例在 `D:/dsh-pet-wt-pr267`（PR267 候选、
+三端 CI 全绿的那棵树）**同样失败**；③ 它在隔离环境下失败，与分片位置、并发都无关。
+
+### 9.5 未做与边界
+
+- **未 push 作者 fork 的 `feat/divination`**（PR #290 的 head）：267 候选还在等合并，
+  现在就把累计结果推上去，会把 267 的内容一起卷进 #290 的 diff，两条管线互相混账。
+  本轮只本地提交。
+- **未改 289 / input / v5 相关树**，未涉及 DLC。
+- **未做真实配置与人工点击**（本轮不重复广泛审查、不操作真实用户配置）：真机验收项仍以
+  §五 的隔离配置探针为准，右键观感与真实出声留给用户点验收。
+- **doubao / mimo 仍无 Key**：与 267 候选同一状态（合成链路的可用性判定有用例，真实合成未测）。
