@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
-"""设置页「互动」域：页内任务标签（点击与音效 / 自言自语）+ 本域全部设置行。
+"""设置页「互动」域：页内任务标签（点击与音效 / 自言自语 / 天气 / 抽签）+ 本域全部设置行。
 
 **为什么单独一个模块**：``modern_settings_dialog.py`` 是"上帝对话框"（行数预算
 反复触顶），本域的行定义与页装配搬到这里，收益是双向的——既让互动域长得像
 「菜单」域那样可分页（主人反馈「单页面太多东西了」），又把 60+ 行从该文件搬出。
 
-**为什么用页内标签而不是再拆一个侧栏域**：侧栏 9 个域是外部契约
+**为什么用页内标签而不是再拆一个侧栏域**：侧栏 10 个域是外部契约
 （``SETTINGS_DOMAIN_NAV``，多处测试与截图脚本按索引/名称依赖）；同一个能力域内的
-多个**同级任务**适合页内标签（先例：菜单域的 菜单编排 / 快捷启动 / 外观）。本域两个
-标签就是两个同级任务：**点击与音效**（输入 + 点击反馈）、**自言自语**（周期气泡的
-台词与配图）。
+多个**同级任务**适合页内标签（先例：菜单域的 菜单编排 / 快捷启动 / 外观）。本域四个
+标签就是四个同级任务：**点击与音效**（输入 + 点击反馈）、**自言自语**（周期气泡的
+台词与配图）、**天气**、**抽签**——后两个都是"用户主动拉一次、桌宠给一个结果"的
+互动面，行与控件由各自模块构建（本模块只挂页）。
 
 **接线契约**（与 ``settings_file_interpret`` 同口径）：
 
@@ -27,8 +28,8 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .settings_widgets import SettingRow, SettingsSection, SettingsTabContainer
 
-TAB_KEYS = ("click", "self_talk", "weather")
-TAB_LABELS = ("点击与音效", "自言自语", "天气")
+TAB_KEYS = ("click", "self_talk", "weather", "divination")
+TAB_LABELS = ("点击与音效", "自言自语", "天气", "抽签")
 
 
 def _page(dialog, title: str, sections: list[tuple[str, list[SettingRow]]]) -> QWidget:
@@ -130,11 +131,11 @@ def build_self_talk_rows(dialog) -> list[SettingRow]:
 
 
 def build_interaction_domain(dialog) -> QWidget:
-    """「互动」域整页：一个页内任务标签容器（两个标签各含自己的组）。
+    """「互动」域整页：一个页内任务标签容器（四个标签各含自己的组）。
 
-    组名 ``输入`` / ``点击反馈`` / ``自言自语`` 保持不变——它们是对外契约，
-    既有用例（test_menu_layout / test_desktop_pet_features / test_requested_regressions）
-    按组名硬编码断言。
+    组名 ``输入`` / ``点击反馈`` / ``自言自语`` / ``天气`` / ``抽签`` 保持不变——
+    它们是对外契约，既有用例（test_menu_layout / test_desktop_pet_features /
+    test_requested_regressions / test_settings_interaction_tabs）按组名硬编码断言。
     """
     tabs = SettingsTabContainer(dialog)
     tabs.addTab(
@@ -169,4 +170,10 @@ def build_interaction_domain(dialog) -> QWidget:
     from .settings_weather import build_weather_tab
 
     tabs.addTab(TAB_KEYS[2], TAB_LABELS[2], build_weather_tab(dialog))
+    # 第四个同级任务：抽签（"用户主动拉一次、桌宠给一个结果"，同天气一族）。
+    # 行与控件都由 settings_divination 构建；它是 **页内标签而不是一级域**——
+    # 只有一组的「趣味」一级域按 docs/SETTINGS-CHANGE-GATES.md 的准入不合格。
+    from .settings_divination import build_divination_tab
+
+    tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))
     return tabs

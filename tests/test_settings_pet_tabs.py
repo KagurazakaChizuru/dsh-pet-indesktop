@@ -25,7 +25,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 EXPECTED_SIDEBAR = [
-    "常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新",
+    "常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新",
 ]
 #: 标签键给代码（稳定），标签名给用户（可读）；顺序 = 使用顺序。
 EXPECTED_TABS = (("display_music", "显示与音乐"), ("motion_collision", "动作与碰撞"))

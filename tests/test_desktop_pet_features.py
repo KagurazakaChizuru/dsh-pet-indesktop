@@ -911,7 +911,7 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     if sys.platform == "win32":
         expected_labels.append("回收内存")  # 「回收内存」菜单动作（#210）：仅 Windows
     expected_labels.extend(["查看天气", "天气城市"])  # 天气入口（issue #209，所有平台）
-    expected_labels.append("抽支签")  # 每日一签（2026-10-15，趣味的入口就是这个菜单项）
+    expected_labels.append("抽支签")  # 每日一签（2026-10-15；设置入口在「互动 · 抽签」标签）
     # 立即报时/语音报时开关/今日节日/节日提醒开关：2026-09-19 起默认模板
     # visible: false，不上默认菜单（用户可在菜单编辑器加回）
     expected_labels.extend([
@@ -937,6 +937,47 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     assert all("旧版菜单" not in action.text() for action in menu.actions())
     menu.close()
     app.processEvents()
+
+
+def test_divination_draw_reports_where_to_turn_it_back_on(tmp_path):
+    """总开关关掉时点「抽支签」不静默无反应：气泡里的落点必须是设置页的真实归属。
+
+    这句话里的「互动 · 抽签」是**外部契约**（用户照着去找）：每日一签 2026-10-15 曾
+    挂在只有一个组的「趣味」一级域，2026-10-17 按 ``docs/SETTINGS-CHANGE-GATES.md``
+    的准入（新一级域须"预计包含至少两个稳定设置组"）判不合格，行已归位到「互动」域
+    的第四个页内标签。文案不跟着改，用户就会按提示去找一个不存在的域。
+
+    只借 ``AppShell`` 的两个方法（关闭路径只碰 ``config`` / ``win`` / 懒建服务），
+    不构造真壳——素材库、ffmpeg、托盘都不需要。配置落在 ``tmp_path``，不读真实配置。
+    """
+    from types import SimpleNamespace
+
+    from pet.app import AppShell
+    from pet.config import Config
+
+    class _Win:
+        def __init__(self):
+            self.bubbles = []
+
+        def show_bubble(self, text, duration_ms=0):  # noqa: N802 - 对齐产品签名
+            self.bubbles.append(text)
+
+    config = Config(base=tmp_path)
+    config.set("divination_enabled", False)
+    assert config.save() is True
+    win = _Win()
+    host = SimpleNamespace(config=config, win=win, divination_service=None)
+    host._ensure_divination_service = lambda: AppShell._ensure_divination_service(host)
+
+    AppShell.trigger_divination_draw(host)
+
+    assert win.bubbles, "关掉总开关后点菜单必须给一句去处提示（不许静默无反应）"
+    assert "互动 · 抽签" in win.bubbles[-1], f"落点不是设置页的真实归属：{win.bubbles[-1]!r}"
+    assert "趣味" not in win.bubbles[-1], "旧域已不存在，文案不许再指向它"
+    # 关掉总开关时只报去处、**一个状态都不写**（不落「今天抽过」的假记录）。
+    # 注意 config.data 里本来就有出厂默认的空 dict（Config._initial_data），
+    # 所以这里判的是"没有被写进内容"，不是"键不存在"。
+    assert config.data.get("divination_state") in (None, {}), "关掉时不该写任何抽签状态"
 
 
 def test_pure_pet_context_menu_keeps_web_but_hides_harness():
@@ -1343,7 +1384,7 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert isinstance(dialog.sidebar, QListWidget)
     assert isinstance(dialog.pages, QStackedWidget)
     # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新"]
+    expected_pages = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_pages
     assert dialog.pages.count() == len(expected_pages)
     assert dialog.search_edit.placeholderText() == "搜索设置…"

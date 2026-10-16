@@ -904,7 +904,7 @@ def test_settings_sidebar_uses_stable_domains_and_owns_representative_rows(tmp_p
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
     # 2026-09-19 新增「文件识别」域（拖文件解读，settings_file_interpret）。
-    expected = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新"]
+    expected = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected
 
     def owner(setting_id):
@@ -1290,7 +1290,7 @@ def test_menu_domain_uses_in_page_task_tabs_without_changing_sidebar(tmp_path, m
     monkeypatch.setattr(settings_mod.autostart_mod, "is_enabled", lambda: False)
     dialog = ModernSettingsDialog(Config(tmp_path), include_ai=True)
 
-    expected_sidebar = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "趣味", "更新"]
+    expected_sidebar = ["常规", "桌宠", "互动", "菜单", "桌面组件", "AI 与对话", "自动化与联动", "语音", "文件识别", "更新"]
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == expected_sidebar
     tabs = dialog.pages.widget(3).findChild(SettingsTabContainer, "settingsTaskTabs")
     assert tabs is not None
@@ -1742,7 +1742,6 @@ def test_settings_domains_use_semantic_sidebar_icons():
         ("自动化与联动", "automation"),
         ("语音", "sound"),
         ("文件识别", "file"),
-        ("趣味", "play"),
         ("更新", "update"),
     )
 

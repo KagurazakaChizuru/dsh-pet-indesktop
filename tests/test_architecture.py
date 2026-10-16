@@ -265,9 +265,10 @@ WINDOW_PY_LINE_BUDGET = 4671
 # 文案落在 settings_pet_controls（`CROSS_SCREEN_HINT` 与作用域登记），本文件只留
 # 装配与接线；行内文案表仍是唯一来源。按文件约定预算只随实测校准，不为达标压缩
 # 行宽/合并语句；拆分仍是待办。
-MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2537
-# 2026-10-16 同日再上调到 2537：抽签域（【趣味】）接线 +11 行（建控件 / 建页 /
-# 域表 / 保存委托 / import / 侧栏行距注释）。按文件约定预算只随实测校准。
+# 2026-10-17 校准到 2530：每日一签接线 **净 +4**（import 与保存委托两行，加上侧栏
+# 间距与注释的措辞）。抽签的页装配不在本文件——它作为「互动」域第四个页内标签由
+# settings_interaction 挂载（与天气同口径），避免这个"上帝对话框"再涨。
+MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET = 2530
 
 
 def _read(name: str) -> str:

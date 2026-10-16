@@ -140,6 +140,25 @@ _UNLOCK_INTERVAL_MS = int(_UNLOCK_INTERVAL_S * 1000)
 # 放掉标志不会把正在播的那一段误判成空闲。
 _PLAY_PENDING_MAX_S = 120.0
 
+# 预合成角色分两种，**占位状态互不相干**（2026-10-17）：
+#
+# - :data:`PRECACHE_ROLE`：报时预合成（``_maybe_precache``）。它自己占
+#   ``_precache_slot`` / ``_precache_text`` / ``_precache_bubble`` / ``_precache_path``
+#   这一组字段，到点由 ``_consume_precache`` 取用。
+# - :data:`AUX_PRECACHE_ROLE`：**旁路预合成**（外部功能各要各的"点下去就出声"，如
+#   每日一签的 ``precache``）。缓存文件按自己的文本落到自己的 cache key，
+#   **一个报时占位字段都不碰**。
+#
+# 为什么必须分开：两者曾共用 ``role="precache"``，于是旁路预合成也能改报时那一组占位
+# 字段——它的合成**失败**会把报时**已经合成好**的那一段占位一起清掉（到点白等一次冷
+# 合成），它的合成**成功**又会把 ``_precache_path`` 覆盖成旁路的那个 mp3（报时日志
+# 里报的是别人的文件名）。分开之后各自的成败只说自己那一句。
+PRECACHE_ROLE = "precache"
+AUX_PRECACHE_ROLE = "precache_aux"
+#: 两个"提前合好、不出声"的角色：``_fire`` 的缓存命中分支与 ``_handle_synthesized``
+#: 的播放出口都要把它们与真正要出声的角色分开。
+PRECACHE_ROLES = (PRECACHE_ROLE, AUX_PRECACHE_ROLE)
+
 
 def _remaining_unlock_ms(seconds: float) -> int:
     """把"剩余秒数"换算成布表的毫秒间隔。
@@ -557,7 +576,7 @@ class VoiceChimeService:
         # 缓存清理节流（两者都只做"多久没做过了"的判断，不参与业务语义）。
         self._busy_since = 0.0
         self._last_prune_at = 0.0
-        self._synthesis_role = "play"  # play | precache：区分合成完成回调的用途
+        self._synthesis_role = "play"  # play | precache | precache_aux：区分合成完成回调的用途
         # 本次合成是否尊重免打扰（True = 免打扰期间丢弃结果）。与 _synthesis_role
         # 同生命周期：合成开始时置位、回调里消费后复位为默认值。
         self._synthesis_respect_quiet = True
@@ -792,8 +811,9 @@ class VoiceChimeService:
           真事故：这里曾经"放弃也算成功"，于是每日一签的两段只成了第一段
           （起手合成了、签文被丢），当天再也没补——返回值必须说实话。
 
-        **不播放**靠两处保证：这里只给 ``role="precache"``，且 ``_fire`` 的缓存命中
-        分支对预合成角色直接返回。
+        **不播放**靠两处保证：这里只给 :data:`AUX_PRECACHE_ROLE`（旁路预合成，**不碰**
+        报时那一组 ``_precache_*`` 占位字段），且 ``_fire`` 的缓存命中分支与
+        ``_handle_synthesized`` 的播放出口都对预合成角色直接返回。
         """
         stripped = (text or "").strip()
         if not stripped:
@@ -818,7 +838,7 @@ class VoiceChimeService:
             logger.debug("%s：通道忙或后端不可用，跳过本次预合成", log_tag)
             return False
         self._fire(stripped, datetime.now(), None, show_bubble=False,
-                   role="precache", respect_quiet=True)
+                   role=AUX_PRECACHE_ROLE, respect_quiet=True)
         return True
 
     def play_file(self, path: str, *, log_tag: str = "本地语音") -> bool:
@@ -937,7 +957,7 @@ class VoiceChimeService:
             return
         self._busy = True
         self._busy_since = time.monotonic()
-        self._synthesis_role = "precache"
+        self._synthesis_role = PRECACHE_ROLE
         self._reararm_watchdog()
         generation = self._next_synthesis_generation()
         # 音色必须用 ``resolve_voice`` 的**结果**：缓存 key 与即时合成（_fire）用的
@@ -1024,9 +1044,9 @@ class VoiceChimeService:
         # 命中要求文件非空：失败的合成会留下 0 字节文件，只判 exists() 会把它当成
         # 「已有缓存」→ 播出一声静音且再也不重新合成。
         if _cache_hit(out_path):
-            if role == "precache":
-                # 预合成撞上已有缓存：什么都不做。**不能往下走播放分支**——
-                # 那会让"我只是想提前合好"变成"偷偷播了一次"。
+            if role in PRECACHE_ROLES:
+                # 预合成（报时 / 旁路）撞上已有缓存：什么都不做。**不能往下走播放
+                # 分支**——那会让"我只是想提前合好"变成"偷偷播了一次"。
                 return
             # 起播前记下这一段的免打扰口径：免打扰在它播放**期间**才生效时按它决定
             # 切不切（见 _on_quiet_state_changed）。放在这里而不是播放方法里，是为了
@@ -1206,14 +1226,18 @@ class VoiceChimeService:
             if error == EDGE_TTS_MISSING:
                 # 运行期才发现 edge-tts 缺失（顶层只做 find_spec 探测）：清掉可能
                 # 残留的预合成占位，再走既有缺依赖降级文案。
-                if role == "precache":
+                if role == PRECACHE_ROLE:
                     self._precache_slot = None
                     self._precache_text = None
                     self._precache_bubble = None
                     self._precache_path = None
+                elif role == AUX_PRECACHE_ROLE:
+                    # 旁路预合成没有占位要回滚——**尤其不许碰**报时那一组字段
+                    # （那一段可能已经合好了，清掉就是替它白丢一次缓存）。
+                    logger.debug("旁路预合成遇缺依赖：%s", Path(path).name)
                 self._notify_missing_tts()
                 return
-            if role == "precache":
+            if role == PRECACHE_ROLE:
                 # 预合成失败：丢弃占位，到点走即时合成回退。
                 self._precache_slot = None
                 self._precache_text = None
@@ -1221,13 +1245,24 @@ class VoiceChimeService:
                 self._precache_path = None
                 logger.warning("预合成失败，到点将即时合成：%s", error)
                 return
+            if role == AUX_PRECACHE_ROLE:
+                # 旁路预合成失败：它不留占位（调用方按返回值自己重试），
+                # **更不许替报时清占位**——那会把报时已合好的那一段一起清掉。
+                logger.warning("旁路预合成失败，调用方将重试：%s", error)
+                return
             logger.warning("语音报时合成失败：%s", error)
             self._bubble(f"语音合成失败（{error[:40]}…）")
             return
-        if role == "precache":
+        if role == PRECACHE_ROLE:
             # 预合成完成：仅记录缓存路径，不播放（到点由 _fire 直接播缓存）。
             self._precache_path = str(path)
             logger.info("预合成完成：%s", Path(path).name)
+            return
+        if role == AUX_PRECACHE_ROLE:
+            # 旁路预合成完成：缓存文件已经在按自己文本算出的 key 上，**没有占位要记**
+            # ——记进 ``_precache_path`` 会把它挂到报时那个槽位上（覆盖报时的完成结果）。
+            # 这里的 return 同时挡住下面的播放出口：写日志时"提前合好"绝不出声。
+            logger.info("旁路预合成完成：%s", Path(path).name)
             return
         if respect_quiet and self._quiet_muted():
             # 合成期间才进入免打扰（合成要 3-8s，全屏/手动免打扰都可能在中间发生）：

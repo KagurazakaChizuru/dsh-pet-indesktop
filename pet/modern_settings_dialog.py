@@ -314,9 +314,7 @@ class ModernSettingsDialog(QDialog):
         sidebar_layout.setContentsMargins(12, 16, 12, 12)
         # 间距 3px + 导航行距 1px：slot 页有两个重置按钮时，默认窗口 800×560 下 10 个
         # 能力域要全落在视口里；3px 把本机余量 4 → 19px（CI 280：Ubuntu 上 6px 不够）。
-        # 布局间距 0（原 3）：夹着搜索框/侧栏/复位按钮/版本号共三处间隙，11 个能力域
-        # 要靠它腾地方。**行高不能动**（上游用例断言 >=34）。
-        sidebar_layout.setSpacing(0)
+        sidebar_layout.setSpacing(3)
         # 「保存并退出」的图标 / 保存时机 tooltip / 焦点旗标都在控件库里（本文件有行数预算）。
         self.save_exit_button = settings_save_exit_button(sidebar_pane, self._save)
         sidebar_layout.addWidget(self.save_exit_button)
@@ -338,10 +336,8 @@ class ModernSettingsDialog(QDialog):
         self.sidebar = QListWidget(sidebar_pane)
         self.sidebar.setObjectName("settingsSidebar")
         self.sidebar.setIconSize(QSize(18, 18))
-        # 导航行距 0：与上面的侧栏间距、以及 SIDEBAR_ROW_HEIGHT 一起把 **11** 个
-        # 能力域收进默认窗口高度（800×560）。加【趣味】之前是"行高 34 / 行距 1"，
-        # 那样新域会落到视口外（见 settings_widgets.SIDEBAR_ROW_HEIGHT 的注释）。
-        self.sidebar.setSpacing(0)
+        # 导航行距 1px：与上面的侧栏间距一起把 10 个能力域收进默认窗口高度。
+        self.sidebar.setSpacing(1)
         sidebar_layout.addWidget(self.sidebar, 1)
         # 全局兜底入口（命令而非偏好项，故放侧栏底部；实现在 settings_reset_defaults.py）。
         settings_reset_defaults.create_reset_button(self, sidebar_layout)
@@ -1080,7 +1076,6 @@ class ModernSettingsDialog(QDialog):
     def _build_file_interpret_controls(self) -> None:
         """「文件识别」域控件（settings_file_interpret 构建，行数预算原因不在本文件展开）。"""
         settings_file_interpret.create_file_interpret_controls(self)
-        settings_divination.create_divination_controls(self)
 
     def _build_proactive_controls(self) -> None:
         """主动识屏页控件（仅 Windows + 有聊天能力时挂载）。"""
@@ -2060,7 +2055,6 @@ class ModernSettingsDialog(QDialog):
         # 「文件识别」域（2026-09-19 新增）：拖文件解读的设置集中在此独立页。
         # 行在本模块构建（settings_file_interpret，行数预算原因），不走 claim。
         file_interpret = settings_file_interpret.build_file_interpret_page(self)
-        divination = settings_divination.build_divination_page(self)
 
         # Preserve any newly added row until it receives an explicit domain decision.
         leftovers = [row for row in all_rows if row not in claimed and (self.ai_page is None or not self.ai_page.isAncestorOf(row))]
@@ -2081,7 +2075,6 @@ class ModernSettingsDialog(QDialog):
             "自动化与联动": automation,
             "语音": voice,
             "文件识别": file_interpret,
-            "趣味": divination,
             "更新": self.update_page,
         }
         for label, icon in SETTINGS_DOMAIN_NAV:

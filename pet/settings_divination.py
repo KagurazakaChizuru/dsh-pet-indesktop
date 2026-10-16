@@ -1,10 +1,23 @@
 # -*- coding: utf-8 -*-
-"""设置页「趣味」域：每日一签（控件创建 / 行装配 / 保存）。
+"""设置页「互动 · 抽签」标签：每日一签（控件创建 / 行装配 / 保存）。
 
-与「文件识别」域同形——本域的控件与行全部在本模块构建，`modern_settings_dialog.py`
-只做三处接线（建控件、域导航挂页、保存委托），避免主对话框继续膨胀。
+**为什么独立模块**：``modern_settings_dialog.py`` 的行数预算已无余量。本页控件与行
+全部在此构建，对话框只做一处接线：``_write_config`` 里的
+``settings_divination.save_divination_settings(self)``。
 
-**2026-10-16 起本域只有签，没有黄历**：她原话「不需要看黄历写宜忌了，我不是说了
+**为什么挂在「互动」域的页内标签而不是新开侧栏域**：侧栏 10 个域是外部契约
+（``SETTINGS_DOMAIN_NAV``，多处用例与截图脚本按名称/索引依赖）。抽签与「天气」
+同类——都是"用户主动拉一次、桌宠给一个结果"的互动面，也是本页第四个同级任务；
+2026-10-17 之前它曾以一个只有一组的「趣味」一级域存在，按
+``docs/SETTINGS-CHANGE-GATES.md`` 的准入（新一级域须"预计包含至少两个稳定设置组"）
+判定不合格，已归位到「互动」。
+
+**配置键（config.py 顶层平铺 4 个）**：``divination_enabled`` / ``divination_speak``
+/ ``divination_hint``（三个都是**进程级**键，不在 ``PER_SLOT_SETTING_KEYS``：签是一
+天一支的进程级状态，不逐宠）与运行时状态 ``divination_state``（**没有设置行**，本页
+不读也不写它）。
+
+**2026-10-16 起本页只有签，没有黄历**：她原话「不需要看黄历写宜忌了，我不是说了
 忘掉之前的吗」。原先的「今日穿色」一节（当日日柱天干五行 → 宜穿/次吉/避）连同
 `pet/almanac.py` 一起删掉了，别再往这里捡回来。
 """
@@ -16,7 +29,7 @@ from .settings_widgets import SettingRow, SettingsSection, ToggleSwitch
 
 
 def create_divination_controls(dialog) -> None:
-    """在对话框上创建本域控件（幂等；行由 build_divination_rows 装配）。"""
+    """在对话框上创建本页控件（幂等；行由 build_divination_rows 装配）。"""
     if getattr(dialog, "divination_enabled_check", None) is not None:
         return
     cfg = dialog.config
@@ -53,7 +66,8 @@ def _preview_today(dialog) -> None:
 
 
 def build_divination_rows(dialog) -> list[SettingRow]:
-    """本域的设置行（objectName 前缀 `settingRow_divination_`，可被设置搜索索引）。"""
+    """本页设置行（objectName 前缀 `settingRow_divination_`，可被设置搜索索引）。"""
+    create_divination_controls(dialog)
     preview_btn = QPushButton("试听今天的签", dialog)
     preview_btn.setToolTip("按当前配置立刻抽一次并出声（不动签号：还是今天那一支）")
     preview_btn.clicked.connect(lambda: _preview_today(dialog))
@@ -75,7 +89,7 @@ def build_divination_rows(dialog) -> list[SettingRow]:
         SettingRow(
             "divination_preview",
             "试听今天的签",
-            "按当前配置立刻走一遍抽签（含「抽签中...」与念签文）。**不改签号**："
+            "按当前配置立刻走一遍抽签（含「抽签中...」与念签文）。不改签号："
             "还是今天那一支，只是让你先听听声音。",
             preview_btn,
         ),
@@ -89,8 +103,8 @@ def build_divination_rows(dialog) -> list[SettingRow]:
     ]
 
 
-def build_divination_page(dialog) -> QWidget:
-    """「趣味」域整页内容（_rebuild_domain_navigation 直接挂到域导航）。"""
+def build_divination_tab(dialog) -> QWidget:
+    """「互动」域的第四个页内标签内容（由 ``settings_interaction`` 挂载）。"""
     content = QWidget(dialog)
     layout = QVBoxLayout(content)
     layout.setContentsMargins(0, 0, 0, 0)

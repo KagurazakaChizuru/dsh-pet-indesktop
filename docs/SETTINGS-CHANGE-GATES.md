@@ -549,3 +549,49 @@ recovery
 5. **视觉与文档**：本记录即变更记录；代表性截图在 `.scratch/settings-ux-polish/`（本刀为呈现层改动，
    截图仅供人工复核，未做像素级比对）；未改 Shared UX Contract / Settings System / Menu Action Model，
    `CONTEXT.md` 无需更新。
+
+### 2026-10-17 — 每日一签（PR #290）归位「互动 · 抽签」+ 4 个新键登记
+
+本刀**新增 4 个持久键**（3 个开关 + 1 个运行时状态）与**行归属（IA）**的变更：作者提交
+（`1dc37ed2`）曾新增一个只有一组的**一级域「趣味」**（能力域 10 → 11）并为此把侧栏
+布局间距 3→0、导航行距 1→0；本轮按本文准入判**不合格**并撤回。签库 48 支、取签确定性、
+状态口径、语音播报一条未改。
+
+| 项 | 本刀口径 |
+|---|---|
+| 新增键 | `divination_enabled`（默认 **开**）/ `divination_speak`（默认关）/ `divination_hint`（默认开）与运行时状态 `divination_state`（默认 `{}`；`{date, quote_id, drawn[≤48], hint_date}`）。**都是全新键**：老配置没有它们 → 取默认；出厂默认与「恢复全局默认」共用 `Config._initial_data()`，没有第二份真值。`divination_state` **没有设置行**——它是状态不是偏好，设置页不读也不写它 |
+| 三个开关为什么是**进程级**键 | 签是一天一支的进程级状态（不逐宠）：三个键都不在 `PER_SLOT_SETTING_KEYS`，子宠页改它们由设置进程的配置路由直写主配置（`settings_slot_config`），因此**不置灰**。由 `tests/test_settings_slot_config_route.py` 的 `main_only` 清单与"子宠页保存落主配置"用例钉住 |
+| 准入复核（新一级域不合格的三条理由） | ① 本文「准入记录」末段：新增一级能力域须"代表长期独立用户目标、预计包含**至少两个**稳定设置组"——【趣味】只有一个组、四行；② 同一能力域内的**同级任务**适合页内标签（既有先例：菜单域的 菜单编排/快捷启动/外观；互动域的 点击与音效/自言自语/天气）；③ 代价不对称——为在默认 800×560 里多塞第 11 个域，作者把侧栏布局间距与导航行距压到 0，**所有域**的点击目标与呼吸空间一起缩水 |
+| 归位落点 | 「互动」域 → 第四个页内标签「抽签」（`settings_interaction.TAB_KEYS/TAB_LABELS` 追加 `("divination","抽签")`）。判据是代码事实：抽签与「天气」同族——"用户主动拉一次、桌宠给一个结果"的互动面；且它的每日提示本来就挂在"点桌宠"这条交互路径上（`divination_hint_on_interaction`）。行与控件仍由 `pet/settings_divination.py` 构建（与 `settings_weather` 同口径），对话框只留一行保存委托 |
+| 侧栏间距撤回 | `modern_settings_dialog`：布局间距 **0→3**、导航行距 **0→1**；`settings_widgets.SETTINGS_DOMAIN_NAV` 删掉 `("趣味","play")`（回到 10 个域）；`SIDEBAR_ROW_HEIGHT` 上方那段"要从间距里挤"的注释随之删除。本机实测：800×560 下侧栏余量 **17px**、720×560 同样全落在视口内（探针 `.scratch/divination-pr290/probe_settings_layout.py`，真实 `windows` 插件） |
+| 文案去向 | 总开关关掉时那句去处提示 `设置 → 趣味 里打开` → `设置 → 互动 · 抽签 里打开`（用户照着去找，指向已不存在的域就是误导）；`config.py` / `settings_page_guide.py` 里同处注释一并归位；「试听今天的签」行说明里的 Markdown 星号 `**不改签号**` 去掉（Qt 里就是两个字形星号） |
+| 搜索 / 默认标记 | 三行行键与顶层配置键同名 → 走 `settings_default_marks` 的"同名回落"路径，进「已修改」标记覆盖面（按钮行「试听」不参与）；搜「抽签」「每日一签」「试听今天的签」都命中，且**自动切到抽签标签**（否则结果在视野外）。两组都有用例 |
+| 旁路预合成（与设置无关但同 PR 的通道语义） | `VoiceChimeService.precache()` 的预合成角色与**报时预合成**分家：新增 `AUX_PRECACHE_ROLE`，旁路**不碰**报时那一组 `_precache_slot/_text/_bubble/_path` 占位。理由：两者原共用 `role="precache"`，旁路**失败**会清掉报时**已合好**的占位（到点白等一次冷合成）、**成功**会把 `_precache_path` 覆盖成旁路的 mp3。消融：换回旧实现时本轮 3 条新用例全红 |
+| 不做 | 不改签库/取签算法/档位权重/状态形状；不动右键菜单段位与模板；不动「互动」域既有三个标签；不新增任何"预合成管理"通用框架（只要一个角色常量与三处分支） |
+| 不适用 | capability matrix（签与平台无关，产品代码无新平台分支）；披露层级（三行都在 primary，无 expert 参数） |
+
+准出对应：
+
+1. **契约**：键、默认值、归属、依赖、保存时机（随设置窗关闭的既有写回，不新增路径）、
+   迁移（4 个全新键，无旧键/旧入口/旧别名需要去向）逐条见上表；行键与域归属是外部契约，
+   由 `tests/test_menu_layout.py` / `test_settings_pet_tabs.py` / `test_settings_interaction_tabs.py`
+   / `test_desktop_pet_features.py` 四处按**实际构造**断言（10 域 + 四标签）。失败路径不新增：
+   总开关关掉时点击给一句去处提示且**不写状态**（用例 + 实机各一条）。
+2. **TDD**：本轮新增/改造 7 个测试文件（净 +249 / −14）。先红的证据：把
+   `pet/voice_chime_service.py` 换回 `HEAD` 版本后，旁路预合成的 3 条新用例**全部失败**
+   （两条参数化 + 一条完成路径），恢复后全绿；IA 归位侧的四条新用例在改动前一条都不成立
+   （没有「抽签」标签、侧栏间距是 0）。
+3. **布局与可访问性**：真实 `windows` 平台插件（非 offscreen）下六档实测——
+   800×560 / 720×560 × 明暗两档 + 800×560 @1.5 倍字体：10 个域全部落在侧栏视口内并逐个
+   可选中切页、抽签四行不横向裁切、说明文字按 `heightForWidth` 不纵向裁切、滚到底最后一行
+   可见（探针脚本见 `.scratch/divination-pr290/probe_settings_layout.py`，六档全过）。
+   截图四档（项目自带 `scripts/capture_settings_pages.py --interaction-details`：
+   `03-互动-抽签.png` 等）逐张人工复核；1.5 倍字体下窗口最小高度被自身撑到 746px
+   （该档不受 800×560 约束），布局同样无裁切。
+4. **跨平台**：产品代码无新平台分支（判据是标准库与 Qt 通用控件）；真实 GUI 验收仅本机
+   Windows，macOS / Linux 未跑（不推断）。
+5. **视觉与文档**：本记录即变更记录；交付证据见
+   [`PR-REPORT-DIVINATION-2026-10-17.md`](PR-REPORT-DIVINATION-2026-10-17.md)（逐文件说明 /
+   离线性能实测 / 实机运行记录）并在 [`INDEX.md`](INDEX.md) 的「PR 报告存档」登记。
+   `CONTEXT.md` 无新概念需要登记（「每日一签」的口径写在 `pet/divination.py` 的模块
+   docstring 与设置页文案里）。

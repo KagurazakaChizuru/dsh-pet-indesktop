@@ -4327,7 +4327,7 @@ class AppShell:
         """「启用/关闭节日提醒」开关（默认隐藏、菜单编辑器可加回）：翻转配置并同步服务启停。"""
         self._toggle_flag("festival_reminder_enabled", self._sync_festival_service)
 
-    # ------------------------------------------------------------ 每日一签（趣味域）
+    # ------------------------------------------------------------ 每日一签（互动 · 抽签）
     def _ensure_divination_service(self):
         """懒创建抽签服务（纯逻辑 + 无定时器，创建很轻，但仍按开关懒建）。"""
         if getattr(self, "divination_service", None) is None:
@@ -4361,7 +4361,7 @@ class AppShell:
             win = getattr(self, "win", None)
             if win is not None:
                 try:
-                    win.show_bubble("每日一签已关闭 · 设置 → 趣味 里打开", duration_ms=6000)
+                    win.show_bubble("每日一签已关闭 · 设置 → 互动 · 抽签 里打开", duration_ms=6000)
                 except Exception:
                     logging.exception("抽签关闭提示气泡失败")
 

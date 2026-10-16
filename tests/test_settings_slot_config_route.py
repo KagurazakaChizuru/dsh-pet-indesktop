@@ -76,6 +76,7 @@ def test_child_save_routes_global_keys_to_main_config(tmp_path, app):
         dialog.pet_opacity_spin.setValue(35)
         dialog.edge_probe_check.setChecked(True)
         dialog.voice_chime_page.enabled_check.setChecked(True)
+        dialog.divination_speak_check.setChecked(True)   # 「互动 · 抽签」的念签开关
         assert dialog._write_config() is True
     finally:
         dialog.deleteLater()
@@ -84,6 +85,7 @@ def test_child_save_routes_global_keys_to_main_config(tmp_path, app):
     assert on_disk["pet_opacity"] == 35, "窗口级键必须落主配置"
     assert on_disk["edge_probe_enabled"] is True, "拖拽探头必须落主配置"
     assert on_disk["voice_chime_enabled"] is True, "语音报时必须落主配置"
+    assert on_disk["divination_speak"] is True, "抽签的念签开关必须落主配置"
     assert "scale" not in on_disk
     assert _read_json(_slot_path(main.dir, 0))["scale"] == 0.5
 
@@ -91,6 +93,7 @@ def test_child_save_routes_global_keys_to_main_config(tmp_path, app):
     assert slot_on_disk.get("pet_opacity") != 35, "非 per-slot 键一个字节都不该进 slot 文件"
     assert slot_on_disk.get("edge_probe_enabled") is not True
     assert slot_on_disk.get("voice_chime_enabled") is not True
+    assert slot_on_disk.get("divination_speak") is not True
 
 
 def test_child_save_keeps_per_slot_keys_in_the_slot_file(tmp_path, app):
@@ -545,7 +548,10 @@ def test_routed_keys_cover_the_runtime_per_slot_read_surface(tmp_path):
     assert "collision_enabled" in settings_slot_config.SLOT_ROUTED_KEYS
     assert "user_customized" in settings_slot_config.SLOT_LOCAL_KEYS
     for main_only in ("pet_opacity", "voice_chime_enabled", "edge_probe_enabled",
-                      "dynamic_island", "context_menu_appearance"):
+                      "dynamic_island", "context_menu_appearance",
+                      # 每日一签：「互动 · 抽签」那三行是**进程级**键（签一天一支、
+                      # 状态只有一份），子宠页改它同样只该落主配置。
+                      "divination_enabled", "divination_speak", "divination_hint"):
         assert main_only not in settings_slot_config.SLOT_ROUTED_KEYS
 
 
