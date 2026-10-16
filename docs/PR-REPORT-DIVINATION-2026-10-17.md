@@ -460,8 +460,82 @@ IsIconic        = False
 
 - **未 push 作者 fork 的 `feat/divination`**（PR #290 的 head）：267 候选还在等合并，
   现在就把累计结果推上去，会把 267 的内容一起卷进 #290 的 diff，两条管线互相混账。
-  本轮只本地提交。
+  本轮只本地提交。**（第四轮口径已变：上游三条已落 main，本轮随分支更新 #290，见 §十。）**
 - **未改 289 / input / v5 相关树**，未涉及 DLC。
 - **未做真实配置与人工点击**（本轮不重复广泛审查、不操作真实用户配置）：真机验收项仍以
   §五 的隔离配置探针为准，右键观感与真实出声留给用户点验收。
 - **doubao / mimo 仍无 Key**：与 267 候选同一状态（合成链路的可用性判定有用例，真实合成未测）。
+
+## 十、第四轮（2026-10-17 晨）：发布前累计整合（合 main 上的 #267 / #293 / #289）
+
+> **起点**：`e426727`（上一轮的累计树）→ **三段合并后的 tip**：`d193e72`（本报告登记此次整合）
+> **上游状态**：`#267` `fdb3908`、`#293` `139aca3`、`#289` `e08c7fb` 已按 squash 依次落进
+> `origin/main`（在 `53d0587` 之后）。本支此前分别合过它们落地**之前**的候选树，
+> 所以这一轮只处理真正重叠的部分，不是把三条 PR 又合一遍。
+
+### 10.1 三段合并与冲突取法
+
+| 段 | 合入 | 冲突文件 | 取法 |
+|---|---|---|---|
+| ① | `origin/main` `53d0587`（#292 frameseq alpha 档） | `docs/INDEX.md` | 两侧行并集（DIVINATION 行 + FRAMESEQ-ALPHA-FLOOR 行） |
+| ② | 输入链路候选 `498ecd1`（#293 落地前的已验证树） | `docs/INDEX.md` | 两侧行并集（再加 INPUT-GRAB-RELEASE 行） |
+| ③ | `origin/main` `e08c7fb`（#267 / #293 / #289 都在里面） | `pet/voice_chime_service.py`、`pet/settings_page_guide.py`、`tests/test_architecture.py`、`docs/INDEX.md` | 见下 |
+
+③ 的三处代码冲突（前两段只有 `docs/INDEX.md` 一个文档冲突）：
+
+- **`pet/voice_chime_service.py`**：main 侧（随 267）把缓存命中分支重构成「逐后端一条路径」，
+  本支在同一位置加了 `if role in PRECACHE_ROLES: return`（预合成撞上已有缓存不许出声）。
+  取**两侧都要**——早退落在重构后的循环里；只取循环会丢「提前合好不许出声」，只取早退就只查第一个后端。
+- **`pet/settings_page_guide.py`**：main 侧（随 267）把语音那几张卡的描述改成卡片名口径，
+  本支新增「抽签」条目——两个都要，「抽签」落在互动域页内标签那一组。
+- **`tests/test_architecture.py`**：行数预算 main 侧 `2533`（= 2526 + TTS provider 化净 +7）、
+  本支 `2535`。按**合并树实测 2535** 取，注释改写为「main 2533 + 本支接线净 +2」。
+- **`docs/INDEX.md`**：两侧行并集（含 289 新登记的 ZERO-PET-NOTICE 行）。
+
+### 10.2 合并后的隔离核对（这是本轮最关键的一条证据）
+
+`git diff --numstat e08c7fb`（合并树 vs 上游 main）**只剩本支的每日一签改动面，零删除行**：
+
+- 与 main **逐字节相同**（因此不出现在 diff 里）：`pet/tts/**`、`tests/test_proactive.py`、
+  `pet/overlay_window.py`、`pet/sprite_slingshot.py`、`pet/pet_profiles.py`、
+  `tests/test_no_pet_startup_notice.py`、`tests/test_pet_profiles.py`——即 #267 / #293 / #289 的全部产品面。
+- 本支在上游文件上的净增量只有两处：`pet/voice_chime_service.py` **+96/−5**（旁路预合成隔离 +
+  `precache()` 走 provider 接口）、`pet/overlay_shell.py` **+11**（每日一签提示接线）。
+
+「零删除行」正是「上游内容一条没丢、本支也没把上游改回去」的机器判据；文档侧还有
+`docs/INDEX.md` / `docs/SETTINGS-CHANGE-GATES.md` / 本报告三处本支新增。
+
+### 10.3 §9.4 那条环境红现在怎么算
+
+§9.4 把 `tests/test_proactive.py::TestVisionAndWatcherPhase2::test_foreground_window_info_real_call_no_shadow_bug`
+归因为**本机前台窗口不可见**（与产品改动无关）。上游 #293 的 `faf8d35` 已把该用例改成
+「先独立读一遍 Win32 前置条件（句柄非零 / 可见 / 未最小化 / 未被 cloak / 尺寸为正），
+成立才断言，不成立则跳过并写明原因」，**断言语义一个字没放宽**。本轮**不再自己改这条用例**
+（改法以上游为准），只把它合进来。**如实口径**：本轮它在**本机是 skip 不是 pass**
+（本会话期间桌面没有可见前台窗口，跳过理由是那句前置条件），所以「全量 0 failed」里
+这一条算跳过，不算已验通过。
+
+### 10.4 本轮门禁（环境同 §9.3）
+
+本机 Windows 11 / Python 3.13.7 / PySide6 6.11.2；`D:\dsh-pet-src\.venv` +
+隔离依赖目录 `D:/dsh-pet-pr267-deps`（edge-tts 7.3.1）+ `D:/dsh-pet-pr267-deps-ocr`（omegaconf 2.4.0），
+`PYTHONPATH` 用 **`;`** 分隔（§9.3 的坑），`QT_QPA_PLATFORM=offscreen`。
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 静态检查 | `python -m ruff check .` | **All checks passed!** |
+| 聚焦（本支 + 上游接缝的改动面，41 个文件） | `pytest -q`（`tests/test_tts_*` / `test_voice_chime*` / `test_divination*` / `test_settings_{interaction_tabs,page_guide,default_marks,search_aliases,copy_lint,pet_tabs,slot_config_route}` / `test_menu_layout` / `test_desktop_pet_features` / `test_config_schema` / `test_sprite_menu_parity` / `test_festival*` / `test_architecture` / `test_pr_report_discipline` / `test_overlay_{screen_migration,window_capabilities,hosts_multiscreen}` / `test_sprite_slingshot` / `test_proactive` / `test_frameseq*` / `test_no_pet_startup_notice` / `test_pet_profiles`） | **1576 passed / 3 skipped / 0 failed**（235.86 s） |
+| 累计全量（按文件切 18 片、各起独立进程） | `python run_chunks_pr290.py 500`（逐片日志 `D:/dsh-pet-pr290-artifacts/chunk290-*.log`，汇总 `chunks290-final.log`） | **18 片 rc 全 0：passed 8105 / failed 0 / skipped 22 / error 0（收集 8127）** |
+
+聚焦那 3 条 skip 与全量那 22 条 skip 都不是本支新增：本支改过的用例文件里**只有**
+既有的 `QtMultimedia 不可用` 守卫（7 处，早于本支）。新增用例**一条 skip 都没有**。
+
+### 10.5 未做与边界
+
+- **Android**：本 PR **不含任何 `android/*` 改动**——`git diff --stat origin/main HEAD -- android/`
+  为空（逐字节相同）。Android 能力继承自 `main`，**不是本 PR 新增**。
+- **doubao / mimo 无 API Key**：与上游同状态。可用性判定（`*-key-missing`）与失败语义有单测，
+  **真实合成未测**，单列在此，不并入「已验证」。
+- **真机听到抽签语音 / 右键菜单观感 / 每日提示的打扰程度**：仍需用户点验收，口径同 §5.4。
+- **未改 289 / 输入 / v5 相关树的任何产品代码**：本轮对它们的文件只做合并（逐字节等于上游），未再改动。
+- **本轮不重复广泛审查、不操作真实用户配置**（沿用 §9.5 的边界）。
