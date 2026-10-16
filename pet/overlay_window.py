@@ -26,8 +26,9 @@ Phase 4 M-2：仿真推进（行为/碰撞/抛掷物理）与 tick 时钟、M-1 
 保留为转发（deprecation shim，见各自 docstring）。
 
 弹弓蓄力瞄准（sprite 世界移植，见 pet/sprite_slingshot.py）：
-拖拽中右键 = 进瞄准（``slingshot_enabled`` 热读），移动调拉拽矢量，
-松左键发射，Esc / 再点右键取消；瞄准期绘制橡皮带 + 轨迹预览。这要求
+拖拽中右键 = 进瞄准（``slingshot_enabled`` 热读；**确有拖拽资格**的按下才算，
+锁定位 / 未按 SHIFT 的点击候选进不来，见 ``_grab_drag_qualified``），移动调拉拽
+矢量，松左键发射，Esc / 再点右键取消；瞄准期绘制橡皮带 + 轨迹预览。这要求
 调和 V-13（原先「拖拽中收到任何非左键 press → 合成 release 收尾」）：
 右键在拖拽中被弹弓消费时**不**合成 release——瞄准有明确退出路径
 （松左键发射 / Esc / 再点右键取消 / 左键丢失看门狗），不会卡 drag 态；
@@ -802,15 +803,18 @@ class OverlayWindow(QWidget):
         self._note_kinetic()  # M-1：输入事件同步升档
         if event.button() != Qt.MouseButton.LeftButton:
             if (event.button() == Qt.MouseButton.RightButton
-                    and (self._mouse_grab is not None or self.slingshot.aiming)
+                    and (self.slingshot.aiming or self._grab_drag_qualified())
                     and not self.mouse_through
                     and self._consume_right_press_for_slingshot(event)):
                 # V-13 调和（弹弓刀）：拖拽中点右键 = 进蓄力瞄准 / 取消瞄准
                 # （slingshot_enabled 热读为真时）。这里**不**合成 release：
                 # 瞄准有明确退出路径（松左键发射 / Esc / 再点右键取消 / 左键
                 # 丢失看门狗），不会把 sprite 卡在 drag 态，也不会把拖拽丢成
-                # 一次「原地放下」。其余非左键（中键/侧键）与
-                # slingshot_enabled 关闭时，下方 V-13 合成 release 原样保留。
+                # 一次「原地放下」。进入判据是"确有拖拽资格或已在瞄准"（见
+                # ``_grab_drag_qualified``）：锁定位 / 未按 SHIFT 的点击候选
+                # 进不来，而**已建立**的会话不受判据约束（右键盘要点得动）。
+                # 其余非左键（中键/侧键）与 slingshot_enabled 关闭时，下方
+                # V-13 合成 release 原样保留。
                 # 断言与理由见 tests/test_overlay_hardening.py V-13 段落。
                 event.accept()
                 return
@@ -875,6 +879,21 @@ class OverlayWindow(QWidget):
         if self.shift_drag_required:
             return not bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         return False
+
+    def _grab_drag_qualified(self) -> bool:
+        """当前 grab 是否**确有拖拽资格**（能起弹弓瞄准的唯一判据）。
+
+        资格 = 按下进了拖拽 grab（``_press_click_only`` 为假，即按下没被闸门
+        挡下、记了拖拽锚点）。锁定位 / 未按 SHIFT 的按下只有点击候选：它既
+        不能拖、也不能弹——放进弹弓等于给"不能拖"的宠开一个靠右键挪窝的后门。
+        判据与 ``mouseMoveEvent`` / ``mouseReleaseEvent`` 的点击候选判别同源
+        （都读这一个旗标）。
+
+        没过 ``DRAG_THRESHOLD`` 不算没资格：过阈值只决定拖拽升级（begin_drag /
+        悬空动画 / 探头取消），与"右键能不能起蓄力"无关，按下后原地直接点右键
+        是常见动作（既有测试语义，见 tests/test_sprite_slingshot.py）。
+        """
+        return self._mouse_grab is not None and not self._press_click_only
 
     def _commit_drag_if_threshold_crossed(self, global_pos) -> None:
         """位移过 ``DRAG_THRESHOLD`` 把点击候选升级为真拖拽（幂等）。
@@ -1029,10 +1048,10 @@ class OverlayWindow(QWidget):
         光标隐藏态触发的整窗穿透再也退不出去（窗口可见却点不到，点击又被
         穿透吃掉）。故这一支与拖拽分支同判据（左键已不在按下态即收尾）。
 
-        瞄准会话照收：click-only 的按住**也能进瞄准**（右键分支只看
-        ``_mouse_grab``，见 mousePressEvent 的非左键支），漏收会让 sprite 停在
-        DRAG、右键菜单被 ``_context_menu_blocked()`` 一直拦（既有问题已登记
-        BACKLOG，本支与拖拽支同口径先收会话）。
+        瞄准会话照收：丢掉 release 的会话若还开着瞄准，sprite 会停在 DRAG、
+        右键菜单被 ``_context_menu_blocked()`` 一直拦。进入判据已在输入链路收紧
+        （click-only 的按下不再能起瞄准，见 ``_grab_drag_qualified``），本支
+        是会话侧的最后一道兜底——"会话在、grab 与锚点都不在"的形态这里照收。
         """
         if self._press_global is None:
             # ``_press_global`` 为空还持有 grab = click-only 按下，或已失锚的

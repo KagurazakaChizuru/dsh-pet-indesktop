@@ -73,6 +73,13 @@ def _two_screens():
     return a, b
 
 
+def _three_screens():
+    """再并一块 C（原点 3840,0）：回收类用例需要"还有别的宿主"才走得下去。"""
+    a, b = _two_screens()
+    c = FakeScreen((3840, 0, 1920, 1080), (3840, 0, 1920, 1040), name="C")
+    return a, b, c
+
+
 def _global_of(host, sprite):
     """sprite 的全局左上角（宿主窗口原点 + 局部坐标）。"""
     return QPointF(host.overlay.geometry().topLeft()) + QPointF(sprite.pos)
@@ -871,5 +878,100 @@ def test_main_pet_position_listener_follows_its_own_window(tmp_path, monkeypatch
         third = marker_x()
         assert third - second == pytest.approx(200.0, abs=8.0), (
             "回收 A 窗不得带走这只的标记监听")
+    finally:
+        _cleanup(shell)
+
+
+# ---------------------------------------------------------------- 拔屏时的在途会话
+def test_screen_removed_without_any_fallback_screen_finishes_the_grab(
+        tmp_path, monkeypatch):
+    """拔屏且**没有**兜底屏可迁：在途会话仍要走完 grab 收尾协议。
+
+    ``_fallback_screen`` 返回 None（这是唯一的活动屏）时 ``_migrate_to_screen``
+    首行就返回——这条路径**没有**随后的 show() 收敛兜底（穿透修复报告 §三 记的
+    正是它），grab 收尾的壳层通知因此是冲刷穿透待办的唯一时机：漏掉就
+    ``_converge_pending`` 与 ``_auto_cursor_hidden`` 一起永久滞留（看得见点不到）。
+    """
+    a = FakeScreen((0, 0, 1920, 1080), (0, 0, 1920, 1040), name="only")
+    _install_screens(monkeypatch, a)            # 只有这一块屏：拔了就没兜底
+    shell = _make_shell(tmp_path, a, {"mouse_through": False})
+    try:
+        overlay = shell.overlay
+        released: list = []
+        shell.sprite.on_release = released.append
+        shell._on_cursor_visibility_changed("HIDDEN")     # 自动穿透（生产置位路径）
+        assert overlay.mouse_through is True
+        overlay._mouse_grab = shell.sprite
+        overlay._press_click_only = True
+        shell._converge_auto_cursor_hidden()              # 收敛撞上 grab → 记待办
+        assert shell._converge_pending is True
+
+        shell.handle_screen_removed(a)
+
+        assert shell.overlay is overlay                   # 前提：没兜底屏 → 没迁移
+        assert released == [QPointF(shell.sprite.pos)]    # 会话只松一次手
+        assert overlay._mouse_grab is None
+        assert overlay._press_click_only is False
+        assert shell._converge_pending is False           # 待办被补做
+        assert shell._auto_cursor_hidden is False
+        assert overlay.mouse_through is False
+    finally:
+        _cleanup(shell)
+
+
+def test_screen_removed_finishes_only_that_windows_session(tmp_path, monkeypatch):
+    """拔屏只收那块屏窗口的会话，别的窗口的在途 grab 一个字段都不动。
+
+    构造的是跨屏拖拽进行中的真实形态：输入会话留在 A 窗（按下窗）而被抓的宠身体
+    已经在 B 上——A 窗的 sprite 表已空、``_mouse_grab`` 还握着它。此刻拔掉 A 屏：
+    A 的会话按协议收尾（收尾通知里就顺手回收了这块空宿主一次），拔屏处置不得再
+    回收第二次；C 窗上另一只在途会话全程不许被打断。
+    """
+    a, b, c = _three_screens()
+    _install_screens(monkeypatch, a, b, c)
+    shell = _make_shell(tmp_path, a)
+    try:
+        shell.spawn_pet()
+        shell.spawn_pet()
+        first, second = shell._spawned
+        _hittable(first)
+        _hittable(second)
+        shell.move_sprite_to_screen(first, b)
+        shell.move_sprite_to_screen(second, c)
+        main = shell.sprite
+        host_a = shell.host_for_sprite(main)
+        overlay_a = shell.overlay
+        _drag_across(shell, main)                 # A 窗按住 → 身体过缝 → 归 B
+        host_b = shell.host_for_sprite(main)
+        assert host_b.screen is b
+        assert overlay_a.sprites == [], "前提：A 窗的 sprite 表已空（会话还握着）"
+        assert overlay_a._mouse_grab is main
+        released: list = []
+        main.on_release = released.append
+
+        # C 窗上另一只在途会话（合成形态：同一时刻生产上只能有一只按着）
+        host_c = shell.host_for_sprite(second)
+        overlay_c = host_c.overlay
+        overlay_c._mouse_grab = second
+        overlay_c._press_global = QPointF(7, 9).toPoint()
+        other_releases: list = []
+        second.on_release = other_releases.append
+
+        shell.handle_screen_removed(a)
+
+        assert released == [QPointF(main.pos)]    # A 的会话收尾一次（不重复 release）
+        assert overlay_a._mouse_grab is None
+        assert overlay_a._press_click_only is False
+        assert overlay_a._drag_committed is False
+        assert overlay_a._press_global is None
+        assert host_a not in shell.hosts(), "A 的空宿主只回收一次（不重复回收）"
+        assert shell.host_for_screen(a) is None
+        assert shell.hosts() == [host_b, host_c]
+        # 别的窗口的会话不被打断
+        assert overlay_c._mouse_grab is second
+        assert overlay_c._press_global == QPointF(7, 9).toPoint()
+        assert other_releases == []
+        assert shell.host_for_sprite(first).screen is b
+        assert shell.host_for_sprite(second).screen is c
     finally:
         _cleanup(shell)

@@ -297,3 +297,30 @@ def test_shrinking_bounds_still_clamp_into_new_bounds(tmp_path):
         assert rect.center().y() < new_bounds.y() + ry * new_bounds.height()
     finally:
         shell._delete_runtime_marker()
+
+
+# ---------------------------------------------------------------- 迁移前的在途会话
+def test_migrate_finishes_inflight_grab_through_the_grab_protocol(tmp_path):
+    """换屏重建前的会话收尾走既有 grab 协议：旗标与穿透轮询档位一起复位。
+
+    ``_migrate_to_screen`` 在换窗**之前**收掉旧窗的输入会话；旧实现只清
+    ``_mouse_grab``/``_press_global`` 两个字段就返回——click-only 与拖拽提交
+    旗标留在旧窗上，穿透轮询的拖拽降频（``set_drag_active``）也没复位。
+    """
+    shell = _make_shell(tmp_path, FakeScreen((0, 0, 1000, 600), (0, 0, 1000, 600)))
+    try:
+        overlay = shell.overlay
+        overlay._mouse_grab = shell.sprite
+        overlay._press_click_only = True
+        overlay._drag_committed = True
+        overlay._press_global = QPointF(10, 10).toPoint()
+
+        _migrate(shell)
+
+        assert overlay._mouse_grab is None
+        assert overlay._press_click_only is False
+        assert overlay._drag_committed is False
+        assert overlay._press_global is None
+        assert shell.overlay._mouse_grab is None       # 新窗不带着旧会话
+    finally:
+        _teardown(shell)

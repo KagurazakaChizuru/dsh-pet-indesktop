@@ -6555,8 +6555,15 @@ class OverlayShell(QObject):
         最后一个成员摘除时停表），共享服务（音效/联动/托盘/素材库）根本不知道
         宿主的存在。拆掉的是主宿主时把锁屏通知注册改挂到新的主宿主句柄上
         （旧 HWND 随关闭失效）。
+
+        幂等：拔屏处置（``handle_screen_removed``）与 grab 收尾的空宿主回收
+        （``_on_grab_finished`` → ``_reap_empty_hosts``）会先后各调一次——收尾
+        通知先把这块空宿主收掉，拔屏处置再调就是"已不在册"。返回（不重复关窗、
+        不重复摘表）而不是二次回收。
         """
         if len(self._hosts) <= 1:
+            return
+        if host not in self._hosts:
             return
         index = self._hosts.index(host)
         self._disconnect_host_screen(host)
@@ -7013,18 +7020,24 @@ class OverlayShell(QObject):
         """拖拽中拔屏/迁移：按当前位置松手收尾，清掉该窗口的 grab 状态。
 
         ``host=None`` = 主宿主（旧入口）。多屏下每块屏的窗口各有自己的 grab，
-        拔掉哪块屏就收哪块屏的会话。
+        拔掉哪块屏就收哪块屏的会话——**只**收那一块：别的窗口上的在途 grab
+        一个字段都不动。
+
+        收尾一律走窗口既有的 ``_finish_grab`` 协议，本方法只提供"按当前位置
+        松手"的位置这一个输入。自己清字段（旧实现）漏掉三件事：click-only /
+        拖拽提交旗标留在窗上、穿透轮询的拖拽降频（``set_drag_active``）没复位、
+        壳层的收尾通知收不到事件——最后一笔最致命，壳层被 grab 闸住的穿透收敛
+        （``_converge_pending``）就此永久滞留，而这条路径在
+        ``_migrate_to_screen(None)`` 提前返回时连随后的 show() 收敛都没有。
         """
         overlay = host.overlay if host is not None else self.overlay
         grab = getattr(overlay, "_mouse_grab", None)
         if grab is None:
             return
         try:
-            grab.on_release(QPointF(grab.pos))
+            overlay._finish_grab(QPointF(grab.pos))
         except Exception:
             logging.exception("overlay: 屏事件收尾拖拽失败")
-        overlay._mouse_grab = None
-        overlay._press_global = None
 
     # ---------------------------------------------------------------- 会话/电源（O4）
     def _install_session_watcher(self) -> None:

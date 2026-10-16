@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -447,6 +449,49 @@ class TestHelperPredicates:
 # ============================================================================
 # 6. Phase 2 Win32 / Vision 扩展与 Watcher 生命周期测试
 # ============================================================================
+def _foreground_window_has_visible_payload() -> bool:
+    """前台窗口是否满足「真调用能拿到信息」的真实前置条件。
+
+    判据独立读一遍 Win32（**不经过产品函数**），与
+    ``pet/vision.py::foreground_window_info`` 的早退分支同源：句柄非零 / 可见 /
+    未最小化 / 未被 DWM cloak / 尺寸为正。
+
+    为什么要它：真调用用例断言的是"有可见前台窗口时不该返回 None"，而桌面上
+    完全可能没有这样的窗口（实测前台是 ``Chrome_WidgetWin_0`` 一类不可见宿主窗，
+    如微信小程序宿主）——那一刻产品按自身契约就返回 None，断言什么都区分不出来。
+    前置条件不成立时用例跳过并写明原因，不把断言放宽成恒真。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes.wintypes
+
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+        user32.IsWindowVisible.argtypes = [ctypes.wintypes.HWND]
+        user32.IsIconic.argtypes = [ctypes.wintypes.HWND]
+        user32.GetWindowRect.argtypes = [ctypes.wintypes.HWND,
+                                         ctypes.POINTER(ctypes.wintypes.RECT)]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd or not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return False
+        cloaked = ctypes.c_int(0)
+        dwmapi = ctypes.windll.dwmapi
+        dwmapi.DwmGetWindowAttribute.argtypes = [
+            ctypes.wintypes.HWND, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong]
+        dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+        if dwmapi.DwmGetWindowAttribute(
+            hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)
+        ) == 0 and cloaked.value != 0:
+            return False
+        rect = ctypes.wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return False
+        return rect.right > rect.left and rect.bottom > rect.top
+    except (AttributeError, OSError, TypeError, ValueError, RuntimeError):
+        return False
+
+
 class TestVisionAndWatcherPhase2:
     def test_foreground_app_info_backward_compatibility(self, monkeypatch):
         from pet import vision
@@ -524,11 +569,19 @@ class TestVisionAndWatcherPhase2:
     def test_foreground_window_info_real_call_no_shadow_bug(self):
         """回归：函数体内局部 import ctypes.wintypes 曾让 ctypes 变成局部变量，
         函数开头的 ctypes.windll 访问抛 UnboundLocalError 并被 except 吞掉，
-        导致永远返回 None（mock 测试全覆盖时该 bug 完全隐形）。"""
+        导致永远返回 None（mock 测试全覆盖时该 bug 完全隐形）。
+
+        真调用只在**真实前置条件**成立时才断言：桌面上得有一个可见、未最小化、
+        未被 cloak、尺寸为正的前台窗口（``_foreground_window_has_visible_payload``
+        独立读一遍判据）。不成立时产品按自身契约就返回 None，断言无从区分
+        shadow bug——跳过并写明原因，断言本身一个字都不放宽。
+        """
         import sys
         if sys.platform != "win32":
-            import pytest
             pytest.skip("仅 Windows 可真实调用")
+        if not _foreground_window_has_visible_payload():
+            pytest.skip("当前前台窗口不满足真调用前置条件（不可见/最小化/cloaked/无尺寸）"
+                        "——该输入下返回 None 是契约本身，判别不了 shadow bug")
         from pet import vision
         info = vision.foreground_window_info()
         assert info is not None

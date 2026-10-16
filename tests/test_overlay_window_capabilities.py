@@ -500,6 +500,84 @@ def test_blocked_convergence_request_is_replayed_after_grab_finishes(tmp_path):
         shell._delete_runtime_marker()
 
 
+class _RecordingThroughController:
+    """记录 set_drag_active 调用的假穿透控制器（真控制器是 Win32/平台边界）。"""
+
+    def __init__(self):
+        self.drag_states: list[bool] = []
+
+    def set_drag_active(self, active):
+        self.drag_states.append(bool(active))
+
+    def resume(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+def test_end_drag_finishes_the_grab_through_the_existing_protocol(tmp_path):
+    """屏事件收尾 grab（``_end_drag``）必须走既有 grab 收尾协议。
+
+    旧实现自己清 ``_mouse_grab``/``_press_global`` 就返回：不清 click-only /
+    拖拽提交旗标、不 ``set_drag_active(False)``、也不发壳层收尾通知。漏掉通知
+    的那一笔最致命——壳层被 grab 闸住的穿透收敛（``_converge_pending``）与
+    ``_auto_cursor_hidden`` 一起永久滞留 = 窗口看得见点不到。
+    """
+    shell = _make_shell(tmp_path, {"mouse_through": False})
+    try:
+        overlay = shell.overlay
+        sprite = shell.sprite
+        released: list = []
+        sprite.on_release = released.append
+        controller = _RecordingThroughController()
+        overlay._input_controller = controller
+        shell._on_cursor_visibility_changed("HIDDEN")   # 自动穿透（生产唯一置位路径）
+        assert overlay.mouse_through is True
+        # 在途会话（混装形态：两个旗标都占着——旧实现两个都不清）
+        overlay._mouse_grab = sprite
+        overlay._press_click_only = True
+        overlay._drag_committed = True
+        overlay._press_global = QPointF(10, 10).toPoint()
+        shell._converge_auto_cursor_hidden()            # 收敛请求撞上 grab → 记待办
+        assert shell._converge_pending is True
+        assert shell._auto_cursor_hidden is True
+
+        shell._end_drag()
+
+        assert released == [QPointF(sprite.pos)]        # 按当前位置松手，且只松一次
+        assert overlay._mouse_grab is None
+        assert overlay._press_click_only is False       # 旧实现不清
+        assert overlay._drag_committed is False         # 旧实现不清
+        assert overlay._press_global is None
+        assert controller.drag_states == [False]        # 旧实现不调
+        assert shell._converge_pending is False         # 待办被补做
+        assert shell._auto_cursor_hidden is False
+        assert overlay.mouse_through is False
+    finally:
+        shell._delete_runtime_marker()
+
+
+def test_end_drag_without_a_grab_touches_nothing(tmp_path):
+    """没有在途会话：``_end_drag`` 不产生任何收尾副作用（幂等入口）。"""
+    shell = _make_shell(tmp_path, {"mouse_through": False})
+    try:
+        overlay = shell.overlay
+        released: list = []
+        shell.sprite.on_release = released.append
+        controller = _RecordingThroughController()
+        overlay._input_controller = controller
+
+        shell._end_drag()
+        shell._end_drag()
+
+        assert released == []
+        assert controller.drag_states == []
+        assert shell._converge_pending is False
+    finally:
+        shell._delete_runtime_marker()
+
+
 def test_convergence_on_show_clears_and_watcher_rebuilds_passthrough(tmp_path):
     """P2-2 改判（撤销 HIDDEN 闸）：show/迁移侧收敛**先清**，真实 HIDDEN 由
     watcher 一拍内重建。

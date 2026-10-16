@@ -3,6 +3,8 @@
 
 覆盖（对齐旧窗口路径语义，蓝本 pet/window.py:2987-3087 + 2367-2413）：
 - 进入：拖拽中点右键 → 瞄准；sprite 定锚不动、留在 drag 等价态；
+- 进入判据：只有**确有拖拽资格**的按下（锁定位 / 未按 SHIFT 的点击候选不算）
+  才能起瞄准；已建立的会话不受该判据约束（右键始终能退）；
 - 取消：Esc 回锚点；再点右键就地恢复拖拽；
 - 发射：按 physics.slingshot_speed（直调，不复制常量）写初速 → "thrown"，
   随后落进既有 sprite_physics 通道；
@@ -120,11 +122,11 @@ def _to_qpointf(pos):
     return QPointF(float(pos[0]), float(pos[1]))
 
 
-def _mouse(etype, pos, button=Qt.MouseButton.LeftButton, buttons=None):
+def _mouse(etype, pos, button=Qt.MouseButton.LeftButton, buttons=None,
+           modifiers=Qt.KeyboardModifier.NoModifier):
     btns = button if buttons is None else buttons
     point = _to_qpointf(pos)
-    return QMouseEvent(etype, point, point, button, btns,
-                       Qt.KeyboardModifier.NoModifier)
+    return QMouseEvent(etype, point, point, button, btns, modifiers)
 
 
 def _right_press(pos):
@@ -401,12 +403,17 @@ def test_stale_press_watchdog_cancels_aim_to_anchor():
     assert overlay._press_global is None
 
 
-def test_stale_press_watchdog_clears_click_only_grab_and_cancels_aim():
-    """V-7 看门狗 + click-only：锁定位/未按 SHIFT 的按住**也能进瞄准**（右键
-    分支只看 ``_mouse_grab``），丢 release 后看门狗必须把瞄准会话一起收掉
-    ——否则 sprite 停在 DRAG、右键菜单被拦（ops5.5 minor 1）。"""
+# ---------------------------------------------------------------- 进入判据（拖拽资格）
+def test_right_press_on_lock_position_press_does_not_enter_aim():
+    """锁定位：命中按下只有点击候选（无拖拽锚点）→ 右键**不**进弹弓。
+
+    进入判据=确有拖拽资格（非 click-only 的按下）。旧契约只看 ``_mouse_grab``
+    是否非空，于是"不能拖"的按下能靠右键弹弓把 sprite 弹走——锁定位当场失效。
+    新契约下这类右键与其余"未进拖拽 grab 的按下"逐位一致：V-13 合成 release
+    收尾 + 正经右键菜单（合成 release 是不挪窝的：`on_release` 对未 `_dragging`
+    的 sprite 本就 no-op）。"""
     overlay = OverlayWindow()
-    overlay.lock_position = True          # 命中按下只算点击：不记 _press_global
+    overlay.lock_position = True
     sprite = _make_sprite()
     overlay.add_sprite(sprite)
 
@@ -415,23 +422,104 @@ def test_stale_press_watchdog_clears_click_only_grab_and_cancels_aim():
     assert overlay._mouse_grab is sprite
     assert overlay._press_click_only is True
     assert overlay._press_global is None       # click-only：没有拖拽锚点
-
-    overlay.mousePressEvent(_right_press(press))   # 右键进瞄准（既有行为）
-    assert overlay.slingshot.aiming is True
     anchored = QPointF(sprite.pos)
-    assert sprite.interaction_state == INTERACTION_DRAG
-    # 测试环境无真按键：mouseButtons() 必为 NoButton → 看门狗应判 release 已丢
-    assert not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
 
-    overlay._check_stale_press()
+    overlay.mousePressEvent(_right_press(press))
 
-    assert overlay.slingshot.aiming is False           # 瞄准会话已收
+    assert overlay.slingshot.aiming is False           # 不进瞄准
     assert sprite.interaction_state == INTERACTION_NORMAL
-    assert sprite.pos == anchored
-    assert sprite.velocity == QPointF(0, 0)
+    assert sprite.pos == anchored                      # 也没有被带着挪窝
+    assert overlay._mouse_grab is None                 # V-13 合成 release 收尾
+    assert overlay._press_click_only is False
+    assert overlay._press_global is None
+    assert overlay._context_menu_blocked() is False    # 菜单不被弹弓吞
+
+
+def test_right_press_on_shift_gated_press_without_shift_does_not_enter_aim():
+    """SHIFT 门（未按 SHIFT）：与锁定位同一条判据——不进弹弓。"""
+    overlay = OverlayWindow()
+    overlay.shift_drag_required = True
+    sprite = _make_sprite()
+    overlay.add_sprite(sprite)
+
+    press = _hit_point(sprite)
+    overlay.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, press))
+    assert overlay._press_click_only is True           # 未按 SHIFT：点击候选
+    anchored = QPointF(sprite.pos)
+
+    overlay.mousePressEvent(_right_press(press))
+
+    assert overlay.slingshot.aiming is False
     assert overlay._mouse_grab is None
-    overlay._context_menu_blocked()                    # 吞掉进瞄准时置的一次性抑制旗标
-    assert overlay._context_menu_blocked() is False    # 菜单恢复（瞄准已收）
+    assert sprite.pos == anchored
+    assert overlay._context_menu_blocked() is False
+
+
+def test_right_press_with_shift_held_enters_aim():
+    """SHIFT 门（按住 SHIFT）：按下有拖拽资格 → 右键照旧进瞄准。"""
+    overlay = OverlayWindow()
+    overlay.shift_drag_required = True
+    sprite = _make_sprite()
+    overlay.add_sprite(sprite)
+
+    press = _hit_point(sprite)
+    overlay.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, press,
+                                   modifiers=Qt.KeyboardModifier.ShiftModifier))
+    assert overlay._press_click_only is False
+    assert overlay._press_global is not None
+
+    overlay.mousePressEvent(_right_press(press))
+
+    assert overlay.slingshot.aiming is True
+    assert overlay.slingshot.sprite is sprite
+    assert overlay._mouse_grab is sprite               # 没被 V-13 收尾放下
+    assert overlay._context_menu_blocked() is True     # 抑制随之而来的右键菜单
+
+
+def test_right_press_before_drag_threshold_still_enters_aim():
+    """合法按下但还没过 ``DRAG_THRESHOLD``（点击候选）：右键照样进瞄准。
+
+    判据是"有拖拽资格"（按下记了锚点），不是"拖拽已提交"：过阈值只决定拖拽
+    升级与悬空动画，与右键能不能起蓄力无关；按下后原地直接点右键是常见动作。
+    """
+    overlay = OverlayWindow()
+    sprite = _make_sprite()
+    overlay.add_sprite(sprite)
+
+    press = _hit_point(sprite)
+    overlay.mousePressEvent(_mouse(QEvent.Type.MouseButtonPress, press))
+    assert overlay._press_click_only is False
+    assert overlay._drag_committed is False            # 前提：没过阈值
+
+    overlay.mousePressEvent(_right_press(press))
+
+    assert overlay.slingshot.aiming is True
+    assert overlay._drag_committed is False            # 进瞄准不改拖拽提交态
+    assert overlay._mouse_grab is sprite
+
+
+def test_aiming_exit_keeps_working_when_entry_qualification_is_gone():
+    """已瞄准 ⇒ 右键必须仍能退出（退出路径不连坐进入判据）。
+
+    会话一旦建立，"再点右键取消"就是它唯一的右键出口；判据若被拿去同时管退出，
+    右键会掉进 V-13 分支：grab 被收掉而瞄准会话留着（sprite 停在 DRAG、菜单被
+    ``_context_menu_blocked`` 一直拦）。这里把进入判据用的旗标置成不合格——判据
+    按旗标读，故这是"会话落在判据不合格那侧"的最小忠实构造。
+    """
+    overlay = OverlayWindow()
+    sprite = _make_sprite()
+    overlay.add_sprite(sprite)
+    moved, anchored = _enter_aim(overlay, sprite)
+    overlay._press_click_only = True
+
+    overlay.mousePressEvent(_right_press(moved))
+
+    assert overlay.slingshot.aiming is False           # 会话被取消
+    assert overlay._mouse_grab is sprite               # grab 没被 V-13 收掉
+    assert sprite.interaction_state == INTERACTION_DRAG  # resume_drag：就地恢复拖拽
+    assert sprite.pos == anchored
+    overlay.mouseReleaseEvent(_mouse(QEvent.Type.MouseButtonRelease, moved))
+    assert overlay._mouse_grab is None
 
 
 def test_unconsumed_right_press_clears_stale_menu_suppression():
