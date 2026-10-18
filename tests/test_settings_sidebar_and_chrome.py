@@ -45,6 +45,7 @@ from pet.config import Config  # noqa: E402
 from pet.settings_widgets import (  # noqa: E402
     CONTENT_READING_MAX_WIDTH,
     SIDEBAR_MIN_WIDTH,
+    SettingsSection,
     SettingsTabContainer,
     sidebar_content_width,
 )
@@ -432,3 +433,42 @@ def test_save_and_exit_button_asks_for_the_save_icon(tmp_path, monkeypatch):
     finally:
         dialog.close()
     assert icons_mod.vector_widget_icon is not None  # 渲染入口本身没被动过
+
+
+#: 一级能力域的准入判据（`docs/SETTINGS-CHANGE-GATES.md`「准入记录」末段）：新增一级域须
+#: "代表长期独立用户目标、预计包含**至少两个**稳定设置组"。下面这两个域是该判据落地之前
+#: 就在的既成事实，作为快照豁免；它们现在是 1 组就写 1 组——将来变多，这条断言会逼你更新
+#: 快照，免得豁免名单悄悄扩大成垃圾桶。
+DOMAINS_WITH_ONE_GROUP = {"文件识别", "更新"}
+
+
+def test_new_top_level_domain_must_own_at_least_two_setting_groups(tmp_path, monkeypatch):
+    """新增一级域必须自带 ≥2 个稳定设置组，否则应当做页内标签而不是开域。
+
+    2026-10-17 的【趣味】域就是反例：只有一组「抽签」，为把它塞进默认 800×560 还要把
+    侧栏布局间距与导航行距压到 0（**所有域**的点击目标一起缩水），最终按准入被改回
+    「互动」域的页内标签。判据原本只是文件里的一句话，本用例把它变成机器门——同一类设计
+    错误下次会在提交前就撞墙，而不是等评审来发现。
+    """
+    dialog = _dialog(tmp_path, monkeypatch)
+    try:
+        groups = {}
+        for index in range(dialog.sidebar.count()):
+            name = dialog.sidebar.item(index).text()
+            page = dialog.pages.widget(index)
+            assert page is not None, f"「{name}」没有对应页"
+            groups[name] = len(page.findChildren(SettingsSection))
+
+        thin = {name: count for name, count in groups.items()
+                if count < 2 and name not in DOMAINS_WITH_ONE_GROUP}
+        assert not thin, (
+            f"这些一级域只有 {thin} 个设置组：新增一级域须 ≥2 个稳定设置组，"
+            f"否则改做同域页内标签（判据见 docs/SETTINGS-CHANGE-GATES.md「准入记录」）")
+
+        for name in sorted(DOMAINS_WITH_ONE_GROUP & set(groups)):
+            assert groups[name] == 1, (
+                f"「{name}」已不是单组域（{groups[name]} 组）：请更新 DOMAINS_WITH_ONE_GROUP 快照")
+        stale = DOMAINS_WITH_ONE_GROUP - set(groups)
+        assert not stale, f"快照里的 {sorted(stale)} 已不在侧栏：请更新 DOMAINS_WITH_ONE_GROUP"
+    finally:
+        dialog.close()

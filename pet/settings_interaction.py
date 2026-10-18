@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""设置页「互动」域：页内任务标签（点击与音效 / 自言自语 / 天气 / 抽签）+ 本域全部设置行。
+"""设置页「互动」域：页内任务标签（点击与音效 / 自言自语 / 天气 / 趣味）+ 本域全部设置行。
 
 **为什么单独一个模块**：``modern_settings_dialog.py`` 是"上帝对话框"（行数预算
 反复触顶），本域的行定义与页装配搬到这里，收益是双向的——既让互动域长得像
@@ -29,7 +29,7 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from .settings_widgets import SettingRow, SettingsSection, SettingsTabContainer
 
 TAB_KEYS = ("click", "self_talk", "weather", "divination")
-TAB_LABELS = ("点击与音效", "自言自语", "天气", "抽签")
+TAB_LABELS = ("点击与音效", "自言自语", "天气", "趣味")
 
 
 def _page(dialog, title: str, sections: list[tuple[str, list[SettingRow]]]) -> QWidget:
@@ -170,9 +170,12 @@ def build_interaction_domain(dialog) -> QWidget:
     from .settings_weather import build_weather_tab
 
     tabs.addTab(TAB_KEYS[2], TAB_LABELS[2], build_weather_tab(dialog))
-    # 第四个同级任务：抽签（"用户主动拉一次、桌宠给一个结果"，同天气一族）。
-    # 行与控件都由 settings_divination 构建；它是 **页内标签而不是一级域**——
-    # 只有一组的「趣味」一级域按 docs/SETTINGS-CHANGE-GATES.md 的准入不合格。
+    # 第四个同级任务：每日一签（"用户主动拉一次、桌宠给一个结果"，同天气一族）。
+    # **标签名用「趣味」**：她 2026-10-15 的归类要求是「抽签这个功能…归类为趣味」；
+    # 卡片/分组名仍是「抽签」。落地形态是**页内标签而不是一级域**——只有一组的
+    # 「趣味」一级域按 docs/SETTINGS-CHANGE-GATES.md 的准入不合格（新域须 ≥2 稳组，
+    # 且为塞第 11 个域压缩侧栏间距会损害所有域的点击目标）。两者的区别只在容器层级：
+    # 一级域要过准入，页内标签不用——她的归类意图由标签名承载。
     from .settings_divination import build_divination_tab
 
     tabs.addTab(TAB_KEYS[3], TAB_LABELS[3], build_divination_tab(dialog))

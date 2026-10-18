@@ -188,8 +188,12 @@ modern_settings_dialog.py
 
 | 文件 | 预算常量 | 当前预算 | 当前实测 |
 |---|---|---|---|
-| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4632** | 4599 |
-| `pet/modern_settings_dialog.py` | `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` | **2347** | 2347 |
+| `pet/window.py` | `WINDOW_PY_LINE_BUDGET` | **4671** | 4529 |
+| `pet/modern_settings_dialog.py` | `MODERN_SETTINGS_DIALOG_PY_LINE_BUDGET` | **2535** | 2535 |
+
+（2026-10-17 按实测校正：原表写 4632 / 2347 是更早分支的快照，`tests/test_architecture.py`
+里的常量与文件实测都已前进。**这张表只是快照，真值以测试常量为准**——改预算后记得回来
+同步这一行，否则本表会再次漂移。）
 
 **触发预算时的正确动作（优先级从高到低）**：
 
